@@ -1,0 +1,21 @@
+# Top-level gitignore for the repository
+
+# VS Code settings
+.vscode/
+*.code-workspace
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Virtual envs
+venv/
+env/
+.venv/
+
+# pytest cache
+.pytest_cache/
+
+# OS
+Thumbs.db
+*.DS_Store
