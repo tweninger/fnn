@@ -7,7 +7,7 @@ matplotlib.use("Agg")  # headless rendering for CI
 import matplotlib.pyplot as plt
 import pytest
 
-# 👇 Adjust this import to your actual module (e.g., from graphs import ...)
+# Adjust this import to your actual module (e.g., from graphs import ...)
 from interactionfields.graphs import (
     build_graph,
     _BUILDERS,
@@ -20,7 +20,7 @@ def deg(A: sp.csr_matrix) -> np.ndarray:
 
 def is_same_adj(A: sp.csr_matrix, B: sp.csr_matrix) -> bool:
     A = A.tocsr(); B = B.tocsr()
-    return (A.shape == B.shape) and ((A != B).nnz == 0)
+    return (A.shape == B.shape) and (A - B.nnz == 0)
 
 def test_grid_degrees_small_square():
     # 4x4 grid (no wrap)
@@ -287,7 +287,7 @@ def test_small_world_beta_one_edge_count_and_mean_degree():
 
 def test_multilayer_mismatched_sizes_raises():
     # first layer 3x3 (N=9), second 4x4 (N=16) -> should assert/fail
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         build_graph("multilayer_from",
                     base_kind="grid",
                     layers=2,
