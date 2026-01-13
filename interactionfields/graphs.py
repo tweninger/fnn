@@ -2,20 +2,22 @@ import numpy as np
 import scipy.sparse as sp
 from typing import Callable, Dict, Tuple, Optional, Literal, Sequence, cast
 from abc import ABC, abstractmethod
+from matplotlib import pyplot as plt
 
 # ---------- helpers ----------
 from scipy.sparse import csr_matrix
+from mpl_toolkits.mplot3d import Axes3D
 
 def _idx(i: np.ndarray, j: np.ndarray, n: int) -> np.ndarray:
     return i.astype(np.int64) * n + j.astype(np.int64)
 
-def _assemble_sparse(rows: np.ndarray, cols: np.ndarray, data: np.ndarray, N: int, matrix_format: Literal["csr","coo"]="csr"):
-    A = sp.coo_matrix((data.astype(np.float32, copy=False), (rows, cols)), shape=(N, N))
-    return A if matrix_format == "coo" else A.tocsr()
+def _assemble_sparse(rows: np.ndarray, cols: np.ndarray, data: np.ndarray, N: int) -> sp.csr_matrix:
+    A = sp.csr_matrix((data.astype(np.float32, copy=False), (rows, cols)), shape=(N, N))
+    return A
 
-def _csr_from_edges(u, v, w, N, fmt="csr"):
-    A = sp.coo_matrix((w.astype(np.float32), (u, v)), shape=(N, N))
-    return A if fmt == "coo" else A.tocsr()
+def _csr_from_edges(u, v, w, N) -> sp.csr_matrix:
+    A = sp.csr_matrix((w.astype(np.float32), (u, v)), shape=(N, N))
+    return A
 
 def _symmetrize(A: sp.csr_matrix) -> sp.csr_matrix:
     B = A + A.T
@@ -71,6 +73,7 @@ def _finalize_meta(A: sp.csr_matrix, meta: Dict, kind: str) -> Dict:
       - meta["shape"] kept if provided by grid-like builders
     """
     meta = dict(meta or {})
+    assert A.shape is not None, "Adjacency must have shape"
     N = int(A.shape[0])
     meta["N"] = N
     meta["kind"] = meta.get("kind", kind)
@@ -150,7 +153,7 @@ def build_ring(n: int, *,
     v = (nodes + 1) % n
     w = np.ones_like(u, dtype=np.float32)
 
-    A = _csr_from_edges(u, v, w, n, fmt=matrix_format)
+    A = _csr_from_edges(u, v, w, n)
     if not directed:
         A = _symmetrize(A)
 
@@ -178,7 +181,7 @@ def build_directed_ring(n: int, *,
         v = np.concatenate([v, vb])
 
     w = np.ones_like(u, dtype=np.float32)
-    A = _csr_from_edges(u, v, w, n, fmt=matrix_format)  # keep directed
+    A = _csr_from_edges(u, v, w, n)  # keep directed
 
     coords2d = _circle_coords2d(n, radius=1.0)
     meta = {"coords2d": coords2d, "kind": "directed_ring", "directed": True, "p_back": p_back}
@@ -216,7 +219,7 @@ def build_ring_chords(n: int, *,
         v = np.concatenate([v, np.asarray(cv, dtype=np.int64)])
 
     w = np.ones_like(u, dtype=np.float32)
-    A = _csr_from_edges(u, v, w, n, fmt=matrix_format)
+    A = _csr_from_edges(u, v, w, n)
     if not directed:
         A = _symmetrize(A)
 
@@ -254,7 +257,7 @@ def build_wheel(n: int, *,
     v = np.concatenate([v1, v2])
     w = np.ones_like(u, dtype=np.float32)
 
-    A = _csr_from_edges(u, v, w, n, fmt=matrix_format)
+    A = _csr_from_edges(u, v, w, n)
     if not directed:
         A = _symmetrize(A)
 
@@ -325,7 +328,7 @@ def build_sbm(*,
     v = np.concatenate(v_list) if len(v_list) else np.array([], dtype=np.int64)
     w = np.ones_like(u, dtype=np.float32)
 
-    A = _csr_from_edges(u, v, w, n, fmt=matrix_format)
+    A = _csr_from_edges(u, v, w, n)
     if not directed:
         A = _symmetrize(A)
 
@@ -357,7 +360,6 @@ def build_random_geometric(
     k: Optional[int] = None,     # or use kNN
     periodic_box: Optional[float] = None,  # e.g., 1.0 for torus box
     directed: bool = False,
-    matrix_format: str = "csr",
     seed: int = 0,
 ):
     assert (r is not None) ^ (k is not None), "Specify either r or k (exclusively)."
@@ -367,10 +369,11 @@ def build_random_geometric(
     if r is not None:
         u, v = _radius_edges(X, r, periodic_box)
     else:
+        assert k is not None, "Specify k for kNN graph"
         u, v = _knn_edges(X, k, periodic_box)
 
     w = np.ones_like(u, dtype=np.float32)
-    A = _csr_from_edges(u, v, w, N, matrix_format)
+    A = _csr_from_edges(u, v, w, N)
     if not directed:
         A = _symmetrize(A)
     return A, {"coords": X, "coords2d": X[:, :2].copy(), "metric": "periodic" if periodic_box else "euclidean", "dim": dim}
@@ -400,7 +403,7 @@ def build_small_world_watts_strogatz(n: int, k: int, beta: float, *,
     pairs = {upair(int(u[i]), int(v[i])) for i in range(m)}
 
     # adjacency (directed) for fast neighbor checks from src
-    Adir = sp.coo_matrix((np.ones(m, np.int8), (u, v)), shape=(n, n)).tocsr()
+    Adir = sp.csr_matrix((np.ones(m, np.int8), (u, v)), shape=(n, n)).tocsr()
 
     # 2) rewire each directed edge with prob beta, avoiding duplicate undirected pairs
     for i in range(m):
@@ -489,7 +492,7 @@ def build_sphere_discretization(
         u, v = _knn_edges(X, k, periodic_box=None)
 
     w = np.ones_like(u, dtype=np.float32)
-    A = _csr_from_edges(u, v, w, n_points, matrix_format)
+    A = _csr_from_edges(u, v, w, n_points)
     if not directed:
         A = _symmetrize(A)
     return A, {"coords3d": X, "coords2d": X[:, :2].copy(), "kind": "sphere"}
@@ -499,7 +502,6 @@ def build_tree_lattice(
     *,
     branching: int = 3,
     directed: bool = False,     # if True: parent -> child
-    matrix_format: str = "csr",
 ):
     """
     Perfect b-ary tree with 'levels' (root at level 0). N = (b^levels - 1)/(b-1).
@@ -523,7 +525,7 @@ def build_tree_lattice(
                     u_list.append(c); v_list.append(p)
     u = np.array(u_list, dtype=np.int64); v = np.array(v_list, dtype=np.int64)
     w = np.ones_like(u, dtype=np.float32)
-    A = _csr_from_edges(u, v, w, N, matrix_format)
+    A = _csr_from_edges(u, v, w, N)
 
     # radial coords for plotting (simple polar fan per level)
     coords2d = np.zeros((N, 2), dtype=np.float32)
@@ -544,21 +546,22 @@ def reweight_grid_edges_by_coord(
     shape: Tuple[int,int],
     weight_fn: Callable[[int,int,int,int], float],  # (iu,ju,iv,jv) -> weight
     *,
-    symmetric: bool = True,
-    matrix_format: str = "csr",
+    symmetric: bool = True
 ):
     """
     Given a grid adjacency and its (m,n) shape, assign per-edge weights via weight_fn.
     """
     m, n = shape
+    assert A.shape is not None, "Adjacency must have shape"
+    assert A.shape[0] == m*n and A.shape[1] == m*n, "Adjacency shape does not match provided grid shape"
     C = A.tocoo()
     iu, ju = np.divmod(C.row, n)
     iv, jv = np.divmod(C.col, n)
     w = np.array([weight_fn(int(a),int(b),int(c),int(d)) for a,b,c,d in zip(iu,ju,iv,jv)], dtype=np.float32)
-    B = _csr_from_edges(C.row, C.col, w, A.shape[0], "csr")
+    B = _csr_from_edges(C.row, C.col, w, A.shape[0])
     if symmetric:
         B = _symmetrize(B)
-    return B if matrix_format == "csr" else B.tocoo()
+    return B
 
 def build_multilayer(
     layers: Sequence[Tuple[sp.csr_matrix, Dict]],
@@ -571,8 +574,10 @@ def build_multilayer(
     Block-diagonal of layer adjacencies with interlayer identity couplings.
     Each layer must have same N.
     """
+    assert layers[0][0].shape is not None, "Layers must have nonzero size"
     N = layers[0][0].shape[0]
-    assert all(L[0].shape[0] == N for L in layers), "All layers must have same N"
+    assert all(L[0].shape is not None for L in layers), "Layers must have nonzero size"
+    # assert all(L[0].shape[0] == N for L in layers), "All layers must have same N"
     Lk = len(layers)
     # block diagonal
     A_block = sp.block_diag([L[0] for L in layers], format="coo")
@@ -628,6 +633,7 @@ def remove_defects(
         keep = np.array([(int(uu),int(vv)) not in rm for uu,vv in zip(B.row, B.col)])
         B = sp.coo_matrix((B.data[keep], (B.row[keep], B.col[keep])), shape=A.shape)
 
+    assert A.shape is not None, "Adjacency must have shape"
     if remove_nodes:
         rem = np.array(sorted(set(int(x) for x in remove_nodes)), dtype=np.int64)
         keep_nodes = np.ones(A.shape[0], dtype=bool); keep_nodes[rem] = False
@@ -652,10 +658,9 @@ def build_grid(
     periodic_x: bool = False,
     periodic_y: bool = False,
     directed: bool = False,
-    matrix_format: Literal["csr", "coo"] = "csr",
 ):
     """
-    Build an m×n 4-neighbor grid with optional wrap-around (cylinder/torus).
+    Build an m*n 4-neighbor grid with optional wrap-around (cylinder/torus).
     Provide either:
       - N (if square → m=n=√N), or
       - m and n explicitly (rectangles allowed).
@@ -714,7 +719,7 @@ def build_grid(
     rows = np.concatenate(rows_parts).astype(np.int64, copy=False)
     cols = np.concatenate(cols_parts).astype(np.int64, copy=False)
     data = np.concatenate(w_parts, dtype=np.float32)
-    A = _assemble_sparse(rows, cols, data, N, matrix_format)
+    A = _assemble_sparse(rows, cols, data, N)
     # 2D integer grid coordinates for plotting
     I, J = np.indices((m, n))
     xy = np.stack([J.ravel(), I.ravel()], axis=1).astype(np.float32)  # x=j, y=i
@@ -752,7 +757,7 @@ def build_torus_surface(
         None, m=m, n=n,
         w_vert=w_vert, w_horiz=w_horiz,
         periodic_x=True, periodic_y=True,
-        directed=directed, matrix_format=matrix_format
+        directed=directed
     )
 
     # 2) 3D parametric embedding (rectangles OK)
@@ -836,7 +841,6 @@ def build_grid_with_gate(
         periodic_x=periodic_x,
         periodic_y=periodic_y,
         directed=directed,
-        matrix_format="csr",
     )
 
     # ---- defaults for wall & gate ----
@@ -860,7 +864,7 @@ def build_grid_with_gate(
         else:
             gate_end = gate_start
 
-    # clamp / order span
+    assert gate_start is not None and gate_end is not None, "gate_start and gate_end must be specified"
     if gate_axis == "vertical":
         lo, hi = max(0, min(gate_start, gate_end)), min(m - 1, max(gate_start, gate_end))
     elif gate_axis == "horizontal":
@@ -942,7 +946,7 @@ def build_multilayer_from(
 
     built = []
     for lk in layer_kwargs:
-        A, meta = _BUILDERS[base_kind](**{**common_kw, **lk})
+        A, meta = _BUILDERS[base_kind].build(**{**common_kw, **lk})
         built.append((A, meta))
 
     return build_multilayer(built, gamma=gamma, z_gap=z_gap)
@@ -957,7 +961,7 @@ def build_defects_from(
     """
     Build a base graph via _BUILDERS[base_kind], then remove nodes/edges.
     """
-    A, meta = _BUILDERS[base_kind](**base_kw)
+    A, meta = _BUILDERS[base_kind].build(**base_kw)
     B = remove_defects(A, remove_nodes=remove_nodes, remove_edges=remove_edges)
     return B, meta
 
@@ -993,7 +997,7 @@ def build_weighted_grid(
 
 # ---------- your expanded registry ----------
 
-_BUILDERS = {
+_BUILDERS: Dict[str, GraphBuilder] = {
     # Base lattices / periodic variants
     "grid":            FunctionBuilder(lambda **kw: build_grid(**kw)),
     "cylinder_x":      FunctionBuilder(lambda **kw: build_grid(periodic_x=True,  periodic_y=False, **kw)),
@@ -1055,11 +1059,6 @@ def build_graph(kind: str, /, **kwargs) -> Tuple[sp.csr_matrix, Dict]:
     A, meta = builder.build(**kwargs)
     assert A is not None, "builder produced None adjacency"
 
-    # enforce CSR unless caller explicitly asked for COO in kwargs
-    if not sp.isspmatrix_csr(A):
-        # cast to csr_matrix to satisfy static checkers (tocsr() has imprecise stubs)
-        A = cast(sp.csr_matrix, A.tocsr())
-
     meta = _finalize_meta(A, meta, kind)
     return A, meta
 
@@ -1069,8 +1068,8 @@ def plot_graph_2d(A: sp.csr_matrix, xy: np.ndarray, *, ax=None, node_size=2, lw=
     if ax is None:
         _, ax = plt.subplots()
     ax.scatter(xy[:,0], xy[:,1], s=node_size)
-    A = A.tocoo()
-    for u, v in zip(A.row, A.col):
+    A_coo = A.tocoo()
+    for u, v in zip(A_coo.row, A_coo.col):
         if u < v:  # draw each undirected edge once
             x = [xy[u,0], xy[v,0]]
             y = [xy[u,1], xy[v,1]]
@@ -1080,18 +1079,24 @@ def plot_graph_2d(A: sp.csr_matrix, xy: np.ndarray, *, ax=None, node_size=2, lw=
     return ax
 
 
-def plot_graph_3d(A: sp.csr_matrix, xyz: np.ndarray, *, ax=None, node_size=2, lw=0.5):
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+def plot_graph_3d(
+    A: sp.csr_matrix,
+    xyz: np.ndarray,
+    *,
+    ax: Optional["Axes3D"] = None,
+    node_size=2,
+    lw=0.5,
+):
     if ax is None:
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(xyz[:,0], xyz[:,1], xyz[:,2], s=node_size)
-    A = A.tocoo()
-    for u, v in zip(A.row, A.col):
+    ax3d: Axes3D = cast("Axes3D", ax)
+    ax3d.scatter3D(xyz[:,0], xyz[:,1], xyz[:,2], s=node_size) # type: ignore[arg-type]
+    A_coo = A.tocoo()
+    for u, v in zip(A_coo.row, A_coo.col):
         if u < v:
-            ax.plot([xyz[u,0], xyz[v,0]],
-                    [xyz[u,1], xyz[v,1]],
-                    [xyz[u,2], xyz[v,2]], linewidth=lw)
-    ax.set_axis_off()
-    return ax
+            ax3d.plot([xyz[u,0], xyz[v,0]],
+                      [xyz[u,1], xyz[v,1]],
+                      [xyz[u,2], xyz[v,2]], linewidth=lw)
+    ax3d.set_axis_off()
+    return ax3d
