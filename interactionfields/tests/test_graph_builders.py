@@ -11,7 +11,6 @@ import pytest
 from interactionfields.graphs import (
     build_graph,
     _BUILDERS,
-    plot_graph_2d,
 )
 
 def deg(A: sp.csr_matrix) -> np.ndarray:
