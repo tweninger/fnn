@@ -83,6 +83,7 @@ def simulate_event_stream(
 
     # ---- fill faucet center if needed
     if dyn_kind == "faucet" and dyn_kwargs.get("center_idx", None) is None:
+        assert A0.shape is not None, "Substrate adjacency must have shape"
         N = int(A0.shape[0])
         m = meta.get("m", None)
         n = meta.get("n", None)
@@ -94,10 +95,7 @@ def simulate_event_stream(
         dyn_kwargs = dict(dyn_kwargs)
         dyn_kwargs["center_idx"] = center_idx
 
-    bins = run_simulator(dyn_kind, adj=A0, t_bins=t_bins, **dyn_kwargs)
-    # some sims may return (bins, states)
-    if isinstance(bins, tuple):
-        bins = bins[0]
+    bins, _H, _meta_list = run_simulator(dyn_kind, adj=A0, t_bins=t_bins, **dyn_kwargs)
 
     events_uvt = csr_bins_to_uvt(bins, dt=dt, t0=0.0)
     return A0, meta, events_uvt
@@ -227,8 +225,8 @@ def jaccard_edges(E1: set[Tuple[int, int]], E2: set[Tuple[int, int]]) -> float:
 
 def degree_rank_spearman(G1: nx.Graph, G2: nx.Graph) -> float:
     nodes = np.array(sorted(set(G1.nodes()) | set(G2.nodes())), dtype=np.int64)
-    d1 = np.array([G1.degree(int(n)) for n in nodes], dtype=float)
-    d2 = np.array([G2.degree(int(n)) for n in nodes], dtype=float)
+    d1 = np.array([G1.degree(int(n)) for n in nodes], dtype=float) # pyright: ignore[reportCallIssue]
+    d2 = np.array([G2.degree(int(n)) for n in nodes], dtype=float) # pyright: ignore[reportCallIssue]
 
     def rankdata(x: np.ndarray) -> np.ndarray:
         order = np.argsort(x, kind="mergesort")
@@ -386,6 +384,7 @@ class Row:
 
 def _nx_from_substrate(A0: csr_matrix, directed: bool = True) -> nx.Graph:
     G0 = nx.DiGraph() if directed else nx.Graph()
+    assert A0.shape is not None, "Substrate adjacency must have shape"
     N = A0.shape[0]
     G0.add_nodes_from(range(N))
     coo = A0.tocoo()
@@ -410,6 +409,7 @@ def run_experiment(
 ) -> pd.DataFrame:
 
     rng = np.random.default_rng(seed)
+    assert A0.shape is not None, "Substrate adjacency must have shape"
     N = int(A0.shape[0])
     G_sub = _nx_from_substrate(A0, directed=True)
 
@@ -542,7 +542,7 @@ def plot_all(df: pd.DataFrame, outdir: str, metric: str = "auc") -> None:
     d2 = df.dropna(subset=["jacc_prev"])
     if len(d2) > 0:
         specs = sorted(d2["spec"].unique().tolist())
-        data = [d2.loc[d2["spec"] == sp, "jacc_prev"].to_numpy() for sp in specs]
+        data = [np.asarray(d2.loc[d2["spec"] == sp, "jacc_prev"]) for sp in specs]
         plt.figure(figsize=(12, max(4, 0.25 * len(specs))))
         plt.boxplot(data, vert=False, tick_labels=specs, showfliers=False)
         plt.xlabel("Edge Jaccard vs previous time (within construction)")
@@ -690,6 +690,7 @@ def main():
 
                 # faucet center_idx convenience
                 if dyn_kind == "faucet" and dyn_kwargs.get("center_idx", None) is None:
+                    assert A0.shape is not None, "Substrate adjacency must have shape"
                     N = int(A0.shape[0])
                     m = meta.get("m", None)
                     n = meta.get("n", None)

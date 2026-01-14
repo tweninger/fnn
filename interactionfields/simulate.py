@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Callable, Dict, List, Tuple, Optional, Literal, Sequence
+from typing import Any, Callable, Dict, List, Tuple, Optional, Literal, Sequence
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.sparse import csr_matrix, coo_matrix, diags, issparse
 
 __all__ = [
@@ -17,7 +18,6 @@ __all__ = [
     "simulate_threshold",
     "simulate_voter",
     "simulate_transport",
-    "simulate_source_sink_transport",
     "simulate_hawkes_edges",
 ]
 
@@ -39,6 +39,7 @@ def _csr_degree(adj: csr_matrix) -> np.ndarray:
 
 def _bfs_hops_csr(adj: csr_matrix, src: int) -> np.ndarray:
     """Hop distances (0,1,2,...) from src on an unweighted CSR graph."""
+    assert adj.shape is not None
     N = adj.shape[0]
     dist = np.full(N, np.iinfo(np.int32).max, dtype=np.int32)
     dist[src] = 0
@@ -60,6 +61,7 @@ def _undirected_edge_list(adj: csr_matrix) -> Tuple[np.ndarray, np.ndarray]:
     """
     indptr = adj.indptr
     indices = adj.indices
+    assert adj.shape is not None
     N = adj.shape[0]
     uu, vv = [], []
     for u in range(N):
@@ -79,7 +81,7 @@ def _edges_to_bin(u: np.ndarray, v: np.ndarray, N: int) -> csr_matrix:
     if u.size == 0:
         return csr_matrix((N, N), dtype=np.uint8)
     data = np.ones(u.size, dtype=np.uint8)
-    A = coo_matrix((data, (u.astype(np.int32), v.astype(np.int32))), shape=(N, N), dtype=np.uint8).tocsr()
+    A = csr_matrix((data, (u.astype(np.int32), v.astype(np.int32))), shape=(N, N), dtype=np.uint8)
     A.data[:] = 1
     return A
 
@@ -96,6 +98,7 @@ def _normalized_laplacian(adj: csr_matrix) -> csr_matrix:
     L_sym = I - D^{-1/2} A D^{-1/2}, eigenvalues in [0, 2].
     For isolated nodes, we define D^{-1/2}=0 (standard).
     """
+    assert adj.shape is not None
     N = adj.shape[0]
     deg = _csr_degree(adj)
     with np.errstate(divide='ignore'):
@@ -108,6 +111,7 @@ def _estimate_lmax_power(L: csr_matrix, iters: int = 40, seed: int = 0) -> float
     Power iteration estimate of largest eigenvalue (Rayleigh quotient).
     Returns at least a tiny floor to avoid division by zero.
     """
+    assert L.shape is not None
     N = L.shape[0]
     rng = np.random.default_rng(seed)
     x = rng.standard_normal(N)
@@ -138,29 +142,28 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 # =============================================================================
 
 SimulatorBins = List[csr_matrix]
-SimulatorReturn = Tuple[SimulatorBins, Optional[np.ndarray], Optional[List[Dict]]]
+SimulatorMeta = List[Dict[str, Any]]
+SimulatorReturn = Tuple[SimulatorBins, np.ndarray, SimulatorMeta]
 
 SIMULATORS: Dict[str, Callable[..., SimulatorReturn]] = {}
 
 
-def run_simulator(kind: str, /, **kwargs) -> SimulatorReturn:
-    """Dispatch to a registered graph-time simulator and normalize returns.
+def _empty_states(N: int) -> np.ndarray:
+    return np.zeros((0, N), dtype=np.float64)
 
-    Return shape is always `(bins, H_or_None, meta_list_or_None)` for static clarity.
-    """
+
+def _empty_meta_list(t_bins: int) -> SimulatorMeta:
+    return [{} for _ in range(t_bins)]
+
+
+def run_simulator(kind: str, /, **kwargs) -> SimulatorReturn:
+    """Dispatch to a registered graph-time simulator with a fixed return shape."""
     if kind not in SIMULATORS:
         raise ValueError(f"Unknown simulator '{kind}'. Available: {sorted(SIMULATORS)}")
     res = SIMULATORS[kind](**kwargs)
-    
-    # Normalize common runtime variants to canonical 3-tuple
-    if isinstance(res, tuple):
-        if len(res) == 1:
-            return res[0], None, None
-        if len(res) == 2:
-            return res[0], res[1], None
-        return res[0], res[1], res[2]
-    # single non-tuple result (treat as bins)
-    return res, None, None
+    if not isinstance(res, tuple) or len(res) != 3:
+        raise TypeError(f"Simulator '{kind}' must return (bins, H, meta_list)")
+    return res
 
 # =============================================================================
 # Simulator 1: Faucet-driven outward ring
@@ -187,10 +190,11 @@ def simulate_faucet_on_graph(
     kill_tau: float = 1.0,
     seed: int = 0,
     debug_every: int = 0,
-) -> List[csr_matrix] | Tuple[List[csr_matrix], np.ndarray]:
+) -> SimulatorReturn:
     adj = _as_square_csr(adj)
     rng = np.random.default_rng(seed)
-    N = adj.shape[0]
+    assert adj.shape is not None
+    N = int(adj.shape[0])
 
     dist = _bfs_hops_csr(adj, center_idx)
     reachable = dist < np.iinfo(np.int32).max
@@ -205,12 +209,15 @@ def simulate_faucet_on_graph(
     out_v = np.where(d_u < d_v, und_v, und_u).astype(np.int32)
     avg_d = 0.5 * (d_u + d_v).astype(np.float64)
 
+    Ls: Optional[NDArray[np.float64]] = None
+    h: Optional[NDArray[np.float64]] = None
+    v_half: Optional[NDArray[np.float64]] = None
     pulses = np.arange(0, t_bins, max(1, faucet_period), dtype=int)
     def global_fade(r: float) -> float:
         over = max(0.0, r - (maxhop - kill_margin))
         return float(np.exp(- (over / max(1e-8, kill_tau)) ** 2))
 
-    H_list: Optional[List[np.ndarray]] = [] if return_states else None
+    H_list: List[NDArray[np.float64]] = []
     if return_states:
         h = np.zeros(N, dtype=np.float64)
         v_half = np.zeros(N, dtype=np.float64)
@@ -218,8 +225,8 @@ def simulate_faucet_on_graph(
         # normalized L scaled to ~spectral radius 1
         L = _normalized_laplacian(adj)
         lam_max = _estimate_lmax_power(L)
-        Ls = L * (1.0 / lam_max)
-        sigma = c * dt
+        Ls = (L * (1.0 / lam_max)).tocsr()
+        sigma = float(c) * float(dt)
         if sigma > 1.5:
             print(f"[warn] c*dt={sigma:.3f} is high; consider c*dt ≤ 1.5 for stability")
 
@@ -260,21 +267,25 @@ def simulate_faucet_on_graph(
                         g_t += _ricker_pulse(t, int(t0), f)
             s[center_idx] = faucet_kick * g_t
 
-            a = -(c * c) * (Ls @ h) - (mass * mass) * h - gamma * v_half - nu * (Ls @ v_half) + s
-            v_half = v_half + dt * a
-            h = h + dt * v_half
+            assert Ls is not None and h is not None and v_half is not None
+            a = -(float(c) * float(c)) * (Ls @ h)
+            a += -(float(mass) * float(mass)) * h
+            a += -float(gamma) * v_half
+            a += -float(nu) * (Ls @ v_half)
+            a += s
+            v_half = v_half + float(dt) * a
+            h = h + float(dt) * v_half
 
             if debug_every and (t % debug_every == 0):
                 e_lap = np.linalg.norm(Ls @ h)
                 print(f"[t={t:04d}] ||h||={np.linalg.norm(h):.3g}  ||v||={np.linalg.norm(v_half):.3g}  "
-                      f"c^2||Lh||={(c * c) * e_lap:.3g}")
+                      f"c^2||Lh||={(float(c) * float(c)) * e_lap:.3g}")
 
             H_list.append(h.copy())
 
-    if return_states:
-        H = np.stack(H_list, axis=0) if H_list else np.zeros((0, N), dtype=np.float64)
-        return csr_bins, H
-    return csr_bins
+    H = np.stack(H_list, axis=0) if return_states else _empty_states(N)
+    meta_list = _empty_meta_list(t_bins)
+    return csr_bins, H, meta_list
 
 SIMULATORS["faucet"] = simulate_faucet_on_graph
 
@@ -294,8 +305,9 @@ def simulate_waves_on_graph(
     grad_threshold: float = 0.2,
     dt: float | None = None,
     seed: int = 0,
-) -> List[csr_matrix]:
+) -> SimulatorReturn:
     adj = _as_square_csr(adj)
+    assert adj.shape is not None
     N = adj.shape[0]
     rng = np.random.default_rng(seed)
     deg = _csr_degree(adj)
@@ -306,8 +318,8 @@ def simulate_waves_on_graph(
     und_u, und_v = _undirected_edge_list(adj)
     E = und_u.size
 
-    h = rng.normal(0.0, 0.1, size=N)
-    v = np.zeros(N, dtype=np.float64)
+    h: NDArray[np.float64] = np.asarray(rng.normal(0.0, 0.1, size=N), dtype=np.float64)
+    v: NDArray[np.float64] = np.zeros(N, dtype=np.float64)
 
     csr_bins: List[csr_matrix] = []
 
@@ -336,7 +348,9 @@ def simulate_waves_on_graph(
 
         csr_bins.append(_edges_to_bin(u, v2, N))
 
-    return csr_bins
+    H = _empty_states(N)
+    meta_list = _empty_meta_list(t_bins)
+    return csr_bins, H, meta_list
 
 SIMULATORS["waves"] = simulate_waves_on_graph
 
@@ -585,7 +599,7 @@ def simulate_field_dynamics(
     init_scale: float = 0.1,
     return_states: bool = True,
     seed: int = 0,
-) -> Tuple[List[csr_matrix], np.ndarray, List[Dict]]:
+) -> SimulatorReturn:
     """
     Generic node-field simulator that can cover:
       - impulse / chirp / multi-source / moving source (via forcing_kind)
@@ -596,6 +610,7 @@ def simulate_field_dynamics(
     """
     adj = _as_square_csr(adj)
     rng = np.random.default_rng(seed)
+    assert adj.shape is not None
     N = adj.shape[0]
     deg = _csr_degree(adj)
 
@@ -627,12 +642,12 @@ def simulate_field_dynamics(
     )
 
     # init
-    x = rng.normal(0.0, float(init_scale), size=N).astype(np.float64)
-    v = np.zeros(N, dtype=np.float64)  # only used for wave
+    x: NDArray[np.float64] = np.asarray(rng.normal(0.0, float(init_scale), size=N), dtype=np.float64)
+    v: NDArray[np.float64] = np.zeros(N, dtype=np.float64)  # only used for wave
 
     bins: List[csr_matrix] = []
     H_list: List[np.ndarray] = []
-    meta_list: List[Dict] = []
+    meta_list: SimulatorMeta = []
 
     for t in range(t_bins):
         s, meta = forcing_fn(t)
@@ -674,7 +689,7 @@ def simulate_field_dynamics(
         if return_states:
             H_list.append(x.copy())
 
-    H = np.stack(H_list, axis=0) if return_states else np.zeros((0, N), dtype=np.float64)
+    H = np.stack(H_list, axis=0) if return_states else _empty_states(N)
     return bins, H, meta_list
 
 # Convenience names (register a few common “do the thing” presets)
@@ -746,23 +761,24 @@ def simulate_sis(
     init_infected: float = 0.02,
     seed: int = 0,
     return_states: bool = True,
-) -> Tuple[List[csr_matrix], np.ndarray]:
+) -> SimulatorReturn:
     """
     SIS on nodes. Edge events are transmissions u->v when u infected and v becomes infected.
     State H is infection indicator (0/1).
     """
     adj = _as_square_csr(adj)
     rng = np.random.default_rng(seed)
+    assert adj.shape is not None
     N = adj.shape[0]
     indptr, indices = adj.indptr, adj.indices
 
-    infected = (rng.random(N) < float(init_infected))
+    infected: NDArray[np.bool_] = np.asarray(rng.random(N) < float(init_infected), dtype=bool)
     bins: List[csr_matrix] = []
     H_list: List[np.ndarray] = []
 
     for _ in range(t_bins):
         # recoveries
-        rec = infected & (rng.random(N) < float(mu))
+        rec = infected & np.asarray(rng.random(N) < float(mu), dtype=bool)
         infected[rec] = False
 
         # infections driven by infected neighbors
@@ -793,8 +809,9 @@ def simulate_sis(
         if return_states:
             H_list.append(infected.astype(np.float64))
 
-    H = np.stack(H_list, axis=0) if return_states else np.zeros((0, N), dtype=np.float64)
-    return bins, H
+    H = np.stack(H_list, axis=0) if return_states else _empty_states(N)
+    meta_list = _empty_meta_list(t_bins)
+    return bins, H, meta_list
 
 SIMULATORS["sis"] = simulate_sis
 
@@ -807,24 +824,25 @@ def simulate_threshold(
     init_on: float = 0.02,
     seed: int = 0,
     return_states: bool = True,
-) -> Tuple[List[csr_matrix], np.ndarray]:
+) -> SimulatorReturn:
     """
     Complex contagion / threshold cascade.
     Edge events are (u->v) when v activates and u is one of the active neighbors (picked).
     """
     adj = _as_square_csr(adj)
     rng = np.random.default_rng(seed)
+    assert adj.shape is not None
     N = adj.shape[0]
     deg = _csr_degree(adj)
     indptr, indices = adj.indptr, adj.indices
 
-    on = (rng.random(N) < float(init_on))
+    on: NDArray[np.bool_] = np.asarray(rng.random(N) < float(init_on), dtype=bool)
     bins: List[csr_matrix] = []
     H_list: List[np.ndarray] = []
 
     for _ in range(t_bins):
         # optional random off
-        offmask = on & (rng.random(N) < float(mu_off))
+        offmask = on & np.asarray(rng.random(N) < float(mu_off), dtype=bool)
         on[offmask] = False
 
         new_u: List[int] = []
@@ -848,8 +866,9 @@ def simulate_threshold(
         if return_states:
             H_list.append(on.astype(np.float64))
 
-    H = np.stack(H_list, axis=0) if return_states else np.zeros((0, N), dtype=np.float64)
-    return bins, H
+    H = np.stack(H_list, axis=0) if return_states else _empty_states(N)
+    meta_list = _empty_meta_list(t_bins)
+    return bins, H, meta_list
 
 SIMULATORS["threshold"] = simulate_threshold
 
@@ -860,17 +879,18 @@ def simulate_voter(
     init_p: float = 0.5,
     seed: int = 0,
     return_states: bool = True,
-) -> Tuple[List[csr_matrix], np.ndarray]:
+) -> SimulatorReturn:
     """
-    Voter dynamics. Each step, each node copies a random neighbor’s state (if any).
+    Voter dynamics. Each step, each node copies a random neighbor's state (if any).
     Edge events record the copy edge (u->v).
     """
     adj = _as_square_csr(adj)
     rng = np.random.default_rng(seed)
+    assert adj.shape is not None
     N = adj.shape[0]
     indptr, indices = adj.indptr, adj.indices
 
-    x = (rng.random(N) < float(init_p)).astype(np.int8)
+    x: NDArray[np.int8] = np.asarray((rng.random(N) < float(init_p)), dtype=np.int8)
     bins: List[csr_matrix] = []
     H_list: List[np.ndarray] = []
 
@@ -891,8 +911,9 @@ def simulate_voter(
         if return_states:
             H_list.append(x.astype(np.float64)*2.0 - 1.0)  # map {0,1}->{-1,+1}
 
-    H = np.stack(H_list, axis=0) if return_states else np.zeros((0, N), dtype=np.float64)
-    return bins, H
+    H = np.stack(H_list, axis=0) if return_states else _empty_states(N)
+    meta_list = _empty_meta_list(t_bins)
+    return bins, H, meta_list
 
 SIMULATORS["voter"] = simulate_voter
 
@@ -912,18 +933,19 @@ def simulate_transport(
     edge_thresh: float = 0.1,
     edge_sparsity: float = 1e-2,
     return_states: bool = True,
-) -> Tuple[List[csr_matrix], np.ndarray]:
+) -> SimulatorReturn:
     """
     Simple mass transport: x <- x - alpha*Lx  (diffusion-like; approximately conserved without damping).
     Edge events derived from flux (downhill direction).
     """
     adj = _as_square_csr(adj)
     rng = np.random.default_rng(seed)
+    assert adj.shape is not None
     N = adj.shape[0]
     deg = _csr_degree(adj)
     und_u, und_v = _undirected_edge_list(adj)
 
-    x = rng.normal(0.0, float(init_scale), size=N).astype(np.float64)
+    x: NDArray[np.float64] = np.asarray(rng.normal(0.0, float(init_scale), size=N), dtype=np.float64)
 
     bins: List[csr_matrix] = []
     H_list: List[np.ndarray] = []
@@ -944,8 +966,9 @@ def simulate_transport(
         if return_states:
             H_list.append(x.copy())
 
-    H = np.stack(H_list, axis=0) if return_states else np.zeros((0, N), dtype=np.float64)
-    return bins, H
+    H = np.stack(H_list, axis=0) if return_states else _empty_states(N)
+    meta_list = _empty_meta_list(t_bins)
+    return bins, H, meta_list
 
 SIMULATORS["transport"] = simulate_transport
 
@@ -962,7 +985,7 @@ def simulate_hawkes_edges(
     beta: float = 0.25,       # decay per step (lambda <- (1-beta)*lambda + ...)
     neighbor_coupling: float = 0.15,  # excitation spreads to edges sharing a node
     seed: int = 0,
-) -> List[csr_matrix]:
+) -> SimulatorReturn:
     """
     Very simple discrete-time Hawkes on *undirected* edges, sampled each bin.
     - Each undirected edge e has intensity lam_e.
@@ -971,12 +994,14 @@ def simulate_hawkes_edges(
     """
     adj = _as_square_csr(adj)
     rng = np.random.default_rng(seed)
+    assert adj.shape is not None
     N = adj.shape[0]
     und_u, und_v = _undirected_edge_list(adj)
     E = und_u.size
 
     if E == 0:
-        return [csr_matrix((N, N), dtype=np.uint8) for _ in range(t_bins)]
+        bins = [csr_matrix((N, N), dtype=np.uint8) for _ in range(t_bins)]
+        return bins, _empty_states(N), _empty_meta_list(t_bins)
 
     # build incidence: edges incident to node
     incident: List[List[int]] = [[] for _ in range(N)]
@@ -1018,6 +1043,6 @@ def simulate_hawkes_edges(
                     if ee != e:
                         lam[ee] += float(neighbor_coupling) * float(alpha)
 
-    return bins
+    return bins, _empty_states(N), _empty_meta_list(t_bins)
 
 SIMULATORS["hawkes_edges"] = simulate_hawkes_edges

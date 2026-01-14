@@ -56,9 +56,11 @@ def test_faucet_bins_only_shapes_and_types():
     A, meta = _make_small_grid(6)
     center = (meta["shape"][0] // 2) * meta["shape"][1] + (meta["shape"][1] // 2)
     T = 50
-    bins = run_simulator(
+    bins, H, meta_list = run_simulator(
         "faucet", adj=A, t_bins=T, center_idx=center, faucet_period=10, return_states=False, seed=123
     )
+    assert H.size == 0
+    assert isinstance(meta_list, list) and len(meta_list) == T
     assert isinstance(bins, list) and len(bins) == T
     for B in bins:
         assert isinstance(B, sp.csr_matrix)
@@ -69,11 +71,12 @@ def test_faucet_with_states_history_shape():
     A, meta = _make_small_grid(5)
     center = (meta["shape"][0] // 2) * meta["shape"][1] + (meta["shape"][1] // 2)
     T = 40
-    bins, H = simulate_faucet_on_graph(
+    bins, H, meta_list = simulate_faucet_on_graph(
         adj=A, t_bins=T, center_idx=center, faucet_period=8, return_states=True, seed=0
     )
     assert isinstance(bins, list) and len(bins) == T
     assert isinstance(H, np.ndarray) and H.shape == (T, A.shape[0])
+    assert isinstance(meta_list, list) and len(meta_list) == T
 
 def test_faucet_edges_oriented_outward_when_present():
     A, meta = _make_small_grid(6)
@@ -81,7 +84,7 @@ def test_faucet_edges_oriented_outward_when_present():
     center = (meta["shape"][0] // 2) * meta["shape"][1] + (meta["shape"][1] // 2)
     dist = _bfs_hops_csr(A, center)
     T = 60
-    bins = simulate_faucet_on_graph(
+    bins, _H, _meta = simulate_faucet_on_graph(
         adj=A, t_bins=T, center_idx=center, faucet_period=6, seed=1, return_states=False
     )
     # All nonzero entries (u,v) in any bin should satisfy dist[u] < dist[v]
@@ -93,8 +96,8 @@ def test_faucet_edges_oriented_outward_when_present():
 def test_faucet_seeding_is_deterministic():
     A, meta = _make_small_grid(5)
     center = (meta["shape"][0] // 2) * meta["shape"][1] + (meta["shape"][1] // 2)
-    bins1 = simulate_faucet_on_graph(adj=A, t_bins=30, center_idx=center, seed=7)
-    bins2 = simulate_faucet_on_graph(adj=A, t_bins=30, center_idx=center, seed=7)
+    bins1, _H1, _meta1 = simulate_faucet_on_graph(adj=A, t_bins=30, center_idx=center, seed=7)
+    bins2, _H2, _meta2 = simulate_faucet_on_graph(adj=A, t_bins=30, center_idx=center, seed=7)
     # Compare nonzero patterns per bin
     for B1, B2 in zip(bins1, bins2):
         assert (B1 != B2).nnz == 0
@@ -113,7 +116,9 @@ def test_faucet_stability_warning(capsys):
 def test_waves_bins_sparse_and_uint8():
     A, _ = _make_small_grid(6)
     T = 40
-    bins = run_simulator("waves", adj=A, t_bins=T, seed=123, dt=0.25)
+    bins, H, meta_list = run_simulator("waves", adj=A, t_bins=T, seed=123, dt=0.25)
+    assert H.size == 0
+    assert isinstance(meta_list, list) and len(meta_list) == T
     assert len(bins) == T
     # At least one bin should have some activity, and dtype/shape correct
     nnzs = [b.nnz for b in bins]
@@ -126,8 +131,8 @@ def test_waves_bins_sparse_and_uint8():
 def test_waves_seeding_deterministic():
     A, _ = _make_small_grid(6)
     T = 30
-    bins1 = simulate_waves_on_graph(adj=A, t_bins=T, seed=5)
-    bins2 = simulate_waves_on_graph(adj=A, t_bins=T, seed=5)
+    bins1, _H1, _meta1 = simulate_waves_on_graph(adj=A, t_bins=T, seed=5)
+    bins2, _H2, _meta2 = simulate_waves_on_graph(adj=A, t_bins=T, seed=5)
     for B1, B2 in zip(bins1, bins2):
         assert (B1 != B2).nnz == 0
 
@@ -135,14 +140,14 @@ def test_waves_seeding_deterministic():
 
 def test_empty_graph_yields_empty_bins():
     A = sp.csr_matrix((4, 4), dtype=np.float32)
-    bins = simulate_waves_on_graph(adj=A, t_bins=5, seed=0)
+    bins, _H, _meta = simulate_waves_on_graph(adj=A, t_bins=5, seed=0)
     for B in bins:
         assert B.nnz == 0
         assert B.shape == (4, 4)
 
 def test_single_node_graph():
     A = sp.csr_matrix((1, 1), dtype=np.float32)
-    bins = simulate_waves_on_graph(adj=A, t_bins=3, seed=0)
+    bins, _H, _meta = simulate_waves_on_graph(adj=A, t_bins=3, seed=0)
     assert len(bins) == 3
     assert all(B.nnz == 0 for B in bins)
 
@@ -182,7 +187,7 @@ def test_faucet_runs_and_shapes(kind, kwargs, check_orient):
     center = _pick_center(meta, default=0)
     T = 40
 
-    bins = run_simulator("faucet", adj=A, t_bins=T,
+    bins, _H, _meta = run_simulator("faucet", adj=A, t_bins=T,
                          center_idx=center, faucet_period=max(6, T//8), seed=7)
     assert isinstance(bins, list) and len(bins) == T
     for B in bins:
@@ -204,8 +209,8 @@ def test_faucet_seed_determinism_all_graphs():
         A, meta = build_graph(kind, **kwargs)
         center = _pick_center(meta, default=0)
         T = 25
-        bins1 = simulate_faucet_on_graph(adj=A, t_bins=T, center_idx=center, seed=11)
-        bins2 = simulate_faucet_on_graph(adj=A, t_bins=T, center_idx=center, seed=11)
+        bins1, _H1, _meta1 = simulate_faucet_on_graph(adj=A, t_bins=T, center_idx=center, seed=11)
+        bins2, _H2, _meta2 = simulate_faucet_on_graph(adj=A, t_bins=T, center_idx=center, seed=11)
         for B1, B2 in zip(bins1, bins2):
             assert (B1 != B2).nnz == 0
 
@@ -213,7 +218,7 @@ def test_faucet_seed_determinism_all_graphs():
 def test_waves_runs_and_has_activity(kind, kwargs, _):
     A, _meta = build_graph(kind, **kwargs)
     T = 50
-    bins = run_simulator("waves", adj=A, t_bins=T, seed=5)
+    bins, _H, _meta = run_simulator("waves", adj=A, t_bins=T, seed=5)
     assert isinstance(bins, list) and len(bins) == T
     # shapes/dtypes and at least one active bin
     any_nz = False
@@ -228,8 +233,8 @@ def test_waves_seed_determinism_all_graphs():
     for kind, kwargs, _ in GRAPH_CASES:
         A, _ = build_graph(kind, **kwargs)
         T = 30
-        bins1 = simulate_waves_on_graph(adj=A, t_bins=T, seed=123)
-        bins2 = simulate_waves_on_graph(adj=A, t_bins=T, seed=123)
+        bins1, _H1, _meta1 = simulate_waves_on_graph(adj=A, t_bins=T, seed=123)
+        bins2, _H2, _meta2 = simulate_waves_on_graph(adj=A, t_bins=T, seed=123)
         for B1, B2 in zip(bins1, bins2):
             assert (B1 != B2).nnz == 0
 
@@ -242,8 +247,8 @@ def test_multilayer_shape_and_determinism():
                           z_gap=1.0,
                           layer_kwargs=[{"m":6,"n":6}, {"m":6,"n":6}])
     T = 20
-    bins1 = run_simulator("waves", adj=A, t_bins=T, seed=9)
-    bins2 = run_simulator("waves", adj=A, t_bins=T, seed=9)
+    bins1, _H1, _meta1 = run_simulator("waves", adj=A, t_bins=T, seed=9)
+    bins2, _H2, _meta2 = run_simulator("waves", adj=A, t_bins=T, seed=9)
     assert A.shape == (72, 72)  # 2 * 6*6
     for B1, B2 in zip(bins1, bins2):
         assert (B1 != B2).nnz == 0

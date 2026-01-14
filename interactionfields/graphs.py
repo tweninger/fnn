@@ -622,8 +622,7 @@ def remove_defects(
     *,
     remove_nodes: Optional[Sequence[int]] = None,
     remove_edges: Optional[Sequence[Tuple[int,int]]] = None,
-    matrix_format: str = "csr",
-):
+) -> sp.csr_matrix:
     """
     Delete nodes/edges from any base graph (useful for pinning/removing).
     """
@@ -645,7 +644,7 @@ def remove_defects(
         old_to_new[np.where(keep_nodes)[0]] = np.arange(keep_nodes.sum(), dtype=np.int64)
         row = old_to_new[row]; col = old_to_new[col]
         B = sp.coo_matrix((dat, (row, col)), shape=(keep_nodes.sum(), keep_nodes.sum()))
-    return B if matrix_format == "csr" else B.tocoo()
+    return sp.csr_matrix(B)
 
 # ---------- base grid (periodicity toggles -> line, cylinder, torus) ----------
 def build_grid(

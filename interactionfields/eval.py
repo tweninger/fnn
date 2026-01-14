@@ -710,7 +710,7 @@ def rollout_if_nodes_self(
     *,
     T: int,
     h0: Optional[torch.Tensor],
-    mem0_sparse: Optional[torch.Tensor],
+    mem0_sparse: torch.Tensor,
     hazard_tau: Optional[Union[float, List[float], np.ndarray]] = None,  # scalar or per-timestep τ̂
     reduce_mode: str = "sym",
 ) -> Tuple[np.ndarray, List[List[Tuple[int, int]]], List[torch.Tensor], torch.Tensor]:
@@ -812,8 +812,14 @@ def rollout_if_nodes_self(
 @torch.no_grad()
 def rollout_node_head(node_head: torch.nn.Module, u_in: np.ndarray, x0: np.ndarray) -> np.ndarray:
     """Simulate the NodeHeadLinear block forward in time given input drive u_in."""
-    u = torch.tensor(u_in, dtype=torch.float32, device=node_head.L.device)
-    x_t = torch.tensor(x0, dtype=torch.float32, device=node_head.L.device)
+    param = next(node_head.parameters(), None)
+    if param is None:
+        buf = next(node_head.buffers(), None)
+        device = buf.device if buf is not None else torch.device("cpu")
+    else:
+        device = param.device
+    u = torch.tensor(u_in, dtype=torch.float32, device=device)
+    x_t = torch.tensor(x0, dtype=torch.float32, device=device)
     T, _ = u.shape
     out = []
     for t in range(T):
@@ -914,6 +920,7 @@ class temporary_b0_shift:
             self.theta.b0.copy_(self._orig + self.shift)
 
     def __exit__(self, exc_type, exc, tb):
+        assert self._orig is not None
         with torch.no_grad():
             self.theta.b0.copy_(self._orig)
 
@@ -957,12 +964,12 @@ def make_labels_for_risk_sets(y_bins_csr: Sequence[csr_matrix], risk_sets: Seque
     return labels
 
 def probs_from_lambda_list(
-    lambda_list: List[Union[np.ndarray, Tensor]],
+    lambda_list: Sequence[np.ndarray | Tensor],
     *,
     dt: float = 1.0,
     tau: Union[float, List[float], np.ndarray] = 1.0,
     clip: Tuple[float, float] = (1e-6, 1.0 - 1e-6),
-    out_dtype: np.dtype = np.float32,
+    out_dtype: np.dtype = np.dtype(np.float32)
 ) -> List[np.ndarray]:
     """
     Convert hazards λ to probabilities p = 1 - exp(-τ * λ * dt) per time step.
@@ -981,7 +988,7 @@ def probs_from_lambda_list(
     dt = float(dt)
 
     # normalize tau → np.ndarray if sequence
-    if np.isscalar(tau):
+    if isinstance(tau, (int, float, np.floating)):
         tau_arr = None
         tau_scalar = float(tau)
     else:
@@ -993,7 +1000,7 @@ def probs_from_lambda_list(
         tau_scalar = None
 
     for t, lam_t in enumerate(lambda_list):
-        lam = _to_numpy_1d(lam_t, dtype=np.float64)
+        lam = _to_numpy_1d(lam_t, dtype=np.dtype(np.float32))
         lam = np.clip(lam, 0.0, None)
 
         scale = tau_scalar if tau_arr is None else float(tau_arr[t])
@@ -1012,7 +1019,7 @@ def _unpack_risk_set(
     # (u, v)
     if isinstance(risk_t, tuple) and len(risk_t) == 2:
         u, v = risk_t
-        return _to_numpy_1d(u, dtype=np.int64), _to_numpy_1d(v, dtype=np.int64)
+        return _to_numpy_1d(u, dtype=np.dtype(np.float64)), _to_numpy_1d(v, dtype=np.dtype(np.float32))
 
     # ndarray/Tensor (K,2)
     if isinstance(risk_t, (np.ndarray, torch.Tensor)):
@@ -1025,7 +1032,7 @@ def _unpack_risk_set(
         if len(risk_t) == 0:
             return np.empty((0,), dtype=np.int64), np.empty((0,), dtype=np.int64)
         u, v = zip(*risk_t)
-        return _to_numpy_1d(u, dtype=np.int64), _to_numpy_1d(v, dtype=np.int64)
+        return _to_numpy_1d(u, dtype=np.dtype(np.float32)), _to_numpy_1d(v, dtype=np.dtype(np.float32))
 
     return np.empty((0,), dtype=np.int64), np.empty((0,), dtype=np.int64)
 
@@ -1048,7 +1055,7 @@ def align_tau_to_length(
             - "repeat":   tile cyclically (ok if τ is seasonal)
             - "interp":   linear resample to length T (smooth)
     """
-    if np.isscalar(tau):
+    if isinstance(tau, (int, float, np.floating)):
         return float(tau)
 
     a = np.asarray(tau, dtype=np.float64).ravel()
@@ -1122,7 +1129,7 @@ def _fit_hazard_temperature(
     def expected_rate(tau: float) -> float:
         exp_cnt, total = 0.0, 0.0
         for lam_t in lambda_list_train:
-            lam = _to_numpy_1d(lam_t, dtype=np.float64)
+            lam = _to_numpy_1d(lam_t, dtype=np.dtype(np.float64))
             if lam.size == 0:
                 continue
             p = 1.0 - np.exp(-np.clip(lam, 0.0, None) * tau * dt_hazard)
@@ -1172,7 +1179,7 @@ def bins_from_probs(prob_list, risk_sets, N: int) -> List[csr_matrix]:
             continue
 
         # probs -> flat float array on CPU
-        p = _to_numpy_1d(p_t, dtype=np.float64)  # shape (P,)
+        p = _to_numpy_1d(p_t, dtype=np.dtype(np.float64))  # shape (P,)
         # Allow column vectors etc.
         p = p.reshape(-1)
 
@@ -1209,7 +1216,7 @@ def aggregate_edge_metrics_over_horizon(
     *,
     is_prob: bool = False,
     k=None, k_frac=0.05
-) -> Dict[str, float]:
+) -> Dict[str, float | str | None]:
     """
     Concatenate scores/labels over steps [0..horizon-1] and compute metrics.
     If is_prob=True, 'scores' are probabilities and we report brier/logloss/pred_rate.
@@ -1392,7 +1399,8 @@ def _build_and_calibrate_linear(theta, cfg, y_train, num_nodes, device, dt_grid,
                             grid: Tuple[float, ...]) -> Tuple[float, float]:
         U_tr_in_t = torch.tensor(U_tr_in, dtype=torch.float32, device=device)
         ridge = 1e-12
-        best, best_key = None, None
+        best: Optional[Tuple[float, float]] = None
+        best_key: Optional[Tuple[float, float]] = None
         for dt in grid:
             X_unit_tr = rollout_linear_driven(L, U_tr_in_t, x0=None, dt=float(dt))
             Xu = X_unit_tr
@@ -1401,8 +1409,12 @@ def _build_and_calibrate_linear(theta, cfg, y_train, num_nodes, device, dt_grid,
             den = (Xu * Xu).sum().item() + ridge
             gamma = float(np.clip(num / den, 0.0, 5.0))
             m = eval_rollout(X_tr_true, (gamma * Xu.detach().cpu().numpy()), var_ref=None)
-            key = (m["node_corr_median"], -m["nmse"])
-            if (best is None) or (key > best_key):
+            nmse = m.get("nmse")
+            node_corr = m.get("node_corr_median")
+            if nmse is None or node_corr is None:
+                continue
+            key = (float(node_corr), -float(nmse))
+            if best_key is None or key > best_key:
                 best, best_key = (float(dt), float(gamma)), key
         assert best is not None
         return best[0], best[1]
@@ -1451,7 +1463,7 @@ def _calibrate_if_hazards(theta, cfg, y_train, y_holdout):
     train_labels = make_labels_for_risk_sets(y_train, risk_sets_train)
 
     iso = None
-    def _apply_iso(x): return x
+    _apply_iso = lambda x: x
     try:
         from sklearn.isotonic import IsotonicRegression
         if np.unique(np.concatenate(train_labels)).size >= 2:
@@ -1459,8 +1471,7 @@ def _calibrate_if_hazards(theta, cfg, y_train, y_holdout):
                 np.concatenate([p.ravel() for p in train_probs_raw]),
                 np.concatenate([y.ravel() for y in train_labels]).astype(float),
             )
-            def _apply_iso(ps_list: List[np.ndarray]) -> List[np.ndarray]:
-                return [iso.transform(p.ravel()).reshape(p.shape) for p in ps_list]
+            _apply_iso = lambda ps_list: [iso.transform(p.ravel()).reshape(p.shape) for p in ps_list]
     except Exception:
         iso = None
 
@@ -1550,10 +1561,14 @@ def _calibrate_if_free_tail(theta, cfg, y_train, x_train_true, num_nodes, device
                 if L2 <= 0 or not np.isfinite(Xc).all():
                     continue
                 m = eval_rollout(Y[:L2], Xc[:L2], var_ref=None)
+                nmse = m.get("nmse")
+                node_corr = m.get("node_corr_median", 0.0)
+                if nmse is None or node_corr is None:
+                    continue
                 # small penalty for large betas
                 beta_med = float(np.median(np.abs(calib["beta"])))
-                key = (-m["nmse"] - 1e-3 * beta_med, m.get("node_corr_median", 0.0))
-                if (best is None) or (key > best_key):
+                key = (-float(nmse) - 1e-3 * beta_med, float(node_corr))
+                if best_key is None or key > best_key:
                     best, best_key = (float(dt), float(g), calib), key
     finally:
         cfg.dt = dt_saved
@@ -1777,8 +1792,8 @@ def _static_adj_from_train(y_train: List[csr_matrix], N: int, spec: StaticGraphS
 
 def _prep_neighbors(A: csr_matrix):
     """Cache neighbor lists for CN/AA."""
-    A = A.tocsr()
     nbrs = []
+    assert A.shape is not None, "Adjacency matrix must have known shape"
     for i in range(A.shape[0]):
         nbrs.append(A.indices[A.indptr[i]:A.indptr[i+1]])
     deg = np.asarray(A.sum(axis=1)).ravel()
@@ -1825,10 +1840,10 @@ def _score_katz_on_pairs(A: csr_matrix, pairs: List[Pair], beta: float = 0.01, m
       l=2 => (A^2)[u,v]
       l=3 => (A^3)[u,v]
     """
-    A = A.tocsr().astype(np.float64)
+    A = A.astype(np.float64)
     # precompute A^2, A^3 (ok for small/medium N; if huge, we’ll replace later)
-    A2 = (A @ A).tocsr()
-    A3 = (A2 @ A).tocsr() if max_iter >= 3 else None
+    A2 = (A @ A)
+    A3 = (A2 @ A) if max_iter >= 3 else None
 
     out = np.zeros(len(pairs), dtype=np.float64)
     for k, (u, v) in enumerate(pairs):

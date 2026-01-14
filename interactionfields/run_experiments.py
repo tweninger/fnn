@@ -45,6 +45,12 @@ class ExperimentSpec:
     simulator_kwargs: dict
 
 def seed_everything(seed: int) -> None:
+    """
+    Set RNG seeds for numpy, Python, and torch for reproducibility.
+
+    :param seed: Seed value used for all RNGs.
+    :type seed: int
+    """
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
@@ -238,15 +244,7 @@ def run_one(
             # # leave to caller if not present.
             pass
 
-    sim_out = run_simulator(sim_kind, **sim_kw)
-
-    # normalize outputs to (event_bins, H_opt)
-    if isinstance(sim_out, tuple) and len(sim_out) >= 2:
-        event_bins = sim_out[0]
-        H = sim_out[1]
-    else:
-        event_bins = sim_out
-        H = None
+    event_bins, H, _sim_meta = run_simulator(sim_kind, **sim_kw)
 
     # Ensure `event_bins` is a sized, indexable sequence for len()/slicing.
     # If it's an iterator/generator, coerce to list; if already list/tuple/ndarray, keep as-is.
@@ -264,7 +262,7 @@ def run_one(
     # 5) optional viz (only if grid-ish and we have states)
     outdir = _make_outdir(out_root, profile.name, exp.name, seed)
 
-    if do_quick_viz and (frame_kwargs is not None) and (H is not None):
+    if do_quick_viz and (frame_kwargs is not None) and (H.size > 0):
         # Keep your existing plotting call pattern
         plot_rollout(
             variants={"sim": {"X": H, "edges": event_bins}},
@@ -314,17 +312,17 @@ def run_one(
 
 if __name__ == "__main__":
     # Choose "speedy" for fast debugging, "dev" for medium work, "eval" for actual runs.
-    profile_name = "speedy"
-    profile = SIZE_PROFILES.get(profile_name, SIZE_PROFILES["dev"])
+    profile_name: str = "speedy"
+    profile: SizeProfile = SIZE_PROFILES.get(profile_name, SIZE_PROFILES["dev"])
 
     seed = int(os.environ.get("IFT_SEED", "123"))
     out_root = os.environ.get("IFT_OUT", "exports_suite")
 
     # global knobs
-    dt_grid = (0.5, 1.0, 2.0, 3.0)
-    ema_alpha = 0.2
+    dt_grid: Tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
+    ema_alpha: float = 0.2
 
-    suite = build_experiment_suite(profile, seed=seed)
+    suite: List[ExperimentSpec] = build_experiment_suite(profile, seed=seed)
 
     # Run all experiments
     for exp in suite:
