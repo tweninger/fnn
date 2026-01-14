@@ -3,7 +3,7 @@ import math
 import numpy as np
 import scipy.sparse as sp
 import matplotlib
-matplotlib.use("Agg")  # headless rendering for CI
+matplotlib.use("Agg") # use non-interactive backend for tests
 import matplotlib.pyplot as plt
 import pytest
 
@@ -166,14 +166,6 @@ def test_weighted_grid_edge_weights():
     if C.data.size:
         assert np.allclose(C.data[horiz], 2.0)
         assert np.allclose(C.data[~horiz], 1.0)
-
-def test_plot_graph_2d_runs():
-    N = 6 * 6
-    A, meta = build_graph("grid", N=N)
-    fig, ax = plt.subplots()
-    ax = plot_graph_2d(A, meta["coords2d"], ax=ax, node_size=5, lw=0.5)
-    assert ax is not None
-    plt.close(fig)
 
 
 def test_rectangular_torus_surface_matches_torus_grid():

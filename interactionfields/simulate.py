@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Tuple, Optional, Literal, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.sparse import csr_matrix, coo_matrix, diags, issparse
+from scipy.sparse import csr_matrix, diags, issparse
 
 __all__ = [
     "run_simulator",
@@ -524,9 +524,6 @@ def _edges_from_field(
 
     min_edges = int(min_edges)
     min_edges = max(0, min(min_edges, E))
-
-    if mode == "flux" and rng.random() < 1e-6:
-        print("min_edges=", min_edges)
 
     if mode == "grad":
         g = np.abs(x[und_u] - x[und_v])

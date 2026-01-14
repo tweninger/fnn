@@ -609,8 +609,8 @@ def main():
     SEEDS = list(range(10))
 
     graph_options = [
-        ("torus_surface", {"m": 30, "n": 30, "directed": True, "matrix_format": "csr"}),
-        # ("grid", {"N": 900, "m": 30, "n": 30, "periodic_x": True, "periodic_y": True, "directed": True, "matrix_format": "csr"}),
+        ("torus_surface", {"m": 30, "n": 30, "directed": True}),
+        # ("grid", {"N": 900, "m": 30, "n": 30, "periodic_x": True, "periodic_y": True, "directed": True}),
         # ("grid_with_gate", {"m": 30, "n": 30, ...}),
     ]
 

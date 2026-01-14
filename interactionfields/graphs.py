@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
-from typing import Callable, Dict, Tuple, Optional, Literal, Sequence
+from typing import Callable, Dict, Tuple, Optional, Literal, Sequence, List
 from abc import ABC, abstractmethod
 from scipy.sparse import csr_matrix
 
@@ -104,7 +104,7 @@ def _finalize_meta(A: sp.csr_matrix, meta: Dict, kind: str) -> Dict:
     return meta
 
 
-# ---------- builder abstraction (runtime enforcement) ----------
+# ---------- builder abstraction ----------
 class GraphBuilder(ABC):
     """Abstract graph-builder interface.
 
@@ -135,15 +135,10 @@ class FunctionBuilder(GraphBuilder):
         if A is None:
             raise RuntimeError(f"graph builder {getattr(self._fn, '__name__', repr(self._fn))} returned adjacency None")
         return A, meta
-
-
-
-
-# ---------- canonical visual graphs ----------
+    
 
 def build_ring(n: int, *,
-               directed: bool = False,
-               matrix_format: str = "csr") -> Tuple[sp.csr_matrix, Dict]:
+               directed: bool = False) -> Tuple[sp.csr_matrix, Dict]:
     nodes = np.arange(n, dtype=np.int64)
     u = nodes
     v = (nodes + 1) % n
@@ -160,7 +155,6 @@ def build_ring(n: int, *,
 
 def build_directed_ring(n: int, *,
                         p_back: float = 0.0,
-                        matrix_format: str = "csr",
                         seed: int = 0) -> Tuple[sp.csr_matrix, Dict]:
     # directed i -> i+1, optional sparse back edges
     rng = np.random.default_rng(seed)
@@ -188,7 +182,6 @@ def build_ring_chords(n: int, *,
                       n_chords: int = 4,
                       chord_span: Optional[int] = None,
                       directed: bool = False,
-                      matrix_format: str = "csr",
                       seed: int = 0) -> Tuple[sp.csr_matrix, Dict]:
     rng = np.random.default_rng(seed)
 
@@ -232,8 +225,7 @@ def build_ring_chords(n: int, *,
 
 def build_wheel(n: int, *,
                 hub: int = 0,
-                directed: bool = False,
-                matrix_format: str = "csr") -> Tuple[sp.csr_matrix, Dict]:
+                directed: bool = False) -> Tuple[sp.csr_matrix, Dict]:
     if n < 4:
         raise ValueError("wheel needs n>=4")
     hub = int(hub)
@@ -269,7 +261,6 @@ def build_sbm(*,
               p_out: float = 0.02,
               P: Optional[np.ndarray] = None,
               directed: bool = False,
-              matrix_format: str = "csr",
               seed: int = 0) -> Tuple[sp.csr_matrix, Dict]:
     rng = np.random.default_rng(seed)
 
@@ -346,8 +337,6 @@ def build_sbm(*,
     }
     return A, meta
 
-
-# ---------- 3. Random graphs with geometry ----------
 def build_random_geometric(
     N: int,
     *,
@@ -376,7 +365,6 @@ def build_random_geometric(
 
 def build_small_world_watts_strogatz(n: int, k: int, beta: float, *,
                                      directed: bool = False,
-                                     matrix_format: str = "csr",
                                      seed: int = 0):
     import numpy as np
     import scipy.sparse as sp
@@ -451,14 +439,7 @@ def build_small_world_watts_strogatz(n: int, k: int, beta: float, *,
     # coords for plotting
     theta = 2 * np.pi * np.arange(n) / n
     coords2d = np.stack([np.cos(theta), np.sin(theta)], axis=1).astype(np.float32)
-    return (A if matrix_format == "csr" else A.tocoo()), {"coords2d": coords2d, "kind": "small_world"}
-
-
-
-# ---------- 4. Structured “physics-y” graphs ----------
-# Cylinders/strips: you already get these via your grid:
-#   cylinder_x = build_grid(N, periodic_x=True, periodic_y=False)
-#   cylinder_y = build_grid(N, periodic_x=False, periodic_y=True)
+    return A, {"coords2d": coords2d, "kind": "small_world"}
 
 def build_sphere_discretization(
     n_points: int,
@@ -467,7 +448,6 @@ def build_sphere_discretization(
     r: Optional[float] = None,
     k: Optional[int] = None,
     directed: bool = False,
-    matrix_format: str = "csr",
     seed: int = 0,
 ):
     """
@@ -566,7 +546,6 @@ def build_multilayer(
     *,
     gamma: float = 0.1,   # interlayer coupling between corresponding nodes
     z_gap: float = 1.0,   # for plotting coords
-    matrix_format: str = "csr",
 ):
     """
     Block-diagonal of layer adjacencies with interlayer identity couplings.
@@ -621,7 +600,7 @@ def build_multilayer(
         meta_out = {"coords3d": coords, "layers": Lk, "interlayer_gamma": gamma}
     else:
         meta_out = {"layers": Lk, "interlayer_gamma": gamma}
-    return A_block if matrix_format=="csr" else A_block.tocoo(), meta_out
+    return A_block, meta_out
 
 def remove_defects(
     A: sp.csr_matrix,
@@ -741,7 +720,6 @@ def build_torus_surface(
     R: float = 3.0,
     r0: float = 1.0,
     directed: bool = False,
-    matrix_format: str = "csr",
 ):
     """
     Torus topology = periodic grid in both axes, with 3D torus embedding.
@@ -795,7 +773,6 @@ def build_grid_with_gate(
     periodic_x: bool = False,
     periodic_y: bool = False,
     directed: bool = False,
-    matrix_format: str = "csr",
 ):
     """
     Build an m×n grid with a solid wall that blocks adjacency across it,
@@ -910,10 +887,8 @@ def build_grid_with_gate(
     drop = crosses & (~allowed)
     keep = ~drop
 
-    A_gate = sp.coo_matrix((Acoo.data[keep], (u[keep], v[keep])), shape=A.shape)
-    if matrix_format == "csr":
-        A_gate = A_gate.tocsr()
-
+    A_gate = sp.csr_matrix((Acoo.data[keep], (u[keep], v[keep])), shape=A.shape)
+    
     meta = {
         **meta,
         "shape": (m, n),
@@ -926,10 +901,6 @@ def build_grid_with_gate(
         },
     }
     return A_gate, meta
-
-
-
-# ---------- convenience wrappers that reuse existing builders ----------
 
 def build_multilayer_from(
     base_kind: str,
@@ -959,8 +930,8 @@ def build_multilayer_from(
 def build_defects_from(
     base_kind: str,
     *,
-    remove_nodes: list[int] | None = None,
-    remove_edges: list[tuple[int, int]] | None = None,
+    remove_nodes: List[int] | None = None,
+    remove_edges: List[Tuple[int, int]] | None = None,
     **base_kw
 ):
     """

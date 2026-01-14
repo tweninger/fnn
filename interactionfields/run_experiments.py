@@ -58,7 +58,20 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 def _resolve_center_idx(meta: dict, N: int, *, h: Optional[int], w: Optional[int]) -> int:
-    # Prefer true grid center if shape exists; else fallback to 0.
+    """
+    Prefer true grid center if shape exists; else fallback to 0.
+
+    :param meta: Graph metadata, optionally containing a "shape" tuple (m, n).
+    :type meta: dict
+    :param N: Total number of nodes.
+    :type N: int
+    :param h: Optional grid height if not in meta.
+    :type h: Optional[int]
+    :param w: Optional grid width if not in meta.
+    :type w: Optional[int]
+    :return: Center node index for grid-like graphs; 0 if no grid shape is available.
+    :rtype: int
+    """
     shape = meta.get("shape", None)
     if shape is not None and len(shape) == 2:
         hh, ww = int(shape[0]), int(shape[1])
@@ -68,15 +81,26 @@ def _resolve_center_idx(meta: dict, N: int, *, h: Optional[int], w: Optional[int
     return 0
 
 def _make_outdir(root: str, profile: str, exp_name: str, seed: int) -> str:
+    """
+    Create (if needed) and return the experiment output directory.
+
+    :param root: Base output directory.
+    :type root: str
+    :param profile: Size profile name used in the path.
+    :type profile: str
+    :param exp_name: Experiment name used in the path.
+    :type exp_name: str
+    :param seed: RNG seed used in the path.
+    :type seed: int
+    :return: Full output path for this run.
+    :rtype: str
+    """
     path = os.path.join(root, profile, exp_name, f"seed{seed}")
     os.makedirs(path, exist_ok=True)
     return path
 
-# =============================================================================
-# Your default IF config (centralized)
-# =============================================================================
 
-def make_default_if_config(*, epochs: int) -> "IFConfig":
+def make_default_if_config(*, epochs: int) -> IFConfig:
     return IFConfig(
         mode="diffusion",
         dt=1.0,
@@ -217,7 +241,7 @@ def run_one(
         raise RuntimeError(f"build_graph returned adjacency with shape=None for kind={exp.graph_kind}")
     N = int(shape[0])
 
-    # 2) Choose plotting kwargs (grid-ish kinds only).
+    # 2) Choose plotting kwargs 
     h = profile.h
     w = profile.w
     frame_kwargs = None
