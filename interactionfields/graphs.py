@@ -403,7 +403,9 @@ def build_small_world_watts_strogatz(n: int, k: int, beta: float, *,
     pairs = {upair(int(u[i]), int(v[i])) for i in range(m)}
 
     # adjacency (directed) for fast neighbor checks from src
-    Adir = sp.csr_matrix((np.ones(m, np.int8), (u, v)), shape=(n, n)).tocsr()
+    # use LIL for efficient structural updates during rewiring
+    Adir = sp.lil_matrix((n, n), dtype=np.int8)
+    Adir[u, v] = 1
 
     # 2) rewire each directed edge with prob beta, avoiding duplicate undirected pairs
     for i in range(m):
@@ -416,7 +418,7 @@ def build_small_world_watts_strogatz(n: int, k: int, beta: float, *,
         Adir[src, old_tgt] = 0  # mark removal in pattern
 
         # forbid: self, current out-neighbors of src, and any cand forming existing undirected pair
-        forbid = set(Adir.getrow(src).indices.tolist())
+        forbid = set(int(x) for x in Adir.rows[src])
         forbid.add(src)
 
         # sample until we find an allowed candidate that doesn't create an existing undirected pair
@@ -574,10 +576,18 @@ def build_multilayer(
     Block-diagonal of layer adjacencies with interlayer identity couplings.
     Each layer must have same N.
     """
-    assert layers[0][0].shape is not None, "Layers must have nonzero size"
-    N = layers[0][0].shape[0]
-    assert all(L[0].shape is not None for L in layers), "Layers must have nonzero size"
-    # assert all(L[0].shape[0] == N for L in layers), "All layers must have same N"
+    if not layers:
+        raise ValueError("layers must be non-empty")
+    first_shape = layers[0][0].shape
+    if first_shape is None:
+        raise ValueError("Layers must have nonzero size")
+    N = int(first_shape[0])
+    for A, _meta in layers:
+        shape = A.shape
+        if shape is None:
+            raise ValueError("Layers must have nonzero size")
+        if shape[0] != N:
+            raise ValueError("All layers must have same N")
     Lk = len(layers)
     # block diagonal
     A_block = sp.block_diag([L[0] for L in layers], format="coo")

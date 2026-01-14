@@ -20,7 +20,9 @@ def deg(A: sp.csr_matrix) -> np.ndarray:
 
 def is_same_adj(A: sp.csr_matrix, B: sp.csr_matrix) -> bool:
     A = A.tocsr(); B = B.tocsr()
-    return (A.shape == B.shape) and (A - B.nnz == 0)
+    if A.shape != B.shape:
+        return False
+    return (A - B).nnz == 0
 
 def test_grid_degrees_small_square():
     # 4x4 grid (no wrap)
