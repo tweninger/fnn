@@ -12,7 +12,6 @@ from interactionfields.graphs import (
     build_graph,
     _BUILDERS,
     plot_graph_2d,
-    plot_graph_3d,
 )
 
 def deg(A: sp.csr_matrix) -> np.ndarray:
@@ -177,13 +176,6 @@ def test_plot_graph_2d_runs():
     assert ax is not None
     plt.close(fig)
 
-def test_plot_graph_3d_runs():
-    A, meta = build_graph("torus_surface", m=10, n=12, R=3.0, r0=1.0)
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    ax = plot_graph_3d(A, meta["coords3d"], ax=ax, node_size=3, lw=0.5)
-    assert ax is not None
-    plt.close(fig)
 
 def test_rectangular_torus_surface_matches_torus_grid():
     m, n = 10, 12
@@ -316,11 +308,3 @@ def test_grid_undirected_is_symmetric():
 
 # ========== PLOTTING SHIMS STILL RUN ==========
 
-def test_plot_rectangular_torus_surface_runs():
-    m, n = 10, 12
-    A, meta = build_graph("torus_surface", m=m, n=n, R=3.0, r0=1.0)
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    ax = plot_graph_3d(A, meta["coords3d"], ax=ax, node_size=2, lw=0.5)
-    plt.close(fig)
-    assert ax is not None

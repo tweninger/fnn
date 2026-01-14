@@ -6,7 +6,6 @@ from matplotlib import pyplot as plt
 
 # ---------- helpers ----------
 from scipy.sparse import csr_matrix
-from mpl_toolkits.mplot3d import Axes3D
 
 def _idx(i: np.ndarray, j: np.ndarray, n: int) -> np.ndarray:
     return i.astype(np.int64) * n + j.astype(np.int64)
@@ -1072,40 +1071,44 @@ def build_graph(kind: str, /, **kwargs) -> Tuple[sp.csr_matrix, Dict]:
     return A, meta
 
 # ---------- minimal plotting helpers ----------
-def plot_graph_2d(A: sp.csr_matrix, xy: np.ndarray, *, ax=None, node_size=2, lw=0.5):
+def plot_graph_2d(
+    A: sp.csr_matrix,
+    xy: np.ndarray,
+    *,
+    ax=None,
+    node_size: float = 2,
+    lw: float = 0.5,
+):
+    """
+    Plot a 2D graph embedding with nodes and undirected edges.
+
+    Parameters
+    ----------
+    A : sp.csr_matrix
+        Adjacency matrix (undirected or directed; edges drawn once for u < v).
+    xy : np.ndarray
+        Node coordinates, shape (N, 2).
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to draw into; if None, creates a new figure/axes.
+    node_size : float
+        Marker size for nodes.
+    lw : float
+        Line width for edges.
+    """
     import matplotlib.pyplot as plt
+
     if ax is None:
         _, ax = plt.subplots()
-    ax.scatter(xy[:,0], xy[:,1], s=node_size)
+
+    ax.scatter(xy[:, 0], xy[:, 1], s=node_size)
     A_coo = A.tocoo()
     for u, v in zip(A_coo.row, A_coo.col):
         if u < v:  # draw each undirected edge once
-            x = [xy[u,0], xy[v,0]]
-            y = [xy[u,1], xy[v,1]]
+            x = [xy[u, 0], xy[v, 0]]
+            y = [xy[u, 1], xy[v, 1]]
             ax.plot(x, y, linewidth=lw)
-    ax.set_aspect('equal')
+    ax.set_aspect("equal")
     ax.set_axis_off()
     return ax
 
 
-def plot_graph_3d(
-    A: sp.csr_matrix,
-    xyz: np.ndarray,
-    *,
-    ax: Optional["Axes3D"] = None,
-    node_size=2,
-    lw=0.5,
-):
-    if ax is None:
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-    ax3d: Axes3D = cast("Axes3D", ax)
-    ax3d.scatter3D(xyz[:,0], xyz[:,1], xyz[:,2], s=node_size) # type: ignore[arg-type]
-    A_coo = A.tocoo()
-    for u, v in zip(A_coo.row, A_coo.col):
-        if u < v:
-            ax3d.plot([xyz[u,0], xyz[v,0]],
-                      [xyz[u,1], xyz[v,1]],
-                      [xyz[u,2], xyz[v,2]], linewidth=lw)
-    ax3d.set_axis_off()
-    return ax3d

@@ -92,20 +92,17 @@ def make_default_if_config(*, epochs: int) -> "IFConfig":
         weight_decay=0.0,
     )
 
-# =============================================================================
-# Experiment suite (graphs x dynamics)
-# =============================================================================
-
 def build_experiment_suite(profile: SizeProfile, *, seed: int) -> List[ExperimentSpec]:
     """
-    Clean + visualizable + not-all-grids.
+    Construct the default suite of (graph, simulator) experiment specifications.
+
     Notes:
-      - For non-grid graphs you still pass h,w for plotting only when you have a grid layout.
-      - For ring/sbm/barbell we rely on coords2d in meta; your 3D renderer is grid-based,
-        so you’ll likely keep combined_activity panels for grid-ish kinds and skip for non-grid.
+      - Grid-like graphs use profile.h/profile.w for shape and are compatible with 3D rollout plots.
+      - Non-grid graphs rely on coords2d/coords3d in graph metadata for visualization.
+      - Simulators are chosen to provide diverse dynamics across graph families.
     """
 
-    # ---- Grid family (keeps your current visual pipeline happy) ----
+    # Grid family
     grid_h, grid_w = profile.h, profile.w
 
     suite: List[ExperimentSpec] = [
@@ -152,7 +149,7 @@ def build_experiment_suite(profile: SizeProfile, *, seed: int) -> List[Experimen
             ),
         ),
 
-        # ---- Non-grid but still clean/visualizable (good story for “graphs aren’t given”) ----
+        # Non-grid but still clean/visualizable
         ExperimentSpec(
             name="sbm_sis",
             graph_kind="sbm",
@@ -206,64 +203,54 @@ def run_one(
     ema_alpha: float = 0.2,
     do_quick_viz: bool = True,
 ) -> None:
+    """
+    Run a single experiment end-to-end: build graph, simulate events, train IF, and evaluate.
+
+    Uses profile settings to size the graph, choose train/holdout split, and set epochs.
+    """
     seed_everything(seed)
 
-    # 1) build graph
+    # 1) Build graph.
     A, meta = build_graph(exp.graph_kind, **exp.graph_kwargs)
     shape = getattr(A, "shape", None)
     if shape is None:
         raise RuntimeError(f"build_graph returned adjacency with shape=None for kind={exp.graph_kind}")
     N = int(shape[0])
 
-    # 2) choose plotting kwargs:
-    # For grid-ish kinds, use your make_plot_kwargs.
-    # For non-grid, you may still evaluate without 3D rollout plots.
+    # 2) Choose plotting kwargs (grid-ish kinds only).
     h = profile.h
     w = profile.w
     frame_kwargs = None
     if exp.graph_kind in ("grid", "gate", "torus_surface", "torus_grid", "cylinder_x", "cylinder_y"):
-        # ensure h,w match meta shape if present
+        # Ensure h,w match meta shape if present.
         if "shape" in meta:
             h, w = int(meta["shape"][0]), int(meta["shape"][1])
-        frame_kwargs, anim_kwargs = make_plot_kwargs(exp.graph_kind, h, w, meta, A, z_exaggeration=0.8)
+        frame_kwargs, _anim_kwargs = make_plot_kwargs(exp.graph_kind, h, w, meta, A, z_exaggeration=0.8)
 
-    # 3) run simulator
+    # 3) Run simulator.
     sim_kind = exp.simulator_kind
     sim_kw = dict(exp.simulator_kwargs)  # copy
     sim_kw["adj"] = A
     sim_kw["t_bins"] = int(profile.t_bins)
 
-    # fill center/source/sink defaults if needed
+    # Fill center defaults if needed.
     if sim_kind in ("faucet", "impulse", "chirp", "moving_source", "multi_source"):
         center_idx = _resolve_center_idx(meta, N, h=h, w=w)
-        # faucet uses center_idx; field presets may use forcing_kwargs[center_idx]
+        # Faucet uses center_idx; field presets may use forcing_kwargs[center_idx].
         if sim_kind == "faucet":
             sim_kw.setdefault("center_idx", center_idx)
-        else:
-            # if using simulate_field_dynamics presets it’s usually in forcing_kwargs;
-            # # leave to caller if not present.
-            pass
 
     event_bins, H, _sim_meta = run_simulator(sim_kind, **sim_kw)
 
-    # Ensure `event_bins` is a sized, indexable sequence for len()/slicing.
-    # If it's an iterator/generator, coerce to list; if already list/tuple/ndarray, keep as-is.
-    if not (hasattr(event_bins, "__len__") and hasattr(event_bins, "__getitem__")):
-        event_bins = list(event_bins)
+    # 4) Split train/holdout.
+    cut = int(min(profile.cut, len(event_bins)))
+    edges_train = event_bins[:cut]
+    edges_holdout = event_bins[cut:]
 
-    # mypy/pylance-friendly alias
-    event_bins_seq: Sequence[Any] = event_bins
-
-    # 4) split train/holdout
-    cut = int(min(profile.cut, len(event_bins_seq)))
-    edges_train = event_bins_seq[:cut]
-    edges_holdout = event_bins_seq[cut:]
-
-    # 5) optional viz (only if grid-ish and we have states)
+    # 5) Optional viz (only if grid-ish and we have states).
     outdir = _make_outdir(out_root, profile.name, exp.name, seed)
 
     if do_quick_viz and (frame_kwargs is not None) and (H.size > 0):
-        # Keep your existing plotting call pattern
         plot_rollout(
             variants={"sim": {"X": H, "edges": event_bins}},
             h=h, w=w,
@@ -283,7 +270,7 @@ def run_one(
             frame_kwargs=frame_kwargs,
         )
 
-    # 6) train IF on edges_train
+    # 6) Train IF on edges_train.
     cfg = make_default_if_config(epochs=profile.epochs)
 
     theta, metrics, hist = train_if(edges_train, num_nodes=N, d=2, cfg=cfg, seed=seed)
@@ -295,7 +282,7 @@ def run_one(
 
     print_epoch_history(seed, hist, metrics)
 
-    # 7) evaluation / rollouts
+    # 7) Evaluation / rollouts.
     rollout_eval(
         theta=theta,
         cfg=cfg,
@@ -310,21 +297,30 @@ def run_one(
     )
 
 
-if __name__ == "__main__":
-    # Choose "speedy" for fast debugging, "dev" for medium work, "eval" for actual runs.
-    profile_name: str = "speedy"
+def _main() -> None:
+    """
+    Entry point for running the experiment suite.
+
+    Configuration:
+      - IFT_PROFILE selects a size profile (speedy/dev/eval).
+      - IFT_SEED sets RNG seed.
+      - IFT_OUT sets the output root directory.
+    """
+    # Choose "speedy" for fast debugging, "dev" for medium work, "eval" for full runs.
+    profile_name = os.environ.get("IFT_PROFILE", "speedy")
     profile: SizeProfile = SIZE_PROFILES.get(profile_name, SIZE_PROFILES["dev"])
 
     seed = int(os.environ.get("IFT_SEED", "123"))
     out_root = os.environ.get("IFT_OUT", "exports_suite")
 
-    # global knobs
+    # Global evaluation knobs (rollout calibration grid + EMA smoothing)
     dt_grid: Tuple[float, ...] = (0.5, 1.0, 2.0, 3.0)
     ema_alpha: float = 0.2
 
+    # Build the suite based on the selected profile and seed.
     suite: List[ExperimentSpec] = build_experiment_suite(profile, seed=seed)
 
-    # Run all experiments
+    # Run all experiments (set do_quick_viz=True for per-run plots).
     for exp in suite:
         run_one(
             exp,
@@ -333,5 +329,9 @@ if __name__ == "__main__":
             out_root=out_root,
             dt_grid=dt_grid,
             ema_alpha=ema_alpha,
-            do_quick_viz=False
+            do_quick_viz=False,
         )
+
+
+if __name__ == "__main__":
+    _main()
