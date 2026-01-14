@@ -11,7 +11,8 @@ matplotlib.use("Agg", force=True)
 
 # ── Stdlib / typing ───────────────────────────────────────────────────────────
 from pathlib import Path
-from typing import Tuple, List, Optional, Dict, Any, Literal
+from typing import Tuple, List, Optional, Dict, Any, Literal, cast
+
 
 # ── Third-party ───────────────────────────────────────────────────────────────
 import numpy as np
@@ -19,8 +20,10 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import TwoSlopeNorm, Normalize, ListedColormap
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
 from scipy.sparse import csr_matrix
+from PIL import Image
 
 # =============================================================================
 #                               COLOR HELPERS
@@ -304,13 +307,11 @@ def _upsample_lanczos_scalar(x: np.ndarray, *, h: int, w: int, shape: Tuple[int,
     else:
         raise ValueError(f"Expected 1D or 2D scalar field, got {x.shape}")
 
-    try:
-        from PIL import Image
-    except Exception as e:
-        raise RuntimeError("Install Pillow for Lanczos upsampling: pip install pillow") from e
 
     im = Image.fromarray(x2.astype(np.float32), mode="F")
-    im_hi = im.resize((w, h), resample=Image.LANCZOS)
+    resampling = cast(Any, getattr(Image, "Resampling", Image))
+    resample = resampling.LANCZOS
+    im_hi = im.resize((w, h), resample=resample)
     return np.asarray(im_hi, dtype=np.float32)
 
 def plot_surface_snapshot(
@@ -413,13 +414,10 @@ def plot_rowmean_hovmoller(
 
     # Optional vertical upscaling for smoothness
     if scale_m and scale_m != m:
-        try:
-            from PIL import Image
-            im = Image.fromarray(M.astype(np.float32), mode="F")
-            M = np.asarray(im.resize((T, scale_m), resample=Image.BICUBIC), dtype=np.float32)
-        except Exception:
-            pass  # gracefully skip if Pillow isn't installed
-
+        im = Image.fromarray(M.astype(np.float32), mode="F")
+        resampling = cast(Any, getattr(Image, "Resampling", Image))
+        M = np.asarray(im.resize((T, scale_m), resample=resampling.BICUBIC), dtype=np.float32)
+    
     # Mode over first few steps to anchor the center
     T0 = min(10, T)
     mode_val = _dominant_value(M[:, :T0])
@@ -925,14 +923,15 @@ def draw_frame_3d(
         if E_draw.size:
             segs = build_edge_segments(xyz, E_draw)
             lc = Line3DCollection(segs, linewidths=lws)
-            lc.set_color(edge_rgba)
+            lc.set_color(edge_rgba.tolist())
             ax.add_collection3d(lc)
             _force_projection_depth(lc, +1e9)
 
     # ---- nodes (optional) ----------------------------------------------------
     if show_nodes:
-        sc = ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2],
-                        s=node_size, c=node_rgba, depthshade=True)
+        ax3d = cast("Axes3D", ax)
+        sc = ax3d.scatter(xyz[:, 0], xyz[:, 1], cast(Any, xyz[:, 2]),
+                          s=int(node_size), c=node_rgba, depthshade=True)
         _force_projection_depth(sc, +1e9)  # push behind walls
 
     # ---- limits & aspect -----------------------------------------------------
@@ -1073,9 +1072,11 @@ def animate_3d(
     H = _as_TN(H, (h, w))
     T, N = H.shape
     if t_end is None:
-        t_end = T
+        t_end_int = T
+    else:
+        t_end_int = int(t_end)
     t_start = max(0, int(t_start))
-    t_end = min(T, int(t_end))
+    t_end = min(T, t_end_int)
 
     # ── choose the z-field provider ───────────────────────────────────────────
     if z_field_mode == "data":
@@ -1121,10 +1122,12 @@ def animate_3d(
     if show_nodes:
         node_scalar01 = _squash_white(norm_nodes(H[t_start]), node_white_cut)
         node_rgba = cmap_nodes(node_scalar01)
-        sc = ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], s=node_size, c=node_rgba, depthshade=False)
+        ax3d = cast("Axes3D", ax)
+        sc = ax3d.scatter(xyz[:, 0], xyz[:, 1], cast(Any, xyz[:, 2]),
+                          s=int(node_size), c=node_rgba, depthshade=False)
         sc.set_zorder(2)
         if hasattr(sc, "set_sort_zpos"):
-            sc.set_sort_zpos(-1e9)
+            getattr(sc, "set_sort_zpos")(-1e9)
     else:
         sc = None
 
@@ -1135,7 +1138,7 @@ def animate_3d(
         init_rgba = np.zeros((E_base.shape[0], 4), float)
         init_rgba[:, :3] = 0.5  # placeholder grey; will be set in first update
         init_rgba[:, 3] = alpha_edges
-        lc.set_color(init_rgba)
+        lc.set_color(cast(Any, init_rgba))
         lc.set_zorder(10)
         if hasattr(lc, "set_sort_zpos"):
             lc.set_sort_zpos(+1e9)
@@ -1221,9 +1224,9 @@ def animate_3d(
         print(tt)
         xyz = frame_xyz(tt)
         if sc is not None:
-            sc._offsets3d = (xyz[:, 0], xyz[:, 1], xyz[:, 2])
+            setattr(sc, "_offsets3d", (xyz[:, 0], xyz[:, 1], xyz[:, 2]))
             node_scalar01 = _squash_white(norm_nodes(H[tt]), node_white_cut)
-            sc.set_facecolors(cmap_nodes(node_scalar01))
+            getattr(sc, "set_facecolors")(cmap_nodes(node_scalar01))
 
         if lc is not None:
             # choose edge visuals per mode (uses same helper as draw_frame_3d)
@@ -1246,16 +1249,16 @@ def animate_3d(
             )
             if E_draw.size:
                 segs = build_edge_segments(xyz, E_draw)
-                lc.set_segments(segs)
-                lc.set_linewidths(lws)
+                lc.set_segments(cast(Any, segs))
+                getattr(lc, "set_linewidths")(lws)
                 # colors already computed by _compute_edge_style; just set alpha
                 edge_rgba = edge_rgba.copy()
                 edge_rgba[:, 3] = alpha_edges
-                lc.set_color(edge_rgba)
+                lc.set_color(edge_rgba.tolist())
             else:
                 # nothing to draw this frame
-                lc.set_segments(np.zeros((0, 2, 3)))
-                lc.set_linewidths([])
+                lc.set_segments(cast(Any, np.zeros((0, 2, 3))))
+                getattr(lc, "set_linewidths")([])
                 lc.set_color([])
 
         title.set_text(f"Grid wave — frame t={tt}")
@@ -1326,6 +1329,7 @@ def plot_rollout(
     cm_nodes: str = "seismic",
     cm_edges_activity: str = "Greys",
     cm_edges_residual: str = "seismic",
+    node_white_cut: Tuple[float, float] = (0.45, 0.55),
     node_size: float = 20.0,
     lw_min: float = 1.9,
     lw_max: float = 2.4,
@@ -1391,34 +1395,46 @@ def plot_rollout(
         node_scale_sources = [v["X"] for v in variants.values() if "X" in v]
 
     node_vmin, node_vmax = _robust_minmax(node_scale_sources, 1, 99)
+    cm_nodes = str(cm_nodes)
+    cm_edges_activity = str(cm_edges_activity)
+    cm_edges_residual = str(cm_edges_residual)
+    node_white_cut = (float(node_white_cut[0]), float(node_white_cut[1]))
 
     # --- pass-through geometry/camera knobs ----------------------------------
     frame_kwargs = dict(frame_kwargs or {})
-    geo = dict(
+    geo: Dict[str, Any] = dict(
         xyz_base=frame_kwargs.get("xyz_base"),
         edges_fixed=frame_kwargs.get("edges_fixed"),
-        displace_mode=frame_kwargs.get("displace_mode", "z"),
-        normals_periodic=frame_kwargs.get("normals_periodic", True),
-        z_aspect_mode=frame_kwargs.get("z_aspect_mode", "auto"),
-        min_z_aspect_frac=frame_kwargs.get("min_z_aspect_frac", 0.25),
-        z_exaggeration=z_exaggeration,
-        elev=frame_kwargs.get("elev", 35),
-        azim=frame_kwargs.get("azim", -60),
+        displace_mode=str(frame_kwargs.get("displace_mode", "z")),
+        normals_periodic=bool(frame_kwargs.get("normals_periodic", True)),
+        z_aspect_mode=str(frame_kwargs.get("z_aspect_mode", "auto")),
+        min_z_aspect_frac=float(frame_kwargs.get("min_z_aspect_frac", 0.25)),
+        z_exaggeration=float(z_exaggeration),
+        elev=float(frame_kwargs.get("elev", 35)),
+        azim=float(frame_kwargs.get("azim", -60)),
         wall=frame_kwargs.get("wall"),
     )
 
-    edge_decay = dict(decay_k=decay_k, decay_gamma=decay_gamma, tau_decay=tau_decay, lookback=lookback)
+    edge_decay: Dict[str, Any] = dict(
+        decay_k=decay_k,
+        decay_gamma=decay_gamma,
+        tau_decay=tau_decay,
+        lookback=lookback,
+    )
 
     # --- render per variant ---------------------------------------------------
     for name, pack in variants.items():
-        X = pack["X"]
-        bins = pack["edges"]
+        X = cast(np.ndarray, pack["X"])
+        bins = cast(Optional[List[csr_matrix]], pack.get("edges"))
+        if bins is None:
+            bins = []
+        t_idx = 0 if t is None else int(t)
 
         # Nodes-only (replaces export_nodes_suite)
         if do_nodes_panels:
             out = nodes_dir / f"{name}_nodes_t{t}.png"
             draw_frame_3d(
-                H=X, event_bins=bins, h=h, w=w, t=t, outpath=str(out),
+                H=X, event_bins=bins, h=h, w=w, t=t_idx, outpath=str(out),
                 vmin=node_vmin, vmax=node_vmax,
                 show_nodes=True, show_edges=False,
                 node_cmap=cm_nodes, node_size=node_size, node_alpha=1.0,
@@ -1429,7 +1445,7 @@ def plot_rollout(
         if do_edges_activity:
             out = edges_dir / f"{name}_edges_activity_t{t}.png"
             draw_frame_3d(
-                H=X, event_bins=bins, h=h, w=w, t=t, outpath=str(out),
+                H=X, event_bins=bins, h=h, w=w, t=t_idx, outpath=str(out),
                 vmin=None, vmax=None,  # nodes hidden -> node scale irrelevant
                 show_nodes=False, show_edges=True,
                 edge_mode="activity",
@@ -1443,7 +1459,7 @@ def plot_rollout(
         if do_edges_residual and (reference_edges is not None):
             out = edges_dir / f"{name}_edges_residual_t{t}.png"
             draw_frame_3d(
-                H=X, event_bins=bins, h=h, w=w, t=t, outpath=str(out),
+                H=X, event_bins=bins, h=h, w=w, t=t_idx, outpath=str(out),
                 vmin=None, vmax=None,
                 show_nodes=False, show_edges=True,
                 edge_mode="residual",
@@ -1458,7 +1474,7 @@ def plot_rollout(
         if do_edges_confusion and (reference_edges is not None):
             out = edges_dir / f"{name}_edges_confusion_t{t}.png"
             draw_frame_3d(
-                H=X, event_bins=bins, h=h, w=w, t=t, outpath=str(out),
+                H=X, event_bins=bins, h=h, w=w, t=t_idx, outpath=str(out),
                 vmin=None, vmax=None,
                 show_nodes=False, show_edges=True,
                 edge_mode="confusion",
@@ -1473,7 +1489,7 @@ def plot_rollout(
         if do_combined_activity:
             out = base / f"{name}_frame_t{t}.png"
             draw_frame_3d(
-                H=X, event_bins=bins, h=h, w=w, t=t, outpath=str(out),
+                H=X, event_bins=bins, h=h, w=w, t=t_idx, outpath=str(out),
                 vmin=node_vmin, vmax=node_vmax,
                 show_nodes=True, show_edges=True,
                 node_cmap=cm_nodes, node_size=node_size,
@@ -1489,7 +1505,7 @@ def plot_rollout(
             R = X  # pass X; z geometry comes from reference via z_field_mode="base"
             out = base / f"res_{name}_frame_t{t}.png"
             draw_frame_3d(
-                H=R, event_bins=bins, h=h, w=w, t=t, outpath=str(out),
+                H=R, event_bins=bins, h=h, w=w, t=t_idx, outpath=str(out),
                 vmin=node_vmin, vmax=node_vmax,
                 show_nodes=True, show_edges=False,
                 node_cmap="seismic", node_size=node_size,
@@ -1511,8 +1527,8 @@ def make_plot_kwargs(kind: str,
     def clean(d):
         return {k: v for k, v in (d or {}).items() if v is not None}
 
-    frame = {"z_exaggeration": z_exaggeration}
-    anim  = {"z_exaggeration": z_exaggeration}
+    frame: Dict[str, Any] = {"z_exaggeration": z_exaggeration}
+    anim: Dict[str, Any] = {"z_exaggeration": z_exaggeration}
 
     # ---- 1) torus_surface (your existing special case) ----
     xyz = meta.get("coords3d")

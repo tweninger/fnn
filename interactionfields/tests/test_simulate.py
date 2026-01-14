@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.sparse as sp
 import pytest
+from typing import cast
 
 # 👇 Adjust these imports to your actual module names
 from interactionfields.graphs import build_graph
@@ -25,6 +26,7 @@ def _make_small_grid(nside=6):
 def _bfs_hops_csr(adj: sp.csr_matrix, src: int) -> np.ndarray:
     # Minimal BFS used locally for an orientation check
     from collections import deque
+    assert adj.shape is not None
     N = adj.shape[0]
     dist = np.full(N, np.iinfo(np.int32).max, dtype=np.int32)
     dist[src] = 0
@@ -74,12 +76,14 @@ def test_faucet_with_states_history_shape():
     bins, H, meta_list = simulate_faucet_on_graph(
         adj=A, t_bins=T, center_idx=center, faucet_period=8, return_states=True, seed=0
     )
+    assert A.shape is not None
     assert isinstance(bins, list) and len(bins) == T
     assert isinstance(H, np.ndarray) and H.shape == (T, A.shape[0])
     assert isinstance(meta_list, list) and len(meta_list) == T
 
 def test_faucet_edges_oriented_outward_when_present():
     A, meta = _make_small_grid(6)
+    assert A.shape is not None
     n = A.shape[0]
     center = (meta["shape"][0] // 2) * meta["shape"][1] + (meta["shape"][1] // 2)
     dist = _bfs_hops_csr(A, center)
@@ -100,7 +104,8 @@ def test_faucet_seeding_is_deterministic():
     bins2, _H2, _meta2 = simulate_faucet_on_graph(adj=A, t_bins=30, center_idx=center, seed=7)
     # Compare nonzero patterns per bin
     for B1, B2 in zip(bins1, bins2):
-        assert (B1 != B2).nnz == 0
+        diff = cast(sp.csr_matrix, B1 - B2)
+        assert diff.nnz == 0
 
 def test_faucet_stability_warning(capsys):
     A, meta = _make_small_grid(6)
@@ -134,7 +139,8 @@ def test_waves_seeding_deterministic():
     bins1, _H1, _meta1 = simulate_waves_on_graph(adj=A, t_bins=T, seed=5)
     bins2, _H2, _meta2 = simulate_waves_on_graph(adj=A, t_bins=T, seed=5)
     for B1, B2 in zip(bins1, bins2):
-        assert (B1 != B2).nnz == 0
+        diff = cast(sp.csr_matrix, B1 - B2)
+        assert diff.nnz == 0
 
 # ---------------- Tiny edge cases ----------------
 
@@ -182,6 +188,7 @@ GRAPH_CASES = [
 def test_faucet_runs_and_shapes(kind, kwargs, check_orient):
     A, meta = build_graph(kind, **kwargs)
     A = A.tocsr()
+    assert A.shape is not None
     n = A.shape[0]
     # center: use grid-center when available; else 0 (ok for geometric/sphere/tree)
     center = _pick_center(meta, default=0)
@@ -212,7 +219,8 @@ def test_faucet_seed_determinism_all_graphs():
         bins1, _H1, _meta1 = simulate_faucet_on_graph(adj=A, t_bins=T, center_idx=center, seed=11)
         bins2, _H2, _meta2 = simulate_faucet_on_graph(adj=A, t_bins=T, center_idx=center, seed=11)
         for B1, B2 in zip(bins1, bins2):
-            assert (B1 != B2).nnz == 0
+            diff = cast(sp.csr_matrix, B1 - B2)
+            assert diff.nnz == 0
 
 @pytest.mark.parametrize("kind, kwargs, _", GRAPH_CASES)
 def test_waves_runs_and_has_activity(kind, kwargs, _):
@@ -236,7 +244,8 @@ def test_waves_seed_determinism_all_graphs():
         bins1, _H1, _meta1 = simulate_waves_on_graph(adj=A, t_bins=T, seed=123)
         bins2, _H2, _meta2 = simulate_waves_on_graph(adj=A, t_bins=T, seed=123)
         for B1, B2 in zip(bins1, bins2):
-            assert (B1 != B2).nnz == 0
+            diff = cast(sp.csr_matrix, B1 - B2)
+            assert diff.nnz == 0
 
 def test_multilayer_shape_and_determinism():
     # explicit test to ensure multilayer behaves well
@@ -251,4 +260,5 @@ def test_multilayer_shape_and_determinism():
     bins2, _H2, _meta2 = run_simulator("waves", adj=A, t_bins=T, seed=9)
     assert A.shape == (72, 72)  # 2 * 6*6
     for B1, B2 in zip(bins1, bins2):
-        assert (B1 != B2).nnz == 0
+        diff = cast(sp.csr_matrix, B1 - B2)
+        assert diff.nnz == 0
