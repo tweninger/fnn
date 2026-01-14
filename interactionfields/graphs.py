@@ -1,11 +1,11 @@
 import numpy as np
 import scipy.sparse as sp
-from typing import Callable, Dict, Tuple, Optional, Literal, Sequence, cast
+from typing import Callable, Dict, Tuple, Optional, Literal, Sequence
 from abc import ABC, abstractmethod
-from matplotlib import pyplot as plt
 
 # ---------- helpers ----------
 from scipy.sparse import csr_matrix
+from mpl_toolkits.mplot3d import Axes3D
 
 def _idx(i: np.ndarray, j: np.ndarray, n: int) -> np.ndarray:
     return i.astype(np.int64) * n + j.astype(np.int64)
@@ -1110,5 +1110,3 @@ def plot_graph_2d(
     ax.set_aspect("equal")
     ax.set_axis_off()
     return ax
-
-
