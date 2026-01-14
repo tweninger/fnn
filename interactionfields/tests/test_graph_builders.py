@@ -305,6 +305,3 @@ def test_grid_undirected_is_symmetric():
     m = n = 4
     A, _ = build_graph("grid", m=m, n=n, directed=False)
     assert (A != A.T).nnz == 0
-
-# ========== PLOTTING SHIMS STILL RUN ==========
-
