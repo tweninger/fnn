@@ -10,8 +10,7 @@ from scipy.sparse import csr_matrix, diags, issparse
 __all__ = [
     "run_simulator",
     "SIMULATORS",
-    "simulate_dripping_wave_on_graph",
-    # new
+    "simulate_wave",
     "simulate_field_dynamics",
     "simulate_sis",
     "simulate_threshold",
@@ -177,10 +176,10 @@ def run_simulator(kind: str, /, **kwargs) -> SimulatorReturn:
     return res
 
 # =============================================================================
-# Simulator 1: Dripping wave (edge activations from node field)
+# Simulator 1: Wave (edge activations from node field)
 # =============================================================================
 
-def simulate_dripping_wave(
+def wave_dynamics(
     A_csr,
     *,
     T: int = 1000,
@@ -293,7 +292,7 @@ def simulate_dripping_wave(
 
     return H, E_list
 
-def simulate_dripping_wave_on_graph(
+def simulate_wave(
     adj: csr_matrix,
     t_bins: int,
     *,
@@ -311,12 +310,12 @@ def simulate_dripping_wave_on_graph(
     return_states: bool = True,
 ) -> SimulatorReturn:
     """
-    Wrapper around `simulate_dripping_wave` that returns sparse edge bins.
+    Wrapper around `wave_dynamics` that returns sparse edge bins.
 
     Edge activations are computed from the node field; bins are binarized
     versions of the per-step edge-activation matrices.
     """
-    H, E_list = simulate_dripping_wave(
+    H, E_list = wave_dynamics(
         adj,
         T=int(t_bins),
         dt=float(dt),
@@ -346,7 +345,7 @@ def simulate_dripping_wave_on_graph(
     meta_list = _empty_meta_list(int(t_bins))
     return bins, H_out, meta_list
 
-SIMULATORS["dripping_wave"] = simulate_dripping_wave_on_graph
+SIMULATORS["wave"] = simulate_wave
 
 ForcingKind = Literal["none", "impulse", "ricker_train", "sin", "chirp", "multi_sin", "moving_ricker"]
 ReactionKind = Literal["none", "allen_cahn", "fisher_kpp"]

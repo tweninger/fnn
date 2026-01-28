@@ -140,8 +140,8 @@ def _default_forcing_kwargs(center_idx: int, kind: str) -> Optional[Dict[str, An
 
 def _build_sim_kwargs(sim_kind: str, *, seed: int, center_idx: int) -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {"seed": seed}
-    if sim_kind == "dripping_wave":
-        kwargs["faucet_nodes"] = [center_idx]
+    if sim_kind == "faucet":
+        kwargs["center_idx"] = center_idx
     forcing_kwargs = _default_forcing_kwargs(center_idx, sim_kind)
     if forcing_kwargs is not None:
         kwargs["forcing_kwargs"] = forcing_kwargs
@@ -361,23 +361,18 @@ def _run_one(
     preds = {"if-driven": x_if_driven, "if-free": x_if_free, "if-self": x_if_self}
     node_metrics = _compute_horizon_metrics(x_hold_true, preds, var_ref=var_ref)
 
-    edge_metrics = []
-    edge_metrics_error = None
-    try:
-        eval_summary = rollout_eval(
-            theta=theta,
-            cfg=cfg,
-            y_train=edges_train,
-            y_holdout=edges_holdout,
-            num_nodes=N,
-            ema_alpha=ema_alpha,
-            seed=seed,
-            do_viz=False,
-            frame_kwargs=None,
-        )
-        edge_metrics = eval_summary.get("edge_metrics", [])
-    except Exception as exc:
-        edge_metrics_error = f"{type(exc).__name__}: {exc}"
+    eval_summary = rollout_eval(
+        theta=theta,
+        cfg=cfg,
+        y_train=edges_train,
+        y_holdout=edges_holdout,
+        num_nodes=N,
+        ema_alpha=ema_alpha,
+        seed=seed,
+        do_viz=False,
+        frame_kwargs=None,
+    )
+    edge_metrics = eval_summary.get("edge_metrics", [])
 
     static_metrics = None
     if static_graphs:
@@ -406,7 +401,6 @@ def _run_one(
         "train_metrics": {k: float(v) for k, v in train_metrics.items()},
         "node_metrics": node_metrics,
         "edge_metrics": edge_metrics,
-        "edge_metrics_error": edge_metrics_error,
         "static_graph_metrics": static_metrics,
     }
     with open(metrics_path, "w", encoding="utf-8") as f:
@@ -470,7 +464,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SweepConfig:
     parser.add_argument("--ema-alpha", type=float, default=0.2, help="EMA smoothing for node series.")
     parser.add_argument("--toy", action="store_true", help="Use smaller graphs and fewer bins.")
     parser.add_argument("--static-graphs", action="store_true", help="Include static graph analysis in metrics.json.")
-    parser.add_argument("--static-graphs-full", action="store_true", help="Include full static rows (larger JSON).")
+    parser.add_argument("--static-graphs-full", action="store_true", default=False, help="Include full static rows (larger JSON).")
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.seeds is None:
         seeds = list(range(int(args.seed_start), int(args.seed_start) + int(args.num_seeds)))
