@@ -858,9 +858,9 @@ class IFParameters(nn.Module):
         self.h0 = nn.Parameter(torch.zeros(N, d))
         self.link_name = config.link
 
-        # Buffers that may be registered later by training code (readout calibrators)
-        self.readout_mu: Optional[Tensor] = None
-        self.readout_sig: Optional[Tensor] = None
+        # Buffers registered later by training code (readout calibrators)
+        self.readout_mu: Optional[Tensor]
+        self.readout_sig: Optional[Tensor]
 
         # Optional attention parameters (kept for API compatibility)
         if attention:

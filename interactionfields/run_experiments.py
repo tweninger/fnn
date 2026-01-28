@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import csv
+import json
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Sequence, Any
@@ -100,6 +102,24 @@ def _make_outdir(root: str, profile: str, exp_name: str, seed: int) -> str:
     return path
 
 
+def _append_results_csv(path: str, row: Dict[str, Any]) -> None:
+    """
+    Append a single results row to a CSV file, creating it with headers if needed.
+
+    :param path: CSV file path.
+    :type path: str
+    :param row: Row data to append (flat dict).
+    :type row: Dict[str, Any]
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def make_default_if_config(*, epochs: int) -> IFConfig:
     return IFConfig(
         mode="diffusion",
@@ -131,44 +151,53 @@ def build_experiment_suite(profile: SizeProfile, *, seed: int) -> List[Experimen
 
     suite: List[ExperimentSpec] = [
         ExperimentSpec(
-            name="grid_faucet",
+            name="grid_dripping_wave",
             graph_kind="grid",
             graph_kwargs={"m": grid_h, "n": grid_w},
-            simulator_kind="faucet",
+            simulator_kind="dripping_wave",
             simulator_kwargs=dict(
-                faucet_period=30,
+                dt=0.05,
+                faucet_period=1.0,
+                faucet_amp=1.0,
+                faucet_width=0.08,
+                source_kind="gaussian",
+                edge_activation="absdiff",
+                edge_threshold=0.0,
                 return_states=True,
-                ricker_cycles_per_period=1.4,
-                c=1.5, dt=1.0, mass=0.05, gamma=0.004, nu=0.02, faucet_kick=1.0,
-                kill_margin=1.0, kill_tau=0.2,
                 seed=seed,
             ),
         ),
         ExperimentSpec(
-            name="gate_faucet",
+            name="gate_dripping_wave",
             graph_kind="gate",
             graph_kwargs={"m": grid_h, "n": grid_w, "gate_axis": "vertical"},
-            simulator_kind="faucet",
+            simulator_kind="dripping_wave",
             simulator_kwargs=dict(
-                faucet_period=30,
+                dt=0.05,
+                faucet_period=1.0,
+                faucet_amp=1.0,
+                faucet_width=0.08,
+                source_kind="gaussian",
+                edge_activation="absdiff",
+                edge_threshold=0.0,
                 return_states=True,
-                ricker_cycles_per_period=1.4,
-                c=1.5, dt=1.0, mass=0.05, gamma=0.004, nu=0.02, faucet_kick=1.0,
-                kill_margin=1.0, kill_tau=0.2,
                 seed=seed,
             ),
         ),
         ExperimentSpec(
-            name="torus_surface_faucet",
+            name="torus_surface_dripping_wave",
             graph_kind="torus_surface",
             graph_kwargs={"m": grid_h, "n": grid_w, "R": 3.0, "r0": 1.0},
-            simulator_kind="faucet",
+            simulator_kind="dripping_wave",
             simulator_kwargs=dict(
-                faucet_period=30,
+                dt=0.05,
+                faucet_period=1.0,
+                faucet_amp=1.0,
+                faucet_width=0.08,
+                source_kind="gaussian",
+                edge_activation="absdiff",
+                edge_threshold=0.0,
                 return_states=True,
-                ricker_cycles_per_period=1.4,
-                c=1.5, dt=1.0, mass=0.05, gamma=0.004, nu=0.02, faucet_kick=1.0,
-                kill_margin=1.0, kill_tau=0.2,
                 seed=seed,
             ),
         ),
@@ -258,11 +287,11 @@ def run_one(
     sim_kw["t_bins"] = int(profile.t_bins)
 
     # Fill center defaults if needed.
-    if sim_kind in ("faucet", "impulse", "chirp", "moving_source", "multi_source"):
+    if sim_kind in ("dripping_wave", "impulse", "chirp", "moving_source", "multi_source"):
         center_idx = _resolve_center_idx(meta, N, h=h, w=w)
-        # Faucet uses center_idx; field presets may use forcing_kwargs[center_idx].
-        if sim_kind == "faucet":
-            sim_kw.setdefault("center_idx", center_idx)
+        # Dripping wave uses faucet_nodes; field presets may use forcing_kwargs[center_idx].
+        if sim_kind == "dripping_wave":
+            sim_kw.setdefault("faucet_nodes", [center_idx])
 
     event_bins, H, _sim_meta = run_simulator(sim_kind, **sim_kw)
 
@@ -307,7 +336,7 @@ def run_one(
     print_epoch_history(seed, hist, metrics)
 
     # 7) Evaluation / rollouts.
-    rollout_eval(
+    eval_summary = rollout_eval(
         theta=theta,
         cfg=cfg,
         y_train=edges_train,
@@ -319,6 +348,35 @@ def run_one(
         frame_kwargs=frame_kwargs,
         do_viz=do_quick_viz
     )
+
+    # 8) append summary row to global results CSV
+    results_path = os.path.join(out_root, "results.csv")
+    row = {
+        "profile": profile.name,
+        "exp_name": exp.name,
+        "graph_kind": exp.graph_kind,
+        "simulator_kind": exp.simulator_kind,
+        "seed": seed,
+        "epochs": profile.epochs,
+        "h": profile.h,
+        "w": profile.w,
+        "t_bins": profile.t_bins,
+        "cut": profile.cut,
+        "n": profile.n,
+        "dt_grid": json.dumps(list(dt_grid)),
+        "ema_alpha": ema_alpha,
+        "graph_kwargs": json.dumps(exp.graph_kwargs, sort_keys=True),
+        "simulator_kwargs": json.dumps(exp.simulator_kwargs, sort_keys=True),
+    }
+    for k, v in metrics.items():
+        row[f"train_{k}"] = v
+    row["eval_dt_star"] = eval_summary.get("dt_star")
+    row["eval_gamma_star"] = eval_summary.get("gamma_star")
+    row["eval_dt_free_star"] = eval_summary.get("dt_free_star")
+    row["eval_gamma_free_star"] = eval_summary.get("gamma_free_star")
+    row["eval_node_metrics"] = json.dumps(eval_summary.get("node_metrics", []))
+    row["eval_edge_metrics"] = json.dumps(eval_summary.get("edge_metrics", []))
+    _append_results_csv(results_path, row)
 
 
 def _main() -> None:

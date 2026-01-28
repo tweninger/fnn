@@ -11,6 +11,8 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
+import pandas as pd
+import networkx as nx
 from scipy.sparse import csr_matrix
 from dataclasses import dataclass
 from sklearn.linear_model import LogisticRegression
@@ -1588,7 +1590,7 @@ def _calibrate_if_free_tail(theta, cfg, y_train, x_train_true, num_nodes, device
 def _eval_node_metrics(seed, dt_star, gamma_star, alpha_hat, num_nodes, var_ref,
                        x_true_h, x_driven_gamma_h, x_driven_affine_h, x_free_h,
                        x_free_if_h, x_true_if_free_h, x_self_if_h, x_true_if_self_h,
-                       dt_free_star, gamma_free_star):
+                       dt_free_star, gamma_free_star) -> List[Dict[str, Any]]:
     NODE_HEADERS = ["seed","split","method","dt","gamma","horizon",
                     "nmse","node_corr_median","node_corr_mean"]
     _print_header("=== NODE metrics (holdout, per horizon) ===", NODE_HEADERS)
@@ -1600,25 +1602,51 @@ def _eval_node_metrics(seed, dt_star, gamma_star, alpha_hat, num_nodes, var_ref,
         len(x_free_if_h), len(x_true_if_free_h),
         len(x_self_if_h), len(x_true_if_self_h)
     )
+    rows: List[Dict[str, Any]] = []
     for h in range(1, H_global+1):
         # driven
         m = eval_rollout(x_true_h[:h], x_driven_gamma_h[:h], var_ref=var_ref_hold)
         _print_node_row(seed, "holdout", "driven", dt_star, gamma_star, h, m)
+        rows.append({
+            "seed": seed, "split": "holdout", "method": "driven", "dt": dt_star, "gamma": gamma_star,
+            "horizon": h, "nmse": m["nmse"], "node_corr_median": m["node_corr_median"],
+            "node_corr_mean": m["node_corr_mean"],
+        })
 
         m = eval_rollout(x_true_h[:h], x_driven_affine_h[:h], var_ref=var_ref_hold)
         _print_node_row(seed, "holdout", "driven-affine", dt_star, None, h, m)
+        rows.append({
+            "seed": seed, "split": "holdout", "method": "driven-affine", "dt": dt_star, "gamma": None,
+            "horizon": h, "nmse": m["nmse"], "node_corr_median": m["node_corr_median"],
+            "node_corr_mean": m["node_corr_mean"],
+        })
 
         # IF-free (calibrated dt/gamma/affine)
         m = eval_rollout(x_true_if_free_h[:h], x_free_if_h[:h], var_ref=var_ref_hold)
         _print_node_row(seed, "holdout", "if-free", dt_free_star, gamma_free_star, h, m)
+        rows.append({
+            "seed": seed, "split": "holdout", "method": "if-free", "dt": dt_free_star,
+            "gamma": gamma_free_star, "horizon": h, "nmse": m["nmse"],
+            "node_corr_median": m["node_corr_median"], "node_corr_mean": m["node_corr_mean"],
+        })
 
         # IF-self (report dt_star for simplicity; gamma N/A)
         m = eval_rollout(x_true_if_self_h[:h], x_self_if_h[:h], var_ref=var_ref_hold)
         _print_node_row(seed, "holdout", "free-self", dt_star, None, h, m)
+        rows.append({
+            "seed": seed, "split": "holdout", "method": "free-self", "dt": dt_star, "gamma": None,
+            "horizon": h, "nmse": m["nmse"], "node_corr_median": m["node_corr_median"],
+            "node_corr_mean": m["node_corr_mean"],
+        })
 
         # linear free
         m = eval_rollout(x_true_h[:h], x_free_h[:h], var_ref=var_ref_hold)
         _print_node_row(seed, "holdout", "free", dt_star, None, h, m)
+        rows.append({
+            "seed": seed, "split": "holdout", "method": "free", "dt": dt_star, "gamma": None,
+            "horizon": h, "nmse": m["nmse"], "node_corr_median": m["node_corr_median"],
+            "node_corr_mean": m["node_corr_mean"],
+        })
 
         # AR(1)
         X_tmp = rollout_ar1(x_true_h[0].copy(), alpha_hat, h, num_nodes)
@@ -1626,6 +1654,14 @@ def _eval_node_metrics(seed, dt_star, gamma_star, alpha_hat, num_nodes, var_ref,
         _print_node_row(seed, "holdout", "temporal", dt_star,
                         float(-np.log(max(alpha_hat, 1e-12)) / max(dt_star, 1e-12)),
                         h, m)
+        rows.append({
+            "seed": seed, "split": "holdout", "method": "temporal", "dt": dt_star,
+            "gamma": float(-np.log(max(alpha_hat, 1e-12)) / max(dt_star, 1e-12)),
+            "horizon": h, "nmse": m["nmse"], "node_corr_median": m["node_corr_median"],
+            "node_corr_mean": m["node_corr_mean"],
+        })
+
+    return rows
 
 # --------------------------------------------
 # Edge metrics block (streamed printing)
@@ -1654,7 +1690,7 @@ def _undirected_edge_labels_from_bins(y_bins: List[csr_matrix], edges_undirected
 def _eval_edge_metrics(seed, grid_E, y_holdout,
                        hold_probs_cal, risk_sets_hold, risk_labels,
                        x_driven_gamma_h, x_driven_affine_h, x_free_h,
-                       static_scores: Optional[Dict[str, List[np.ndarray]]] = None):
+                       static_scores: Optional[Dict[str, List[np.ndarray]]] = None) -> List[Dict[str, Any]]:
     EDGE_HEADERS = ["seed","split","method","horizon","roc_auc","pr_auc","brier","logloss",
                     "P@k","R@k","F1@k","pred_rate","true_rate"]
     _print_header("=== EDGE metrics (holdout, per horizon) ===", EDGE_HEADERS)
@@ -1670,10 +1706,19 @@ def _eval_edge_metrics(seed, grid_E, y_holdout,
 
     scalar_labels = _undirected_edge_labels_from_bins(y_holdout, grid_E, Te_scalar)
 
+    rows: List[Dict[str, Any]] = []
+
     def _agg_row(method, scores_list, labels_list, h, is_prob):
         H = min(h, len(scores_list), len(labels_list))
         m = aggregate_edge_metrics_over_horizon(scores_list, labels_list, H, is_prob=is_prob)
         _print_edge_row(seed, "holdout", method, h, m)
+        rows.append({
+            "seed": seed, "split": "holdout", "method": method, "horizon": h,
+            "roc_auc": m["roc_auc"], "pr_auc": m["pr_auc"], "brier": m["brier"],
+            "logloss": m["logloss"], "p_at_k": m["p_at_k"], "r_at_k": m["r_at_k"],
+            "f1_at_k": m["f1_at_k"], "topk_rate": m["topk_rate"], "k": m["k"],
+            "true_pos_rate": m["true_pos_rate"],
+        })
 
     H_edge_global = max(Te_haz, Te_scalar)
     for h in range(1, H_edge_global+1):
@@ -1687,6 +1732,8 @@ def _eval_edge_metrics(seed, grid_E, y_holdout,
         _agg_row("scalar-driven", scalar_scores_driven, scalar_labels, h, is_prob=False)
         _agg_row("scalar-driven-affine", scalar_scores_driven_aff, scalar_labels, h, is_prob=False)
         _agg_row("scalar-free", scalar_scores_free, scalar_labels, h, is_prob=False)
+
+    return rows
 
 # --------------------------------------------
 # Visualization wiring (with bidirectional fix)
@@ -1966,7 +2013,7 @@ def rollout_eval(
     seed: int = 123,
     do_viz: bool = False,
     frame_kwargs: Optional[Dict[str, Any]] = None,
-) -> None:
+) -> Dict[str, Any]:
     device = cfg.device if isinstance(cfg.device, torch.device) else torch.device(cfg.device)
     hgt, wdt = best_grid_factors(num_nodes)
 
@@ -2062,7 +2109,7 @@ def rollout_eval(
 
 
     # --- NODE METRICS (streamed printing) ---
-    _eval_node_metrics(
+    node_rows = _eval_node_metrics(
         seed, dt_star, gamma_star, alpha_hat, num_nodes, var_ref,
         x_true_h, x_driven_gamma_h, x_driven_affine_h, x_free_h,
         x_free_if_h, x_true_if_free_h, x_self_if_h, x_true_if_self_h,
@@ -2071,7 +2118,7 @@ def rollout_eval(
 
     # --- EDGE METRICS (streamed printing) ---
     grid_E = np.array(grid_edges(hgt, wdt), dtype=np.int64)  # undirected (E,2)
-    _eval_edge_metrics(
+    edge_rows = _eval_edge_metrics(
         seed, grid_E, y_holdout,
         hold_probs_cal, risk_sets_hold, risk_labels,
         x_driven_gamma_h, x_driven_affine_h, x_free_h,
@@ -2086,3 +2133,374 @@ def rollout_eval(
             hold_probs_cal, risk_sets_hold, grid_E,
             frame_kwargs
         )
+
+    return {
+        "node_metrics": node_rows,
+        "edge_metrics": edge_rows,
+        "dt_star": float(dt_star),
+        "gamma_star": float(gamma_star),
+        "dt_free_star": float(dt_free_star),
+        "gamma_free_star": float(gamma_free_star),
+    }
+
+
+# ============================================
+# Static graph measurements (from events)
+# ============================================
+
+def csr_bins_to_uvt(csr_bins: List[csr_matrix], dt: float = 1.0, t0: float = 0.0) -> np.ndarray:
+    """Convert list[csr_matrix] (one per bin, with 0/1 entries) to (M,3) array [u,v,t]."""
+    rows: List[Tuple[int, int, float]] = []
+    for i, A in enumerate(csr_bins):
+        if A is None:
+            continue
+        coo = A.tocoo()
+        t = t0 + i * dt
+        for u, v in zip(coo.row, coo.col):
+            rows.append((int(u), int(v), float(t)))
+    if not rows:
+        return np.zeros((0, 3), dtype=float)
+    return np.asarray(rows, dtype=float)
+
+
+@dataclass(frozen=True)
+class GraphConstructSpec:
+    window: int
+    weight_mode: str
+    decay_tau: Optional[float]
+    threshold_mode: str
+    topk: Optional[int] = None
+    tau: Optional[float] = None
+    density: Optional[float] = None
+    directed: bool = True
+
+    def key(self) -> str:
+        if self.threshold_mode == "topk":
+            thr = f"topk={self.topk}"
+        elif self.threshold_mode == "tau":
+            thr = f"tau={self.tau:g}"
+        else:
+            thr = f"dens={self.density:g}"
+        if self.weight_mode == "exp_decay":
+            return f"W={self.window}|{self.weight_mode}(tau={self.decay_tau:g})|{thr}"
+        return f"W={self.window}|{self.weight_mode}|{thr}"
+
+
+def _events_in_window(events_uvt: np.ndarray, t_end: float, window_bins: int, dt: float) -> np.ndarray:
+    t0 = t_end - window_bins * dt
+    m = (events_uvt[:, 2] >= t0) & (events_uvt[:, 2] < t_end)
+    return events_uvt[m]
+
+
+def _weighted_edges(
+    window_events: np.ndarray, t_end: float, spec: GraphConstructSpec, dt: float
+) -> Dict[Tuple[int, int], float]:
+    uv = window_events[:, :2].astype(np.int64, copy=False)
+    ts = window_events[:, 2].astype(float, copy=False)
+    w: Dict[Tuple[int, int], float] = {}
+
+    if spec.weight_mode == "count":
+        for u, v in uv:
+            k = (int(u), int(v))
+            w[k] = w.get(k, 0.0) + 1.0
+        return w
+
+    if spec.weight_mode == "exp_decay":
+        if not spec.decay_tau or spec.decay_tau <= 0:
+            raise ValueError("spec.decay_tau must be set (>0) for exp_decay")
+        tau_sec = float(spec.decay_tau) * dt
+        for (u, v), t in zip(uv, ts):
+            k = (int(u), int(v))
+            w[k] = w.get(k, 0.0) + math.exp(-(float(t_end) - float(t)) / tau_sec)
+        return w
+
+    raise ValueError(f"Unknown weight_mode: {spec.weight_mode}")
+
+
+def _threshold(edge_w: Dict[Tuple[int, int], float], spec: GraphConstructSpec) -> Dict[Tuple[int, int], float]:
+    items = list(edge_w.items())
+    if not items:
+        return {}
+
+    items.sort(key=lambda x: x[1], reverse=True)
+
+    if spec.threshold_mode == "topk":
+        if spec.topk is None:
+            raise ValueError("topk must be set for threshold_mode='topk'")
+        return dict(items[: max(0, int(spec.topk))])
+
+    if spec.threshold_mode == "tau":
+        if spec.tau is None:
+            raise ValueError("tau must be set for threshold_mode='tau'")
+        tau = float(spec.tau)
+        return {e: w for e, w in items if w >= tau}
+
+    if spec.threshold_mode == "density":
+        if spec.density is None:
+            raise ValueError("density must be set for threshold_mode='density'")
+        dens = float(spec.density)
+        dens = min(max(dens, 0.0), 1.0)
+        k = int(round(dens * len(items)))
+        return dict(items[: max(0, k)])
+
+    raise ValueError(f"Unknown threshold_mode: {spec.threshold_mode}")
+
+
+def construct_measurement_graph(
+    events_uvt: np.ndarray,
+    t_end: float,
+    spec: GraphConstructSpec,
+    *,
+    num_nodes: int,
+    dt: float,
+) -> nx.Graph:
+    window_events = _events_in_window(events_uvt, t_end, spec.window, dt)
+    ew = _weighted_edges(window_events, t_end, spec, dt)
+    ew = _threshold(ew, spec)
+
+    G = nx.DiGraph() if spec.directed else nx.Graph()
+    G.add_nodes_from(range(num_nodes))
+    for (u, v), w in ew.items():
+        if u == v:
+            continue
+        G.add_edge(u, v, weight=float(w))
+    return G
+
+
+def edge_set(G: nx.Graph) -> set[Tuple[int, int]]:
+    return set((int(u), int(v)) for u, v in G.edges())
+
+
+def jaccard_edges(E1: set[Tuple[int, int]], E2: set[Tuple[int, int]]) -> float:
+    if not E1 and not E2:
+        return 1.0
+    if not E1 or not E2:
+        return 0.0
+    return len(E1 & E2) / len(E1 | E2)
+
+
+def degree_rank_spearman(G1: nx.Graph, G2: nx.Graph) -> float:
+    nodes = np.array(sorted(set(G1.nodes()) | set(G2.nodes())), dtype=np.int64)
+    deg1 = dict(nx.degree(G1))
+    deg2 = dict(nx.degree(G2))
+    d1 = np.array([deg1.get(int(n), 0.0) for n in nodes], dtype=float)
+    d2 = np.array([deg2.get(int(n), 0.0) for n in nodes], dtype=float)
+
+    def rankdata(x: np.ndarray) -> np.ndarray:
+        order = np.argsort(x, kind="mergesort")
+        ranks = np.empty_like(order, dtype=float)
+        ranks[order] = np.arange(1, x.size + 1, dtype=float)
+        sx = x[order]
+        i = 0
+        while i < sx.size:
+            j = i
+            while j + 1 < sx.size and sx[j + 1] == sx[i]:
+                j += 1
+            if j > i:
+                avg = 0.5 * (i + j) + 1.0
+                ranks[order[i:j + 1]] = avg
+            i = j + 1
+        return ranks
+
+    r1, r2 = rankdata(d1), rankdata(d2)
+    r1 -= r1.mean()
+    r2 -= r2.mean()
+    den = (np.sqrt((r1**2).sum()) * np.sqrt((r2**2).sum())) + 1e-12
+    return float((r1 * r2).sum() / den)
+
+
+def _unique_edges_in_horizon(events_uvt: np.ndarray, t0: float, t1: float) -> np.ndarray:
+    m = (events_uvt[:, 2] >= t0) & (events_uvt[:, 2] < t1)
+    if not np.any(m):
+        return np.zeros((0, 2), dtype=np.int64)
+    uv = events_uvt[m, :2].astype(np.int64, copy=False)
+    uv = np.unique(uv, axis=0)
+    return uv
+
+
+def _sample_negatives(num_nodes: int, forbidden: set[Tuple[int, int]], n: int, rng: np.random.Generator) -> np.ndarray:
+    out: List[Tuple[int, int]] = []
+    tries = 0
+    max_tries = max(10000, 50 * n)
+    while len(out) < n and tries < max_tries:
+        u = int(rng.integers(0, num_nodes))
+        v = int(rng.integers(0, num_nodes))
+        if u == v:
+            tries += 1
+            continue
+        if (u, v) in forbidden:
+            tries += 1
+            continue
+        forbidden.add((u, v))
+        out.append((u, v))
+        tries += 1
+    return np.asarray(out, dtype=np.int64)
+
+
+def linkpred_metrics_weight_lookup(G: nx.Graph, pos_uv: np.ndarray, neg_uv: np.ndarray) -> Dict[str, float]:
+    from sklearn.metrics import roc_auc_score, average_precision_score
+
+    def score(u: int, v: int) -> float:
+        if G.has_edge(u, v):
+            return float(G[u][v].get("weight", 1.0))
+        return 0.0
+
+    s_pos = np.array([score(int(u), int(v)) for u, v in pos_uv], dtype=float)
+    s_neg = np.array([score(int(u), int(v)) for u, v in neg_uv], dtype=float)
+    y = np.concatenate([np.ones(len(s_pos)), np.zeros(len(s_neg))]).astype(int)
+    s = np.concatenate([s_pos, s_neg])
+
+    if s.size == 0 or np.allclose(s, s[0]):
+        return {"auc": 0.5, "ap": float(np.mean(y)) if y.size else np.nan}
+
+    return {"auc": float(roc_auc_score(y, s)), "ap": float(average_precision_score(y, s))}
+
+
+def eval_link_prediction(
+    events_uvt: np.ndarray,
+    G: nx.Graph,
+    *,
+    t_end: float,
+    horizon_bins: int,
+    dt: float,
+    num_nodes: int,
+    neg_ratio: float,
+    rng: np.random.Generator,
+) -> Dict[str, float]:
+    pos = _unique_edges_in_horizon(events_uvt, t_end, t_end + horizon_bins * dt)
+    if len(pos) == 0:
+        return {"auc": np.nan, "ap": np.nan, "n_pos": 0, "n_neg": 0}
+    forbidden = set(map(tuple, pos.tolist()))
+    n_neg = int(round(len(pos) * float(neg_ratio)))
+    neg = _sample_negatives(num_nodes, forbidden, n_neg, rng)
+    m = linkpred_metrics_weight_lookup(G, pos, neg)
+    m["n_pos"] = int(len(pos))
+    m["n_neg"] = int(len(neg))
+    return m
+
+
+def make_specs(
+    windows,
+    weight_modes,
+    thresholds,
+    directed=True,
+):
+    specs = []
+    for W in windows:
+        for wm, decay_tau in weight_modes:
+            for thr in thresholds:
+                mode = thr["mode"]
+                if mode == "topk":
+                    specs.append(GraphConstructSpec(
+                        window=W,
+                        weight_mode=wm,
+                        decay_tau=decay_tau,
+                        threshold_mode="topk",
+                        topk=int(thr["topk"]),
+                        directed=directed,
+                    ))
+                elif mode == "tau":
+                    specs.append(GraphConstructSpec(
+                        window=W,
+                        weight_mode=wm,
+                        decay_tau=decay_tau,
+                        threshold_mode="tau",
+                        tau=float(thr["tau"]),
+                        directed=directed,
+                    ))
+                elif mode == "density":
+                    specs.append(GraphConstructSpec(
+                        window=W,
+                        weight_mode=wm,
+                        decay_tau=decay_tau,
+                        threshold_mode="density",
+                        density=float(thr["density"]),
+                        directed=directed,
+                    ))
+                else:
+                    raise ValueError(f"Unknown threshold mode: {mode}")
+    return specs
+
+
+def _nx_from_substrate(A0: csr_matrix, directed: bool = True) -> nx.Graph:
+    G0 = nx.DiGraph() if directed else nx.Graph()
+    assert A0.shape is not None, "Substrate adjacency must have shape"
+    N = A0.shape[0]
+    G0.add_nodes_from(range(N))
+    coo = A0.tocoo()
+    for u, v in zip(coo.row, coo.col):
+        if u == v:
+            continue
+        G0.add_edge(int(u), int(v), weight=1.0)
+    return G0
+
+
+def run_experiment(
+    *,
+    A0: csr_matrix,
+    events_uvt: np.ndarray,
+    dt: float,
+    specs: List[GraphConstructSpec],
+    eval_times: Iterable[int],
+    horizon_bins: int,
+    neg_ratio: float,
+    seed: int,
+    pbar,
+) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    assert A0.shape is not None, "Substrate adjacency must have shape"
+    N = int(A0.shape[0])
+    G_sub = _nx_from_substrate(A0, directed=True)
+
+    E_sub = csr_to_set(A0)
+    prev_by_spec: Dict[str, nx.Graph] = {}
+    rows: List[Dict[str, Any]] = []
+
+    for tbin in eval_times:
+        t_end = float(tbin) * dt
+
+        for spec in specs:
+            key = spec.key()
+            Gm = construct_measurement_graph(events_uvt, t_end, spec, num_nodes=N, dt=dt)
+            pbar.update(1)
+            dm = eval_link_prediction(
+                events_uvt,
+                Gm,
+                t_end=t_end,
+                horizon_bins=horizon_bins,
+                dt=dt,
+                num_nodes=N,
+                neg_ratio=neg_ratio,
+                rng=rng,
+            )
+
+            if key in prev_by_spec:
+                Gprev = prev_by_spec[key]
+                j_prev = jaccard_edges(edge_set(Gprev), edge_set(Gm))
+                d_prev = degree_rank_spearman(Gprev, Gm)
+            else:
+                j_prev = np.nan
+                d_prev = np.nan
+
+            prev_by_spec[key] = Gm
+
+            E_m = edge_set(Gm)
+            j_sub = jaccard_edges(E_m, E_sub)
+            d_sub = degree_rank_spearman(G_sub, Gm)
+
+            rows.append({
+                "t_end": t_end,
+                "spec": key,
+                "auc": float(dm["auc"]),
+                "ap": float(dm["ap"]),
+                "n_pos": int(dm["n_pos"]),
+                "n_neg": int(dm["n_neg"]),
+                "jacc_prev": float(j_prev),
+                "degspe_prev": float(d_prev),
+                "nmi_prev": float(0.0),
+                "jacc_sub": float(j_sub),
+                "degspe_sub": float(d_sub),
+                "nmi_sub": float(0.0),
+            })
+
+    return pd.DataFrame(rows)

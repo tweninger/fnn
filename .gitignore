@@ -19,3 +19,7 @@ env/
 # OS
 Thumbs.db
 *.DS_Store
+
+#logs and results
+exports_suite/
+results/

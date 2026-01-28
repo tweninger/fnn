@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Callable, Dict, List, Tuple, Optional, Literal, Sequence
+from typing import Any, Callable, Dict, List, Tuple, Optional, Literal, Sequence, Iterable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -10,8 +10,7 @@ from scipy.sparse import csr_matrix, diags, issparse
 __all__ = [
     "run_simulator",
     "SIMULATORS",
-    "simulate_faucet_on_graph",
-    "simulate_waves_on_graph",
+    "simulate_dripping_wave_on_graph",
     # new
     "simulate_field_dynamics",
     "simulate_sis",
@@ -36,6 +35,14 @@ def _as_square_csr(adj) -> csr_matrix:
 def _csr_degree(adj: csr_matrix) -> np.ndarray:
     """Degree vector deg = A @ 1 (float64)."""
     return np.asarray(adj.sum(axis=1)).ravel().astype(np.float64)
+
+def _graph_laplacian_from_csr(A: csr_matrix) -> csr_matrix:
+    A = A.tocsr().astype(np.float32)
+    A.sum_duplicates()
+    A.eliminate_zeros()
+    deg = np.asarray(A.sum(axis=1)).ravel().astype(np.float32)
+    D = diags(deg, format="csr")
+    return (D - A).tocsr()
 
 def _bfs_hops_csr(adj: csr_matrix, src: int) -> np.ndarray:
     """Hop distances (0,1,2,...) from src on an unweighted CSR graph."""
@@ -137,6 +144,10 @@ def _ricker_pulse(t: int, t0: int, f: float) -> float:
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
+def _gaussian_pulse(t: np.ndarray, period: float, width: float, phase: float = 0.0) -> np.ndarray:
+    x = ((t - phase + 0.5 * period) % period) - 0.5 * period
+    return np.exp(-(x**2) / (2.0 * width**2))
+
 # =============================================================================
 # Public: simulator registry (like graph builders)
 # =============================================================================
@@ -166,194 +177,176 @@ def run_simulator(kind: str, /, **kwargs) -> SimulatorReturn:
     return res
 
 # =============================================================================
-# Simulator 1: Faucet-driven outward ring
+# Simulator 1: Dripping wave (edge activations from node field)
 # =============================================================================
 
-def simulate_faucet_on_graph(
-    adj: csr_matrix,
-    t_bins: int,
+def simulate_dripping_wave(
+    A_csr,
     *,
-    center_idx: int,
-    faucet_period: int = 40,
-    speed_hops_per_step: float = 1.0,
-    sigma_hops: float = 1.05,
-    p_max: float = 0.98,
-    return_states: bool = False,
-    mass: float = 0.1,
-    gamma: float = 0.02,
+    T: int = 1000,
+    dt: float = 0.01,
     c: float = 1.0,
-    dt: float = 1.0,
-    faucet_kick: float = 2.0,
-    nu: float = 0.02,
-    ricker_cycles_per_period: float = 1.0,
-    kill_margin: float = 1.0,
-    kill_tau: float = 1.0,
-    seed: int = 0,
-    debug_every: int = 0,
-) -> SimulatorReturn:
-    adj = _as_square_csr(adj)
-    rng = np.random.default_rng(seed)
-    assert adj.shape is not None
-    N = int(adj.shape[0])
+    gamma: float = 0.02,
+    faucet_nodes: Iterable[int] = (0,),
+    faucet_period: float = 1.0,
+    faucet_amp: float = 1.0,
+    faucet_width: float = 0.05,
+    source_kind: Literal["impulse", "gaussian"] = "gaussian",
+    h0: Optional[np.ndarray] = None,
+    v0: Optional[np.ndarray] = None,
+    edge_activation: Literal["absdiff", "flux"] = "absdiff",
+    edge_threshold: float = 0.0,
+    keep_pattern: Literal["as_is", "symmetrize"] = "as_is",
+) -> Tuple[np.ndarray, List[csr_matrix]]:
+    """
+    Damped wave on a graph: h_tt + gamma h_t + c^2 L h = s(t).
 
-    dist = _bfs_hops_csr(adj, center_idx)
-    reachable = dist < np.iinfo(np.int32).max
-    maxhop = int(dist[reachable].max()) if reachable.any() else 0
+    Returns
+    -------
+    H : (T, N) float32
+        Node displacements over time.
+    E_list : list of length T
+        Each item is a CSR matrix of shape (N, N) with the *adjacency pattern* of A.
+        Entry (u, v) holds the edge-activation magnitude at time t for that directed edge.
+        If keep_pattern="symmetrize", we mirror values to (v, u) as well.
+    """
+    A = A_csr.tocsr().astype(np.float32)
+    A.sum_duplicates()
+    A.eliminate_zeros()
+    N = A.shape[0]
 
-    und_u, und_v = _undirected_edge_list(adj)
-    E = und_u.size
+    # Laplacian for dynamics
+    L = _graph_laplacian_from_csr(A)
 
-    d_u = dist[und_u]; d_v = dist[und_v]
-    shell_edge = (np.abs(d_u - d_v) == 1)
-    out_u = np.where(d_u < d_v, und_u, und_v).astype(np.int32)
-    out_v = np.where(d_u < d_v, und_v, und_u).astype(np.int32)
-    avg_d = 0.5 * (d_u + d_v).astype(np.float64)
+    # Pre-extract the (row, col) structure we’ll reuse for every time step
+    Acoo = A.tocoo()
+    r = Acoo.row.astype(np.int64)
+    c_idx = Acoo.col.astype(np.int64)
 
-    Ls: Optional[NDArray[np.float64]] = None
-    h: Optional[NDArray[np.float64]] = None
-    v_half: Optional[NDArray[np.float64]] = None
-    pulses = np.arange(0, t_bins, max(1, faucet_period), dtype=int)
-    def global_fade(r: float) -> float:
-        over = max(0.0, r - (maxhop - kill_margin))
-        return float(np.exp(- (over / max(1e-8, kill_tau)) ** 2))
+    # Initial conditions
+    h = np.zeros(N, dtype=np.float32) if h0 is None else np.asarray(h0, dtype=np.float32).copy()
+    v = np.zeros(N, dtype=np.float32) if v0 is None else np.asarray(v0, dtype=np.float32).copy()
 
-    H_list: List[NDArray[np.float64]] = []
-    if return_states:
-        h = np.zeros(N, dtype=np.float64)
-        v_half = np.zeros(N, dtype=np.float64)
+    # Time grid & source
+    tgrid = np.arange(T, dtype=np.float32) * dt
+    if source_kind == "gaussian":
+        src_profile = faucet_amp * _gaussian_pulse(tgrid, period=faucet_period, width=faucet_width)
+    elif source_kind == "impulse":
+        kperiod = max(1, int(round(faucet_period / dt)))
+        src_profile = np.zeros(T, dtype=np.float32)
+        src_profile[::kperiod] = faucet_amp
+    else:
+        raise ValueError("source_kind must be 'gaussian' or 'impulse'.")
 
-        # normalized L scaled to ~spectral radius 1
-        L = _normalized_laplacian(adj)
-        lam_max = _estimate_lmax_power(L)
-        Ls = (L * (1.0 / lam_max)).tocsr()
-        sigma = float(c) * float(dt)
-        if sigma > 1.5:
-            print(f"[warn] c*dt={sigma:.3f} is high; consider c*dt ≤ 1.5 for stability")
+    faucet_nodes = np.fromiter(faucet_nodes, dtype=np.int64)
+    faucet_nodes = faucet_nodes[(faucet_nodes >= 0) & (faucet_nodes < N)]
+    if faucet_nodes.size == 0:
+        raise ValueError("No valid faucet_nodes given for this graph.")
 
-    csr_bins: List[csr_matrix] = []
+    b = np.zeros(N, dtype=np.float32)
+    b[faucet_nodes] = 1.0 / max(1, faucet_nodes.size)
 
-    for t in range(t_bins):
-        if pulses.size and t >= pulses[0]:
-            act = pulses[pulses <= t]
-            radii = speed_hops_per_step * (t - act).astype(np.float64)
+    # Storage
+    H = np.empty((T, N), dtype=np.float32)
+    E_list: List[csr_matrix] = []
+
+    # Leapfrog-like integration constants
+    damp_fac = (1.0 - 0.5 * gamma * dt) / (1.0 + 0.5 * gamma * dt)
+    acc_fac = dt / (1.0 + 0.5 * gamma * dt)
+
+    # Start v at half-step: v_{-1/2} = v0 - 0.5*dt*a0
+    a0 = - (c * c) * (L @ h) + src_profile[0] * b
+    v_half = v - 0.5 * dt * a0
+
+    for t in range(T):
+        a = - (c * c) * (L @ h) + src_profile[t] * b
+        v_half = damp_fac * v_half + acc_fac * a
+        h = h + dt * v_half
+
+        H[t, :] = h
+
+        # Edge activation values on the fixed (r, c_idx) pattern
+        if edge_activation == "absdiff":
+            vals = np.abs(h[r] - h[c_idx])
+        elif edge_activation == "flux":
+            vals = np.abs((h[r] - h[c_idx]) / dt)
         else:
-            radii = np.empty((0,), dtype=np.float64)
+            raise ValueError("edge_activation must be 'absdiff' or 'flux'.")
 
-        p = np.zeros(E, dtype=np.float64)
-        if radii.size and shell_edge.any():
-            idx = np.nonzero(shell_edge)[0]
-            ad = avg_d[idx]
-            for r in radii:
-                band = np.exp(-0.5 * ((ad - r) / max(1e-8, sigma_hops)) ** 2)
-                p_r = p_max * band * global_fade(r)
-                p[idx] = np.maximum(p[idx], p_r)
-
-        active = rng.random(E) < p
-        if not np.any(active):
-            csr_bins.append(csr_matrix((N, N), dtype=np.uint8))
+        if edge_threshold > 0.0:
+            mask = vals > edge_threshold
+            rr = r[mask]; cc = c_idx[mask]; dd = vals[mask].astype(np.float32, copy=False)
         else:
-            uu = out_u[active]; vv = out_v[active]
-            csr_bins.append(_edges_to_bin(uu, vv, N))
+            rr = r; cc = c_idx; dd = vals.astype(np.float32, copy=False)
 
-        if return_states:
-            s = np.zeros(N, dtype=np.float64)
-            f = float(ricker_cycles_per_period) / max(1.0, float(faucet_period))
-            g_t = 0.0
-            if pulses.size:
-                w = int(4 * faucet_period)
-                for t0 in pulses:
-                    dτ = t - t0
-                    if -w <= dτ <= w:
-                        g_t += _ricker_pulse(t, int(t0), f)
-            s[center_idx] = faucet_kick * g_t
+        if keep_pattern == "symmetrize":
+            # mirror into (v,u); if A already has both directions, this just duplicates which CSR will sum.
+            rr = np.concatenate([rr, cc])
+            cc = np.concatenate([cc, rr[:len(dd)]])  # use original rr slice
+            dd = np.concatenate([dd, dd])
 
-            assert Ls is not None and h is not None and v_half is not None
-            a = -(float(c) * float(c)) * (Ls @ h)
-            a += -(float(mass) * float(mass)) * h
-            a += -float(gamma) * v_half
-            a += -float(nu) * (Ls @ v_half)
-            a += s
-            v_half = v_half + float(dt) * a
-            h = h + float(dt) * v_half
+        # Build one CSR for this timestep with the same (sparse) pattern
+        E_t = csr_matrix((dd, (rr, cc)), shape=(N, N))
+        E_t.sum_duplicates()
+        E_t.eliminate_zeros()
+        E_list.append(E_t)
 
-            if debug_every and (t % debug_every == 0):
-                e_lap = np.linalg.norm(Ls @ h)
-                print(f"[t={t:04d}] ||h||={np.linalg.norm(h):.3g}  ||v||={np.linalg.norm(v_half):.3g}  "
-                      f"c^2||Lh||={(float(c) * float(c)) * e_lap:.3g}")
+    return H, E_list
 
-            H_list.append(h.copy())
-
-    H = np.stack(H_list, axis=0) if return_states else _empty_states(N)
-    meta_list = _empty_meta_list(t_bins)
-    return csr_bins, H, meta_list
-
-SIMULATORS["faucet"] = simulate_faucet_on_graph
-
-# =============================================================================
-# Simulator 2: Simple damped "waves-on-graph" with logistic activation
-# =============================================================================
-
-def simulate_waves_on_graph(
+def simulate_dripping_wave_on_graph(
     adj: csr_matrix,
     t_bins: int,
     *,
-    c2: float = 0.4,
-    m2: float = 0.2,
-    gamma: float = 0.3,
-    noise: float = 0.02,
-    scale: float = 3.0,
-    grad_threshold: float = 0.2,
-    dt: float | None = None,
-    seed: int = 0,
+    dt: float = 0.01,
+    c: float = 1.0,
+    gamma: float = 0.02,
+    faucet_nodes: Sequence[int] = (0,),
+    faucet_period: float = 1.0,
+    faucet_amp: float = 1.0,
+    faucet_width: float = 0.05,
+    source_kind: Literal["impulse", "gaussian"] = "gaussian",
+    edge_activation: Literal["absdiff", "flux"] = "absdiff",
+    edge_threshold: float = 0.0,
+    keep_pattern: Literal["as_is", "symmetrize"] = "as_is",
+    return_states: bool = True,
 ) -> SimulatorReturn:
-    adj = _as_square_csr(adj)
-    assert adj.shape is not None
-    N = adj.shape[0]
-    rng = np.random.default_rng(seed)
-    deg = _csr_degree(adj)
+    """
+    Wrapper around `simulate_dripping_wave` that returns sparse edge bins.
 
-    if dt is None:
-        dt = 0.25
+    Edge activations are computed from the node field; bins are binarized
+    versions of the per-step edge-activation matrices.
+    """
+    H, E_list = simulate_dripping_wave(
+        adj,
+        T=int(t_bins),
+        dt=float(dt),
+        c=float(c),
+        gamma=float(gamma),
+        faucet_nodes=faucet_nodes,
+        faucet_period=float(faucet_period),
+        faucet_amp=float(faucet_amp),
+        faucet_width=float(faucet_width),
+        source_kind=source_kind,
+        edge_activation=edge_activation,
+        edge_threshold=float(edge_threshold),
+        keep_pattern=keep_pattern,
+    )
 
-    und_u, und_v = _undirected_edge_list(adj)
-    E = und_u.size
-
-    h: NDArray[np.float64] = np.asarray(rng.normal(0.0, 0.1, size=N), dtype=np.float64)
-    v: NDArray[np.float64] = np.zeros(N, dtype=np.float64)
-
-    csr_bins: List[csr_matrix] = []
-
-    for _ in range(t_bins):
-        lap_h = _laplacian_mv(adj, deg, h)
-        v += dt * (c2 * lap_h - m2 * h - gamma * v) + noise * rng.normal(size=N)
-        h += dt * v
-
-        if E == 0:
-            csr_bins.append(csr_matrix((N, N), dtype=np.uint8))
+    bins: List[csr_matrix] = []
+    for E in E_list:
+        if E.nnz == 0:
+            bins.append(csr_matrix(E.shape, dtype=np.uint8))
             continue
+        B = E.copy()
+        B.data = np.ones_like(B.data, dtype=np.uint8)
+        B.eliminate_zeros()
+        bins.append(B.astype(np.uint8, copy=False))
 
-        grad = np.abs(h[und_u] - h[und_v])
-        p = 1.0 / (1.0 + np.exp(-scale * (grad - grad_threshold))) * 1e-2
-        active = rng.random(E) < p
+    H_out = H if return_states else _empty_states(H.shape[1])
+    meta_list = _empty_meta_list(int(t_bins))
+    return bins, H_out, meta_list
 
-        if not np.any(active):
-            csr_bins.append(csr_matrix((N, N), dtype=np.uint8))
-            continue
-
-        au = und_u[active].astype(np.int32)
-        av = und_v[active].astype(np.int32)
-        flips = rng.random(au.size) < 0.5
-        u = np.where(flips, au, av)
-        v2 = np.where(flips, av, au)
-
-        csr_bins.append(_edges_to_bin(u, v2, N))
-
-    H = _empty_states(N)
-    meta_list = _empty_meta_list(t_bins)
-    return csr_bins, H, meta_list
-
-SIMULATORS["waves"] = simulate_waves_on_graph
-
+SIMULATORS["dripping_wave"] = simulate_dripping_wave_on_graph
 
 ForcingKind = Literal["none", "impulse", "ricker_train", "sin", "chirp", "multi_sin", "moving_ricker"]
 ReactionKind = Literal["none", "allen_cahn", "fisher_kpp"]
@@ -594,6 +587,7 @@ def simulate_field_dynamics(
     edge_sparsity: float = 1e-2,
     # init
     init_scale: float = 0.1,
+    clip_state: Optional[float] = None,
     return_states: bool = True,
     seed: int = 0,
 ) -> SimulatorReturn:
@@ -672,6 +666,8 @@ def simulate_field_dynamics(
             if noise != 0.0:
                 dx += float(noise) * rng.normal(size=N)
             x = x + float(dt) * dx
+            if clip_state is not None:
+                x = np.clip(x, -float(clip_state), float(clip_state))
         else:
             raise ValueError("dyn must be 'wave' or 'diffusion'")
 
@@ -733,7 +729,7 @@ SIMULATORS["allen_cahn"] = _field_preset(
     forcing_kind="none",
     reaction_kind="allen_cahn",
     reaction_kwargs={"ac_mu": 1.0},
-    c2=0.8, gamma=0.02, dt=0.25,
+    c2=0.8, gamma=0.02, dt=0.25, clip_state=5.0,
 )
 
 # 6) Fisher–KPP (reaction–diffusion / traveling fronts)
@@ -742,7 +738,7 @@ SIMULATORS["fisher_kpp"] = _field_preset(
     forcing_kind="none",
     reaction_kind="fisher_kpp",
     reaction_kwargs={"fk_r": 0.8},
-    c2=0.7, gamma=0.02, dt=0.25,
+    c2=0.7, gamma=0.02, dt=0.25, clip_state=5.0,
 )
 
 # =============================================================================

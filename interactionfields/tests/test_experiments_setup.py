@@ -6,7 +6,6 @@ from interactionfields.plot_results import make_plot_kwargs
 from interactionfields.run_experiments import (
     SIZE_PROFILES,
     build_experiment_suite,
-    _resolve_center_idx,
 )
 from interactionfields.simulate import SIMULATORS
 
@@ -40,11 +39,6 @@ def test_experiment_suite_builds_and_graphs_valid(profile_key: str):
         assert A.shape[0] == A.shape[1]
         assert "kind" in meta
 
-        if exp.simulator_kind == "faucet":
-            N = int(A.shape[0])
-            center_idx = _resolve_center_idx(meta, N, h=prof.h, w=prof.w)
-            assert 0 <= center_idx < N
-
         if exp.graph_kind in GRIDISH_KINDS and "shape" in meta:
             h, w = int(meta["shape"][0]), int(meta["shape"][1])
             frame_kwargs, anim_kwargs = make_plot_kwargs(exp.graph_kind, h, w, meta, A)
@@ -67,9 +61,7 @@ def test_experiment_suite_simulator_kwargs_satisfy_required_params(profile_key: 
             if param.default is inspect._empty
             and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         }
-        # run_one injects adj and t_bins, and resolves faucet center_idx
+        # run_one injects adj and t_bins, and resolves center-based defaults
         required -= {"adj", "t_bins"}
-        if exp.simulator_kind == "faucet":
-            required -= {"center_idx"}
         missing = required - set(exp.simulator_kwargs.keys())
         assert not missing, f"{exp.name} missing simulator kwargs: {sorted(missing)}"
