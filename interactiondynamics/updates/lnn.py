@@ -62,6 +62,9 @@ class LNNUpdate(UpdateLaw):
 
         in_dim = self.node_dim + self.msg_dim + int(drive_dim)
         # output 1 scalar per node => potential energy contribution
+        # this NN learns a potential energy V
+        # takes in current position q, messages, maybe drive -> one scalar per node
+        # aka... this updates says let model learn a potential energy landscape, then move nodes according to that
         self.V = _mlp(in_dim, hidden_dim, num_layers, out_dim=1, dropout=dropout)
 
     def init_state(
@@ -99,6 +102,9 @@ class LNNUpdate(UpdateLaw):
             V_per = self.V(inp).squeeze(-1)
             V_tot = V_per.sum()
 
+            # key derivative - compute how the potential changes with respect to q
+            # acceleration is the negative gradient of potential
+            # aka... if potential energy is high in one direction, move downhill (yay mechanics)
             (dV_dq,) = torch.autograd.grad(
                 V_tot, q,
                 create_graph=torch.is_grad_enabled(),   # False in eval's enable_grad? Actually True here.
@@ -108,10 +114,15 @@ class LNNUpdate(UpdateLaw):
 
             qddot = -dV_dq
 
+            # this stuff: keep some of the old velocity
+            # add acceleration
+            # maybe damp it a bit
+            # then move position forward
+            # aka position update with inertia
             if self.damping != 0.0:
                 qdot_next = (1.0 - self.damping) * qdot + qddot * dt
             else:
-                qdot_next = qdot + qddot * dt
+                qdot_next = qdot + qddot * dt 
 
             q_next = q + qdot_next * dt
 

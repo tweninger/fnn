@@ -15,10 +15,11 @@ from scorers.event_scorer import DotProductScorer, MLPEdgeScorer
 from core.config import ModelConfig
 from data.interfaces import DataSpec
 
+# main function - take dataset metadata/spec and cfg/settings for arch and return a complete model
 def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
     num_nodes = spec.num_nodes
     event_dim = spec.event_dim if cfg.event_dim is None else cfg.event_dim
-
+    # raw event info in -> learned vector/message out
     encoder = TGNEventEncoder(
         node_dim=cfg.node_dim,
         event_dim=event_dim,
@@ -31,8 +32,10 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
 
 
     # --- Aggregator registry ---
+    # switchboard
     AGG_BUILDERS = {
         "sum": lambda c: SumAggregator(add_to_dst=True),
+        # process elements individually, aggr in perm invar way (often sum), maybe apply learned transformation
         "deepsets": lambda c: DeepSetsAggregator(
             msg_dim=c.msg_dim,
             out_dim=c.msg_dim,
@@ -41,6 +44,7 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             add_to_dst=True,
             reduce="sum",
         ),
+        # instead of sum, let elements interact via attention
         "settransformer": lambda c: SetTransformerAggregator(
             msg_dim=c.msg_dim,
             num_heads=getattr(c, "settf_num_heads", 4),
@@ -50,6 +54,7 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             add_to_dst=True,
             max_events_per_node=getattr(c, "settf_max_events_per_node", 32),
         ), 
+        # hopfield style aggre
         "hopfield": lambda c: HopfieldAggregator(
             node_dim=cfg.node_dim,
             msg_dim=cfg.msg_dim,
@@ -61,20 +66,23 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             add_to_dst=True,
             dropout=cfg.dropout,
         ),
+        #hi barbie
         "ift": lambda c: IFTLaplacianAggregator(
             add_to_dst=True, 
             add_to_src=False,
             make_undirected=True
         )
     }
+    # take the string from config, find matching builder, instantiate it... or crash w err
     agg_fn = AGG_BUILDERS.get(cfg.aggregator)
     if agg_fn is None:
         raise NotImplementedError(f"aggregator={cfg.aggregator} not wired yet")
     aggregator = agg_fn(cfg)
 
+    # same but w updaters
     # --- Update registry ---
     UPDATE_BUILDERS = {
-        "tgn_gru": lambda c: TGNGRUUpdate(c.node_dim, c.msg_dim),
+        "tgn_gru": lambda c: TGNGRUUpdate(c.node_dim, c.msg_dim), 
         "lnn": lambda c: LNNUpdate(
             node_dim=c.node_dim,
             msg_dim=c.msg_dim,
@@ -121,10 +129,12 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
         raise NotImplementedError(f"update={cfg.update} not wired yet")
     update = upd_fn(cfg)
 
+    # given node states/event time/info etc, how do we score candidate next events/edges?
+    # training uses ranking loss and metrics, so scorer prob produces those event /edge scores
     # --- Scorer registry ---
     SCORER_BUILDERS = {
-        "dot": lambda c: DotProductScorer(),
-        "mlp": lambda c: MLPEdgeScorer(
+        "dot": lambda c: DotProductScorer(), # hi dot product
+        "mlp": lambda c: MLPEdgeScorer( # hi barbie
             node_dim=c.node_dim,
             event_dim=event_dim,
             hidden_dim=c.scorer_hidden,
@@ -138,6 +148,8 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
         raise NotImplementedError(f"scorer={cfg.scorer} not supported")
     scorer = sc_fn(cfg)
 
+    # full model composed object built from encoder, aggregater, update, scorer, num _ nodes
+    # repo arcitectured as pipeline of interchangeable modules
     return ComposedInteractionModel(
         encoder=encoder,
         aggregator=aggregator,

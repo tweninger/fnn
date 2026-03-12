@@ -39,10 +39,13 @@ class IFTDiffusionUpdate(UpdateLaw):
         self.kappa_cap = bool(kappa_cap)
         self.kappa_max = kappa_max
 
-
+        # messages come in as msg_dim, but node states live in node_dim, so this maps messages into state space
         self.msg_proj = nn.Linear(self.msg_dim, self.node_dim)
 
-        if self.learn_kappa:
+        # kappa hello!!!
+        # controls strength of the diffusion term
+        # fixed or learnable... if learnable? forces it stay positive w exp/softplus
+        if self.learn_kappa: 
             # Unconstrained scalar parameter; transformed to positive in forward()
             if self.kappa_param == "exp":
                 init_raw = float(kappa)
@@ -57,7 +60,10 @@ class IFTDiffusionUpdate(UpdateLaw):
             # Constant scalar tensor that follows device moves
             self.register_buffer("kappa_const", torch.tensor(float(kappa)))
 
-                
+   # we want diffusion strength to be positive, so don't learn kappa directly...
+   # learn a raw number then transform to a postive one very sneaky
+
+   # helper just says compute pos scaler kappa + maybe cap it if requested             
     def _kappa(self, h: torch.Tensor) -> torch.Tensor:
         """Return positive scalar kappa as a 0-dim tensor on h's device/dtype."""
         if self.learn_kappa:
@@ -70,18 +76,20 @@ class IFTDiffusionUpdate(UpdateLaw):
         else:
             k = torch.as_tensor(self.kappa_const, device=h.device, dtype=h.dtype)
 
-        if self.kappa_cap:
+        if self.kappa_cap: # maybe clamp it for stability... 
             if self.kappa_max is None:
                 raise ValueError("kappa_cap=True requires kappa_max not None")  
             k = torch.clamp(k, 0.0, float(self.kappa_max))  
 
         return k.to(device=h.device, dtype=h.dtype).reshape(())
 
-
+    # again the initial node state is zeros... like hopfield!
     def init_state(self, batch_size: int, num_nodes: int, device: torch.device) -> Optional[ModelState]:
         h = torch.zeros((num_nodes, self.node_dim), device=device)
         return ModelState(node=h, aux={})
 
+
+    
     def forward(
         self,
         state: Optional[ModelState],
@@ -89,8 +97,9 @@ class IFTDiffusionUpdate(UpdateLaw):
         drive: Optional[torch.Tensor] = None,
     ) -> Tuple[Optional[ModelState], Dict]:
         assert state is not None and state.node is not None, "IFTDiffusionUpdate requires state.node"
-        h = state.node
+        h = state.node # current node memory hello
 
+        # safety check, no NaNs/infs
         assert torch.isfinite(h).all()
         assert torch.isfinite(messages).all()
         # print("DEBUG IFT h max", float(h.abs().max().item()),
@@ -98,16 +107,20 @@ class IFTDiffusionUpdate(UpdateLaw):
 
         assert messages.abs().sum().item() > 0, "IFT messages are all zeros (unexpected)"
 
-        kappa = self._kappa(h)
+        kappa = self._kappa(h) # get kappa, diffusion strength is now a scalar
 
+        # where updater looks for the graph operator
         L = None
         if state.aux is not None:
             L = state.aux.get("L", None)
 
         if L is None:
-            Lh = torch.zeros_like(h)
+            Lh = torch.zeros_like(h) # L is missing? no diffusion
         else:
-            Lh = torch.sparse.mm(L, h)
+            Lh = torch.sparse.mm(L, h) # if it exists tho? apply sprase graph operator L to the current node states
+        # ^^ central interaction term!!
+        # ^^ each node's new state is influenced by how its current state differs/relates across the local graph induced..
+        # by the current event bin. this is "field/diffusion" part
 
         # ratio = (Lh.norm() / (h.norm() + 1e-12)).item()
         # print("[IFT] ||Lh||/||h||", ratio)
@@ -120,8 +133,10 @@ class IFTDiffusionUpdate(UpdateLaw):
         #         "max|L|", float(vals.abs().max().item()),
         #         "dtype", vals.dtype)            
 
-        inj = self.msg_proj(messages)
 
+        # makes message injection live in node-state space
+        inj = self.msg_proj(messages)
+        # clip it injection norm a bit why not.. don't let it get too big
         inj_max = 1.0  # tune: 0.5–2.0
         inj_norm = inj.norm(dim=-1, keepdim=True).clamp_min(1e-12)
         inj = inj * (inj_max / inj_norm).clamp(max=1.0)    
@@ -129,10 +144,16 @@ class IFTDiffusionUpdate(UpdateLaw):
         # print("DEBUG inj max", float(inj.abs().max().item()),
         #    "inj std", float(inj.std().item()))
 
-        dh = (-self.gamma * h) - (kappa * Lh) + inj
-        h_next = h + self.dt * dh    
+        # compute derivative like update... big point of the updater
+        # gamme part - decay/damping/forgetting 
+        # kappa part - diffusion/interaction across the graph operator
+        # inj part - new information entering from current messages
+        # aka change in hidden state = decay + graph interaciton + incoming signal
+        dh = (-self.gamma * h) - (kappa * Lh) + inj 
+        h_next = h + self.dt * dh    # euler step... simple discrete time update: take curr state and add a timestep sized change
+        # ^^ simpler than HNN symplectic update 
 
-        next_state = ModelState(
+        next_state = ModelState( # return next state, new node memory is h_next + aux info, so L and metadata can continue being carried around
             node=h_next,
             aux=dict(state.aux) if state.aux is not None else {}
         )
@@ -159,6 +180,9 @@ class IFTDiffusionUpdate(UpdateLaw):
         # with torch.no_grad():
         #     print("||messages||", float(messages.norm()))        
 
+        # stores useful diagnostics like..
+        # diffusion strength, state size, message inejction size, graph-diffusion term size
+        # for debugging and sweep analysis 
         aux = {
             "kappa": kappa.detach(),
             "h_norm": h_next.norm(dim=-1).mean().detach(),

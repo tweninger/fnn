@@ -7,7 +7,8 @@ import torch.nn as nn
 
 from core.interfaces import ModelState, UpdateLaw
 
-
+# helper to build a little feedforward neural net w/ linear layer SiLU activation, maybe dropout, repeat, final linear layer
+# represents the learned Hamiltonian H
 def _mlp(in_dim: int, hidden: int, layers: int, out_dim: int, dropout: float = 0.0) -> nn.Sequential:
     mods = []
     d = in_dim
@@ -57,13 +58,14 @@ class HNNUpdate(UpdateLaw):
         self.dt = float(dt)
         self.damping = float(damping)
 
+        # even node dimension ok
         if self.node_dim % 2 != 0:
             raise ValueError(f"HNN requires even node_dim (got {self.node_dim})")
         self.d = self.node_dim // 2
-
+        # outputs one scalar energy per node// energy depends on the node's current hidden state/incoming interaction message
         in_dim = (2 * self.d) + self.msg_dim + int(drive_dim)
         self.H = _mlp(in_dim, hidden_dim, num_layers, out_dim=1, dropout=dropout)
-
+    # inital state = all zeros, zero position like vector, zero momentum like vector.. initial hidden mem
     def init_state(
         self,
         batch_size: int,
@@ -74,6 +76,8 @@ class HNNUpdate(UpdateLaw):
         qp = torch.zeros(num_nodes, 2 * self.d, device=device)
         return ModelState(node=qp, node_prev=None, aux={})
 
+
+    #actuall update
     def forward(
         self,
         state: Optional[ModelState],
@@ -82,50 +86,53 @@ class HNNUpdate(UpdateLaw):
     ) -> Tuple[Optional[ModelState], Dict[str, torch.Tensor]]:
         assert state is not None, "HNNUpdate is stateful; expected non-None state"
         assert state.node is not None
-
+        # current node state for all notdes
         qp_raw = state.node
         dt = self.dt
 
         # HNN needs autograd even during eval (your evaluate_stream_sliced uses torch.no_grad).
         # So: locally re-enable grads for the physics part.
         with torch.enable_grad():
-            qp = qp_raw.detach().requires_grad_(True)
-            q, p = qp[:, : self.d], qp[:, self.d :]
+            qp = qp_raw.detach().requires_grad_(True) # allow gradients w.r.t them, b/c update is based on derivatives of energy
+            q, p = qp[:, : self.d], qp[:, self.d :] # like, updater needs gradients w/ respect to the state variables themselves, not j model weights
 
             if drive is not None:
                 drive_in = drive.unsqueeze(-1) if drive.dim() == 1 else drive
-                inp = torch.cat([q, p, messages, drive_in], dim=-1)
+                inp = torch.cat([q, p, messages, drive_in], dim=-1) # input
             else:
-                inp = torch.cat([q, p, messages], dim=-1)
-
+                inp = torch.cat([q, p, messages], dim=-1) #no drive... ig
+            # ^^ so learned energy H sees curr state, incoming messages, optional external drive
+            # one energy per node, total energy by summing over all nodes
             H_per = self.H(inp).squeeze(-1)   # (N,)
             H_tot = H_per.sum()
 
             create_graph = self.training
             retain = create_graph
 
+            # computes derivative of energy w.r.t node state then split that into two and use hamilton's equations
             (dH_dqp,) = torch.autograd.grad(
                 H_tot, qp,
                 create_graph=create_graph,
                 retain_graph=retain,
                 allow_unused=False,
             )                 
-
-            dH_dq = dH_dqp[:, : self.d]
+            # hi hamilton!
+            dH_dq = dH_dqp[:, : self.d] 
             dH_dp = dH_dqp[:, self.d :]
 
-            dqdt = dH_dp
-            dpdt = -dH_dq
+            dqdt = dH_dp # how q changes depends on gradient wrt p
+            dpdt = -dH_dq # how p changes depends on negative gradient wrt q
 
-            # Optional damping on momentum
+            # Optional damping on momentum -> if damping is nonzero, momentum dies down a bit oer time.. so dynamics less perfectly conservative
             if self.damping != 0.0:
                 dpdt = dpdt - self.damping * p
 
             # ---- symplectic Euler (kick-drift) ----
+            # numerical method they use to update q and p
             # 1) kick: update momentum
             p_next = p + dt * dpdt
 
-            # 2) drift: recompute dq/dt at (q_t, p_{t+1})
+            # 2) drift: recompute dq/dt at (q_t, p_{t+1}) ---> run hamiltonian again
             qp2 = torch.cat([q, p_next], dim=-1).detach().requires_grad_(True)
 
             q2, p2 = qp2[:, : self.d], qp2[:, self.d :]

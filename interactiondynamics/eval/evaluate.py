@@ -10,7 +10,7 @@ from eval.ranking import ranking_loss_and_metrics
 
 
 @dataclass
-class EvalSlices:
+class EvalSlices: # is behavior different earlier in the stream or later when its seen more history... the warming up stuff
     early_steps: int = 10   # first N scored steps
     # late = everything after early_steps
 
@@ -32,8 +32,8 @@ def _acc_finalize(acc: Dict[str, float]) -> Dict[str, float]:
     return {"loss": acc["loss_sum"] / n, "mrr": acc["mrr_sum"] / n, "steps": int(n)}
 
 
-@torch.no_grad()
-def evaluate_stream_sliced(
+@torch.no_grad() # do eval without tracking gradients - eval is cheaper/faster
+def evaluate_stream_sliced( 
     model,
     bins: Iterable[EventBatch],
     cfg,
@@ -51,7 +51,7 @@ def evaluate_stream_sliced(
     model.eval()
     device = torch.device(cfg.device)
 
-    state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
+    state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device) # clean state at start of eval.. eval doesnt continue from training
 
     overall = _acc_init()
     early = _acc_init()
@@ -70,7 +70,8 @@ def evaluate_stream_sliced(
         # predict current from state(after consuming prev)
         state, _ = model.step(state, prev)
 
-        loss_t, metrics = ranking_loss_and_metrics(
+        # this file just calls the ranking evaluater 
+        loss_t, metrics = ranking_loss_and_metrics( 
             model=model,
             state=state,
             next_events=events,

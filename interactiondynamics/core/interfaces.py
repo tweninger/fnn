@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from .events import EventBatch
 
+# template for any interaction model in the repo using pytorch model class and abstract base class (states required funcitons)
 class InteractionModel(nn.Module, ABC):
     """
     Top-level interface for all models in the codebase.
@@ -14,8 +15,15 @@ class InteractionModel(nn.Module, ABC):
     must implement this interface.
 
     State may be None (stateless models).
-    """
 
+    ok anyways...
+    interface/architecture file! not actual math implementation
+    what model is supposed to do, what a state object looks like, what encoder/aggr/update/scorer are
+    how those pieces fit together
+
+    RECIPE template not actual recipe yum
+    """
+    # when training starts, how do you initialize the latent memory/state? aka what memory do i start with
     @abstractmethod
     def init_state(
         self,
@@ -30,6 +38,8 @@ class InteractionModel(nn.Module, ABC):
         """
         pass
 
+    # given curr state and one batch/bin of events, advance the system one step
+    # called in train.py duh
     @abstractmethod
     def step(
         self,
@@ -49,6 +59,7 @@ class InteractionModel(nn.Module, ABC):
         """
         pass
 
+    # connects to ranking_loss_and_metrics
     @abstractmethod
     def score(
         self,
@@ -64,7 +75,7 @@ class InteractionModel(nn.Module, ABC):
         """
         pass
 
-
+# container for hidden state/memory
 @dataclass
 class ModelState:
     """
@@ -75,7 +86,7 @@ class ModelState:
     """
 
     # Per-node memory (TGN / IFT / Hopfield)
-    node: Optional[torch.Tensor] = None        # (N, d_h)
+    node: Optional[torch.Tensor] = None        # (N, d_h) nodes, hidden dimension.. main hidden state thats updated
 
     # Optional previous node state (Lagrangian-style)
     node_prev: Optional[torch.Tensor] = None   # (N, d_h)
@@ -83,6 +94,8 @@ class ModelState:
     # Optional sparse dyad cache or other memory
     aux: Optional[Dict[str, Any]] = None
 
+
+    # detaches all tensors in the state from the computation graph!!! bye bye fors sequential models
     def detach_(self) -> "ModelState":
         if self.node is not None:
             self.node = self.node.detach()
@@ -93,6 +106,7 @@ class ModelState:
             self.aux = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in self.aux.items()}
         return self
     
+    # copy state ok
     def clone(self, detach: bool = False) -> "ModelState":
         def _copy(x):
             if x is None:
@@ -113,12 +127,12 @@ class ModelState:
             aux=_copy(self.aux), # type: ignore
         )
 
-
+# curr state + raw events -> event embeddings
 class EventEncoder(nn.Module, ABC):
     """
     Maps (state, events) -> per-event embeddings.
     """
-
+    # one vector per event
     @abstractmethod
     def forward(
         self,
@@ -128,16 +142,16 @@ class EventEncoder(nn.Module, ABC):
         """
         Returns
         -------
-        event_embeddings : Tensor [M, d_event]
+        event_embeddings : Tensor [M, d_event] # number of events in bin + embedding dimension
         """
         pass
 
-
+# combine hehe
 class Aggregator(nn.Module, ABC):
     """
     Aggregates per-event embeddings into per-entity messages.
     """
-
+    # take all event level vectors and compress/aggre into one message per node
     @abstractmethod
     def forward(
         self,
@@ -153,7 +167,7 @@ class Aggregator(nn.Module, ABC):
         """
         pass
 
-
+# update is state evolution rule... V CENTRAL OKAY...
 class UpdateLaw(nn.Module, ABC):
     """
     Defines the discrete-time law of motion.
@@ -161,6 +175,7 @@ class UpdateLaw(nn.Module, ABC):
     This is the ONLY place where 'physics' or 'dynamics' live.
     """
 
+    # initialize model state
     @abstractmethod
     def init_state(
         self,
@@ -170,6 +185,7 @@ class UpdateLaw(nn.Module, ABC):
     ) -> Optional[ModelState]:
         pass
 
+    # actual evolution step - returns updated model state + diagnostics .. messages in -> new node mem/state out
     @abstractmethod
     def forward(
         self,
@@ -185,11 +201,12 @@ class UpdateLaw(nn.Module, ABC):
         """
         pass
 
+# prediction head
 class ScoringHead(nn.Module, ABC):
     """
     Maps state to event scores.
     """
-
+    # return score.. curr state + candidate event info -> scores
     @abstractmethod
     def forward(
         self,
@@ -198,6 +215,8 @@ class ScoringHead(nn.Module, ABC):
     ) -> torch.Tensor:
         pass
 
+# WOWOWOW real concrete model implementation that follows interactionModel interface
+# pulls everything together
 class ComposedInteractionModel(InteractionModel):
     """
     Canonical composition:
@@ -212,23 +231,24 @@ class ComposedInteractionModel(InteractionModel):
         scorer: ScoringHead,
         num_nodes: int,
     ):
-        super().__init__()
+        super().__init__() 
         self.encoder = encoder
         self.aggregator = aggregator
         self.update = update
         self.scorer = scorer
         self.num_nodes = num_nodes
 
-    def init_state(self, batch_size, num_nodes, device):
+    def init_state(self, batch_size, num_nodes, device): # hidden state is owned by the update modeule... diff update laws might want diff state structure
         return self.update.init_state(batch_size, num_nodes, device)
 
+    # pipelineeee for forward time
     def step(self, state, events, drive=None):
-        event_emb = self.encoder(state, events)
-        messages = self.aggregator(
+        event_emb = self.encoder(state, events) # encode raw evenets into event embeddings
+        messages = self.aggregator( # this stuff aggregates event embeddings into per node messages
             state, event_emb, events, self.num_nodes
         )
-        next_state, aux = self.update(state, messages, drive)
+        next_state, aux = self.update(state, messages, drive) # update hidden state with those messages
         return next_state, aux
-
+    # prediction is delegated to scorer (step - state evolution, score - event ranking/prediction)
     def score(self, state, candidate_events):
         return self.scorer(state, candidate_events)

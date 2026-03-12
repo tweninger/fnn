@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from core.events import EventBatch
 
-
+# containerrrr 
 @dataclass
 class RankingBatch:
     """
@@ -21,6 +21,7 @@ class RankingBatch:
     t: torch.Tensor | None = None
     features: torch.Tensor | None = None
 
+# samples random negative destination nodes
 
 def sample_negative_dsts(
     num_nodes: int,
@@ -33,6 +34,8 @@ def sample_negative_dsts(
     Uniform negative sampling over node ids, avoiding collisions with pos_dst (and optionally avoid).
     Returns (M, num_neg) LongTensor on `device`.
     """
+
+    # randomly pick num_neg node IDs, avoid picking true dest, also maybe avoid source node if you want
     M = pos_dst.numel()
     if num_nodes <= 1:
         return torch.zeros((M, num_neg), device=device, dtype=torch.long)
@@ -54,7 +57,9 @@ def sample_negative_dsts(
     return neg
 
 
-
+# shape-handling helper: m pos events each with k+1 candidate destinations...
+# this function flatters that into one big EventBatch of size m*(k+1) so model can score them all at once
+# BATCHING MECHANICSSS
 def build_candidate_eventbatch(
     src: torch.LongTensor,
     candidates_dst: torch.LongTensor,
@@ -82,7 +87,7 @@ def build_candidate_eventbatch(
 
     return EventBatch(src=src_rep, dst=dst_flat, t=t_rep, features=feat_rep)
 
-
+# defines one possible ranking loss -> sigmoid/binary-cross-entropy style on each candidate
 def bce_ranking_loss(
     scores: torch.Tensor,
     M: int,
@@ -97,12 +102,17 @@ def bce_ranking_loss(
     labels[:, 0] = 1.0
     return F.binary_cross_entropy_with_logits(logits, labels)
 
-
+# main loss actually being used.. reshapes scores to (M,K1)... m row per pos event and num_neg+1 columns = one pos+neg
+#then cross entropy with label 0 so candidate at index 0 is the true destination
+# aka... for each row, make column 0 score the highest
+# out of this set of possible dest nodes, put the real one on top
 def softmax_ranking_loss(scores: torch.Tensor, M: int, K1: int) -> torch.Tensor:
     logits = scores.view(M, K1)
     labels = torch.zeros((M,), device=scores.device, dtype=torch.long)  # pos at index 0
     return F.cross_entropy(logits, labels, reduction="mean")
 
+# mean reciprocal rank
+# higher MRR = better ranking for when pos is ranked
 @torch.no_grad()
 def mrr_and_hits(
     scores: torch.Tensor,
@@ -127,10 +137,10 @@ def mrr_and_hits(
     # print("DEBUG top0 frac:", top0, "scores[0]:", S[0].detach().cpu().tolist()[:min(10, K1)])
 
     for k in hits_ks:
-        out[f"hits@{k}"] = (rank <= k).float().mean().item()
+        out[f"hits@{k}"] = (rank <= k).float().mean().item() # fraction of times the true dest is in the top k
     return out
 
-
+# takes all those and returns loss and metrics
 def ranking_loss_and_metrics(
     model,
     state,
@@ -142,12 +152,14 @@ def ranking_loss_and_metrics(
     Given current state, evaluate next_events as positives with negatives.
     """
     device = next_events.src.device
-    M = next_events.num_events
-    K1 = num_neg + 1
+    M = next_events.num_events # figure out sizes, m = how many real pos events in this bin
+    K1 = num_neg + 1 # number of candidates per event
 
+    # first column = true destination, rest = negatives 
     neg_dst = sample_negative_dsts(num_nodes, next_events.dst, num_neg, device=device)
     candidates_dst = cast(torch.LongTensor, torch.cat([next_events.dst.view(M, 1), neg_dst], dim=1))  # (M, K1)
 
+    # flatten candidate structure into one big EventBatch for scoring
     cand_batch = build_candidate_eventbatch(
         src=next_events.src,
         candidates_dst=candidates_dst,
@@ -177,7 +189,7 @@ def ranking_loss_and_metrics(
     # uniq_per_row = float(uniq_counts_t.mean().item())
     # print("DEBUG mean unique candidates (first 50 rows):", uniq_per_row)    
 
-
+    # clone state before scoring so score can't accidentally mutate the real training set
     before = state.node.detach().clone()
     detach_for_score = not torch.is_grad_enabled()
     state_eval = state.clone(detach=detach_for_score)  # ensure score() can't mutate original state
@@ -202,7 +214,7 @@ def ranking_loss_and_metrics(
     
     
     #loss = bce_ranking_loss(scores, M=M, K1=K1)  
-    loss = softmax_ranking_loss(scores, M=M, K1=K1)
+    loss = softmax_ranking_loss(scores, M=M, K1=K1) # for each source event, rank the true destination above sampled negatives
 
-    metrics = mrr_and_hits(scores.detach(), M=M, K1=K1)
+    metrics = mrr_and_hits(scores.detach(), M=M, K1=K1) # so training and eval are both centered on ranking quality
     return loss, metrics
