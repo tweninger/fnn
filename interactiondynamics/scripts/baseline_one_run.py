@@ -10,10 +10,9 @@ from eval.evaluate import EvalSlices
 from models.tgn_model import build_tgn_model
 
 """
-- just one run/one epoch with IFT x IFT to check if this works
+- let's get a baseline w/ TGN GRU and sum...
 - records one JSON per epoch w/ run name, seed, model config, epoch number, train/val/test metrics
 - we have that other JSON now with the final run summary
-
 """
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,32 +41,27 @@ def main():
         lr=1e-3,
     )
 
-    # build ift model
-    model_cfg = ModelConfig(
+    # build baseline model
+    base_model_cfg = ModelConfig(
         node_dim=128,
         msg_dim=128,
         event_dim=spec.event_dim,
         scorer="mlp",
         scorer_hidden=256,
-        aggregator="ift",
+        aggregator="sum",
         use_time_features=False,
         dropout=0.0,
         scorer_dropout=0.0,
         encoder_hidden=256,
-        update="ift_update",
-        ift_kappa_param="softplus",
-        ift_dt=0.05,
-        ift_gamma=0.0,
-        ift_kappa=1.0,
-        ift_kappa_cap=False,
-        ift_kappa_max=None,
+        update="tgn_gru",
     )
 
+    
     # wrap it up into one sweeprun
     # one experiment instance w this specific model, and this here seed
     run = SweepRun(
-        name="ift_smoke_test",
-        model_cfg=model_cfg,
+        name="baseline_one_run",
+        model_cfg=base_model_cfg, #swap it
         seed=0,
     )
 
@@ -80,8 +74,8 @@ def main():
         build_model_fn=build_tgn_model,
         epochs=6, # 1 or 6 atm
         eval_slices=EvalSlices(early_steps=10),
-        save_jsonl_path="results/ift_results_6ep.jsonl", # results go into this file/folder
-        save_summary_path="results/ift_summary_6ep.jsonl", #that summary at the end is here
+        save_jsonl_path="results/baseline_results_6ep.jsonl", # results go into this file/folder
+        save_summary_path="results/baseline_summary_6ep.jsonl",
     )
 
     # yay hearts

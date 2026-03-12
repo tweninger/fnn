@@ -325,6 +325,7 @@ def run_one_experiment(
     epochs: int = 5,
     eval_slices: Optional[EvalSlices] = None,
     save_jsonl_path: Optional[str] = None,
+    save_summary_path: Optional[str] = None,
 ) -> RunResult:
     # choose device and set reproducible seed
     device = torch.device(base_train_cfg.device)
@@ -421,6 +422,22 @@ def run_one_experiment(
 
     final_snapshot = snapshot  # last epoch snapshot
 
+    # save one final run summary as a JSONL row 
+    summary = {
+        "name": run.name,
+        "seed": run.seed,
+        "epochs": epochs,
+        "best_val_mrr": best_val_mrr,
+        "best_epoch": best_epoch,
+        "best_snapshot": best_snapshot,
+        "final_snapshot": final_snapshot,
+        "wall_sec": wall,
+    }
+
+    if save_summary_path is not None:
+        with open(save_summary_path, "a") as f:
+            f.write(json.dumps(summary) + "\n")
+
     # return structured result object
     return RunResult(
         name=run.name,
@@ -505,7 +522,8 @@ def main():
             build_model_fn=build_tgn_model, # type: ignore
             epochs=6,  
             eval_slices=EvalSlices(early_steps=10),
-            save_jsonl_path="sweep_results.jsonl",
+            save_jsonl_path="results/sweep_results.jsonl",
+            save_summary_path="results/sweep_summary.jsonl",
         )
         results.append(res)
 
