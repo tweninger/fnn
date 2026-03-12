@@ -51,6 +51,7 @@ class SweepRun:
 # results of one experiment run
 @dataclass
 class RunResult:
+    dataset: Optional[str]
     name: str
     seed: int
     epochs: int
@@ -326,6 +327,7 @@ def run_one_experiment(
     eval_slices: Optional[EvalSlices] = None,
     save_jsonl_path: Optional[str] = None,
     save_summary_path: Optional[str] = None,
+    dataset_name: Optional[str] = None,
 ) -> RunResult:
     # choose device and set reproducible seed
     device = torch.device(base_train_cfg.device)
@@ -402,6 +404,7 @@ def run_one_experiment(
         # save to json
         if save_jsonl_path is not None:
             row = {
+                "dataset": dataset_name,
                 "run": run.name,
                 "seed": run.seed,
                 "model_cfg": asdict(run.model_cfg),
@@ -424,6 +427,7 @@ def run_one_experiment(
 
     # save one final run summary as a JSONL row 
     summary = {
+        "dataset": dataset_name,
         "name": run.name,
         "seed": run.seed,
         "epochs": epochs,
@@ -440,6 +444,7 @@ def run_one_experiment(
 
     # return structured result object
     return RunResult(
+        dataset=dataset_name,
         name=run.name,
         seed=run.seed,
         epochs=epochs,
@@ -453,6 +458,9 @@ def run_one_experiment(
 # what happens when you run python train.py lol
 def main():   
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # use GPU if avail, if not cpu 
+
+    # dataset sweep loop needs to be added 👋👋
+
 
 
     # choose one:

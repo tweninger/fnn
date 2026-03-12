@@ -12,6 +12,7 @@ from models.tgn_model import build_tgn_model
 """
 - mini-sweep smoke again a) does it even work b) lets compare mixing and matching w miss cartesian product 
 - again the same JSON results and summary are outputted for each run
+- added failure catching in main
 """
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,17 +66,22 @@ def main():
     results = []
     for run in runs:
         print(f"\n🧹 🧹 === Running {run.name} === 🧹 🧹")
-        result = run_one_experiment(
-            ds=ds,
-            spec=spec,
-            base_train_cfg=base_train_cfg,
-            run=run,
-            build_model_fn=build_tgn_model,
-            epochs=6, # freestyling here
-            eval_slices=EvalSlices(early_steps=10),
-            save_jsonl_path="results/mini_sweep_results_6ep_3seeds.jsonl",
-            save_summary_path="results/mini_sweep_summary_6ep_3seeds.jsonl",
-        )
+        try:
+            result = run_one_experiment(
+                ds=ds,
+                spec=spec,
+                base_train_cfg=base_train_cfg,
+                run=run,
+                build_model_fn=build_tgn_model,
+                epochs=6, # freestyling here
+                eval_slices=EvalSlices(early_steps=10),
+                save_jsonl_path="results/mini_sweep_results_6ep_3seeds.jsonl",
+                save_summary_path="results/mini_sweep_summary_6ep_3seeds.jsonl",
+            )
+        # catching failures before they blow up the whole run    
+        except Exception as e:
+            print(f"FAILED: run={run.name}, seed={run.seed}, error={type(e).__name__}: {e}")
+        
         results.append(asdict(result))
 
 
