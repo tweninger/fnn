@@ -108,8 +108,7 @@ def main():
 
     for r in results:
             by_dataset[r.get("dataset", "UNKNOWN")].append(r)
-
-
+            
     # print entire best run result per dataset into terminal for a quick peek
     print("\n=== Best runs per dataset ===")
 

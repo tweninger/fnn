@@ -18,19 +18,23 @@ from collections import defaultdict
 """
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    results = []
 
     dataset_names = ("Wikipedia", "Reddit", "MOOC", "LastFM")
+
+    #loop over all 4 datasets in JODIE
     for dataset_name in dataset_names:
         ds = JODIEBinnedDataset(
             JODIEConfig(root="./data/JODIE", name=dataset_name, device=device)
         )
+
         spec = ds.spec()
 
         base_train_cfg = TrainConfig(
             num_nodes=spec.num_nodes,
             num_neg=20,
             tbptt_steps=1,
-            log_every=50,
+            log_every=1000 if dataset_name == "LastFM" else 50, #LastFM -> way more events
             device=device,
             weight_decay=1e-3,
             lr=1e-3,
@@ -38,22 +42,21 @@ def main():
 
         base_model_cfg = ModelConfig(
             node_dim=128,
-            msg_dim=128,
-            event_dim=spec.event_dim,
-            scorer="mlp",
-            scorer_hidden=256,
-            aggregator="sum",
+            msg_dim=128, # size of message representation
+            event_dim=spec.event_dim, # event feature dimension from ds
+            scorer="mlp", #mlp scoring head
+            scorer_hidden=256, # hidden width of scorer
+            aggregator="sum",          # baseline
             use_time_features=False,
-            dropout=0.0,
+            dropout=0.0, # none by default? ok
             scorer_dropout=0.0,
             encoder_hidden=256,
-            update="tgn_gru",
         )
 
         #again how we're getting out sweeping sweep sweep sweep! 🧹🧹🧹
         runs = make_runs(
             base_model_cfg,
-            seeds=(0,), # freestyling here, up to 3 
+            seeds=(0, 42, 123), # freestyling here, up to 3 
             aggregator=("ift", "hopfield","settransformer", "sum", "deepsets"),
             upd = ("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn",),
             dropout=(0.0,),
@@ -67,7 +70,6 @@ def main():
             ift_kappa_max=(None,),
         )
 
-        results = []
         for run in runs:
             run_for_ds = replace(run, name=f"{dataset_name}__{run.name}")
             
@@ -82,32 +84,34 @@ def main():
                     build_model_fn=build_tgn_model,
                     epochs=6, # freestyling here
                     eval_slices=EvalSlices(early_steps=10),
-                    save_jsonl_path="results/ds_sweep_results_6ep_1seed.jsonl",
-                    save_summary_path="results/ds_sweep_summary_6ep_1seed.jsonl",
+                    save_jsonl_path="results/ds_sweep_results_6ep_3seed.jsonl",
+                    save_summary_path="results/ds_sweep_summary_6ep_3seed.jsonl",
                     dataset_name=dataset_name,  # added this
                 )
-            results.append(asdict(result))
+                results.append(asdict(result))
 
             except Exception as e:
                 print(f"FAILED: dataset={dataset_name}, run={run.name}, seed={run.seed}, error={type(e).__name__}: {e}")
             
-            
+    by_dataset = defaultdict(list)
 
-        by_dataset = defaultdict(list)
-        for r in results:
-            by_dataset[r.get("dataset", "UNKNOWN")].append(r)
+    for r in results:
+        by_dataset[r.get("dataset", "UNKNOWN")].append(r)
 
-        print("\n=== Best runs per dataset ===")
-        for dataset, rows in by_dataset.items():
-            rows.sort(key=lambda r: r["best_val_mrr"], reverse=True)
-            print(f"\n--- {dataset} ---")
-            for r in rows[:5]:
-                best_test = r["best_snapshot"]["test"]["mrr"]
-                print(
-                    f"{r['name']} | seed={r['seed']} | "
-                    f"best_val={r['best_val_mrr']:.4f} "
-                    f"@epoch {r['best_epoch']} | best_test={best_test:.4f}"
-                )
+    # print entire best run result per dataset into terminal for a quick peek
+    print("\n=== Best runs per dataset ===")
+        
+    for dataset, rows in by_dataset.items():
+        rows.sort(key=lambda r: r["best_val_mrr"], reverse=True)
+        print(f"\n--- {dataset} ---")
+
+        for r in rows[:5]:
+            best_test = r["best_snapshot"]["test"]["mrr"]
+            print(
+                f"{r['name']} | seed={r['seed']} | "
+                f"best_val={r['best_val_mrr']:.4f} "
+                f"@epoch {r['best_epoch']} | best_test={best_test:.4f}"
+            )
             
 if __name__ == "__main__":
     main()

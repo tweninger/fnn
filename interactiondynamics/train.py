@@ -461,8 +461,6 @@ def main():
 
     # dataset sweep loop needs to be added 👋👋
 
-
-
     # choose one:
     # ds = ToyShiftDataset(ToyShiftConfig(device=device))
     # or:
@@ -521,18 +519,22 @@ def main():
     # for each run, print it, run experiment for 6 epochs, save per epoch results, keep final result in memory
     results: list[RunResult] = []
     for run in runs:
-        print(run)
-        res = run_one_experiment(
-            ds=ds,
-            spec=spec,
-            base_train_cfg=base_train_cfg,
-            run=run,
-            build_model_fn=build_tgn_model, # type: ignore
-            epochs=6,  
-            eval_slices=EvalSlices(early_steps=10),
-            save_jsonl_path="results/sweep_results.jsonl",
-            save_summary_path="results/sweep_summary.jsonl",
-        )
+        
+        try:
+            print(run)
+            res = run_one_experiment(
+                ds=ds,
+                spec=spec,
+                base_train_cfg=base_train_cfg,
+                run=run,
+                build_model_fn=build_tgn_model, # type: ignore
+                epochs=6,  
+                eval_slices=EvalSlices(early_steps=10),
+                save_jsonl_path="results/sweep_results.jsonl",
+                save_summary_path="results/sweep_summary.jsonl",
+            )
+        except Exception as e:
+            print(f"FAILED: dataset={dataset_name}, run={run.name}, seed={run.seed}, error={type(e).__name__}: {e}")
         results.append(res)
 
     # sort runs by best val MRR and print top 20/experiment comparison
