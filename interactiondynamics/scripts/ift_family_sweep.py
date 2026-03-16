@@ -66,28 +66,28 @@ def main():
 
     runs = make_runs(
         base_model_cfg,
-        seeds=(0, 42, 123),
-        aggregator=("ift", "hopfield", "settransformer", "sum", "deepsets"),
-        upd=("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
+        seeds=(0,), # one seed
+        aggregator=("ift",),
+        upd=("ift_update",),
         dropout=(0.0,),
         scorer_dropout=(0.0,),
         use_time_features=(False,),
         ift_kappa_param=("softplus",),
-        ift_dt=(0.05,),
-        ift_gamma=(0.0,),
-        ift_kappa_init=(1.0,),
+        ift_dt=(0.01, 0.05, 0.1, 0.2), #just changed these 3
+        ift_gamma=(0.0, 0.01, 0.05, 0.1),
+        ift_kappa_init=(0.1, 0.5, 1.0, 2.0),
         ift_kappa_cap=(False,),
         ift_kappa_max=(None,),
     )
 
     results_jsonl = os.path.join(
-    args.results_dir, f"{dataset_name}_hyperparam_results_{args.epochs}ep_1seed.jsonl"
+    args.results_dir, f"{dataset_name}_results_{args.epochs}ep_1seed.jsonl"
     )
     summary_jsonl = os.path.join(
-    args.results_dir, f"{dataset_name}_hyperparam_summary_{args.epochs}ep_1seed.jsonl"
+    args.results_dir, f"{dataset_name}_summary_{args.epochs}ep_1seed.jsonl"
     )
 
-    results = []
+    results = [] # don't forget this
 
     for run in runs:
         run_for_ds = replace(run, name=f"{dataset_name}__{run.name}")

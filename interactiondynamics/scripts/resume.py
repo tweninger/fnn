@@ -1,6 +1,6 @@
 from dataclasses import asdict, replace
-import argparse
-import os
+import json
+from pathlib import Path
 import torch
 
 from train import TrainConfig, run_one_experiment, make_runs
@@ -10,42 +10,48 @@ from eval.evaluate import EvalSlices
 from models.tgn_model import build_tgn_model
 
 
+def load_completed_lastfm(summary_path):
+    completed = set()
+
+    if not Path(summary_path).exists():
+        return completed
+
+    with open(summary_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+
+            if r.get("dataset") == "LastFM":
+                completed.add((r["name"], r["seed"]))
+
+    return completed
+
+
 def main():
-    print("entered main", flush=True)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        choices=["Wikipedia", "Reddit", "MOOC", "LastFM"],
-        help="Which JODIE dataset to run",
-    )
-    parser.add_argument("--epochs", type=int, default=6)
-    parser.add_argument("--results_dir", type=str, default="results")
-    args = parser.parse_args()
-
-    print(f"args = {args}", flush=True)
-
-    os.makedirs(args.results_dir, exist_ok=True)
-
-    dataset_name = args.dataset
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device = {device}", flush=True)
+    results = []
+
+    dataset_name = "LastFM"
+
+    results_path = "results/ds_sweep_results_6ep_3seed.jsonl"
+    summary_path = "results/ds_sweep_summary_6ep_3seed.jsonl"
+
+    completed_lastfm = load_completed_lastfm(summary_path)
+    print(f"Found {len(completed_lastfm)} completed LastFM runs in summary file.")
 
     ds = JODIEBinnedDataset(
         JODIEConfig(root="./data/JODIE", name=dataset_name, device=device)
     )
-    print("dataset constructed", flush=True)
 
     spec = ds.spec()
-    print(f"spec = {spec}", flush=True)
 
     base_train_cfg = TrainConfig(
         num_nodes=spec.num_nodes,
         num_neg=20,
         tbptt_steps=1,
-        log_every=1000 if dataset_name == "LastFM" else 50,
+        log_every=1000,
         device=device,
         weight_decay=1e-3,
         lr=1e-3,
@@ -80,19 +86,19 @@ def main():
         ift_kappa_max=(None,),
     )
 
-    results_jsonl = os.path.join(
-    args.results_dir, f"{dataset_name}_hyperparam_results_{args.epochs}ep_1seed.jsonl"
-    )
-    summary_jsonl = os.path.join(
-    args.results_dir, f"{dataset_name}_hyperparam_summary_{args.epochs}ep_1seed.jsonl"
-    )
-
-    results = []
-
+    pending = []
     for run in runs:
         run_for_ds = replace(run, name=f"{dataset_name}__{run.name}")
 
-        print(f"\n🧹🧹 === Running {run_for_ds.name} === 🧹🧹")
+        if (run_for_ds.name, run_for_ds.seed) in completed_lastfm:
+            continue
+
+        pending.append((run, run_for_ds))
+
+    print(f"Need to run {len(pending)} missing LastFM runs.")
+
+    for run, run_for_ds in pending:
+        print(f"\n🧹🧹 === Running MISSING {run_for_ds.name} === 🧹🧹")
 
         try:
             result = run_one_experiment(
@@ -101,13 +107,16 @@ def main():
                 base_train_cfg=base_train_cfg,
                 run=run_for_ds,
                 build_model_fn=build_tgn_model,
-                epochs=args.epochs,
+                epochs=6,
                 eval_slices=EvalSlices(early_steps=10),
-                save_jsonl_path=results_jsonl,
-                save_summary_path=summary_jsonl,
+                save_jsonl_path=results_path,
+                save_summary_path=summary_path,
                 dataset_name=dataset_name,
             )
             results.append(asdict(result))
+
+            # update in-memory set too
+            completed_lastfm.add((run_for_ds.name, run_for_ds.seed))
 
         except Exception as e:
             print(
@@ -117,7 +126,7 @@ def main():
 
     results.sort(key=lambda r: r["best_val_mrr"], reverse=True)
 
-    print(f"\n=== Best runs for {dataset_name} ===")
+    print(f"\n=== Best newly completed LastFM runs ===")
     for r in results[:5]:
         best_test = r["best_snapshot"]["test"]["mrr"]
         print(
