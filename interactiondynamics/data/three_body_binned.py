@@ -314,18 +314,18 @@ class ThreeBodyBinnedConfig:
 _EDGE_FEATURE_NAMES: Sequence[str] = (
 
     # receiver body identity / local state
-    "recv_mass",
-    "send_mass",
-    "recv_px",
-    "recv_py",
-    "recv_vx",
-    "recv_vy",
+    # "recv_mass",
+    # "send_mass",
+    # "recv_px",
+    # "recv_py",
+    # "recv_vx",
+    # "recv_vy",
 
     # sender body local state
-    "send_px",
-    "send_py",
-    "send_vx",
-    "send_vy",
+    # "send_px",
+    # "send_py",
+    # "send_vx",
+    # "send_vy",
 
     # relationship features between sender and receiver
     "rel_px",
@@ -335,12 +335,12 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     "distance",
 
     # force like / influence features
-    "acc_x",
-    "acc_y",
-    "acc_mag",
+    # "acc_x",
+    # "acc_y",
+    # "acc_mag",
 
     # one global summary feature
-    "energy",
+    # "energy",
 )
 
 
@@ -379,25 +379,25 @@ def _pair_record(state: np.ndarray, sender: int, receiver: int, epsilon: float) 
 
     feats = np.array(
         [
-            recv_mass,
-            send_mass,
-            recv_pos[0],
-            recv_pos[1],
-            recv_vel[0],
-            recv_vel[1],
-            send_pos[0],
-            send_pos[1],
-            send_vel[0],
-            send_vel[1],
+            # recv_mass,
+            # send_mass,
+            # recv_pos[0],
+            # recv_pos[1],
+            # recv_vel[0],
+            # recv_vel[1],
+            # send_pos[0],
+            # send_pos[1],
+            # send_vel[0],
+            # send_vel[1],
             rel_pos[0],
             rel_pos[1],
             rel_vel[0],
             rel_vel[1],
             distance,
-            acc_vec[0],
-            acc_vec[1],
-            acc_mag,
-            total_energy(state),
+            # acc_vec[0],
+            # acc_vec[1],
+            # acc_mag,
+            # total_energy(state),
         ],
         dtype=np.float32,
     )

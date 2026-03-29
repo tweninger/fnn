@@ -12,10 +12,10 @@ from data.jodie import JODIEBinnedDataset, JODIEConfig
 from eval.evaluate import EvalSlices
 from models.tgn_model import build_tgn_model
 from collections import defaultdict
-from data.nbody_continuous import NBodyConfig, NBodyDataset
 from data.three_body_binned import ThreeBodyBinnedConfig, ThreeBodyBinnedDataset
 from data.one_dimension_wave_binned import WaveEquationBinnedDataset, WaveEquationBinnedConfig
 from data.md22_binned import MD22BinnedConfig, MD22BinnedDataset
+from data.nbody_continuous import ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset 
 
 """
 - small sweep again, but we are checking across all JODIE datasets
@@ -99,18 +99,17 @@ def summarize_event_counts(ds, split="train"):
 
     return counts
 
-
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results = []
     # dataset_names = ("Wikipedia", "Reddit", "MOOC", "LastFM")
-    dataset_names = ("molecular_dynamics",)
+    dataset_names = ("nbody",)
     #loop over all 4 datasets in JODIE
     for dataset_name in dataset_names:
-        ds = MD22BinnedDataset(MD22BinnedConfig(device=device))
+        #ds = MD22BinnedDataset(MD22BinnedConfig(device=device))
         # ds = WaveEquationBinnedDataset(WaveEquationBinnedConfig(device=device))
         # ds = ThreeBodyBinnedDataset(ThreeBodyBinnedConfig(device=device))
-        # ds = NBodyDataset(NBodyConfig(device=device))
+        ds = ChargedParticlesBinnedDataset(ChargedParticlesBinnedConfig(device=device))
         # ds = JODIEBinnedDataset(
         #     JODIEConfig(root="./data/JODIE", name=dataset_name, device=device)
         # )
@@ -158,9 +157,9 @@ def main():
         #again how we're getting out sweeping sweep sweep sweep! 🧹🧹🧹
         runs = make_runs(
             base_model_cfg,
-            seeds=(0, 42, 123), # freestyling here, 0, 42, 123
+            seeds=(0, ), # freestyling here, 0, 42, 123
             aggregator=("ift", "sum"),
-            upd = ("ift_update", "tgn_gru"),
+            upd = ("ift_update", "tgn_gru", ),
             dropout=(0.0,),
             scorer_dropout=(0.0,),
             use_time_features=(False,),
@@ -175,6 +174,7 @@ def main():
         allowed_pairs = {
         ("sum", "tgn_gru"),
         ("ift", "ift_update"),
+        #("sum", "lnn")
         }
         
         runs = [
@@ -196,8 +196,8 @@ def main():
                     build_model_fn=build_tgn_model,
                     epochs=6, # freestyling here
                     eval_slices=EvalSlices(early_steps=10),
-                    save_jsonl_path="results/MD_ift_bl_debug_results.jsonl",
-                    save_summary_path="results/MD_ift_bl_debug_summary.json",
+                    save_jsonl_path="results/wave_ift_bl_debug_results.jsonl",
+                    save_summary_path="results/wave_ift_bl_debug_summary.json",
                     dataset_name=dataset_name,  # added this
                 )
                 results.append(asdict(result))

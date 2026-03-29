@@ -40,7 +40,7 @@ class MD22BinnedConfig:
     name: str = "md22_binned"
 
     # path to one MD17 / rMD17 / MD22 .npz file
-    npz_path: str = "/home/akapociu/ift/interactiondynamics/data/stachyose.npz"
+    npz_path: str = "/home/akapociu/ift/interactiondynamics/data/MD_DATA/naphthalene.npz"
 
     # optional subsampling 
     frame_stride: int = 100

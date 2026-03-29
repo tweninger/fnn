@@ -226,8 +226,8 @@ class WaveEquationBinnedConfig:
     name: str = "wave_equation_binned"
 
     # GRID / TIME
-    num_nodes: int = 64
-    num_bins: int = 400
+    num_nodes: int = 32
+    num_bins: int = 128
     domain_length: float = 1.0
     t_span: Tuple[float, float] = (0.0, 20.0)
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
@@ -251,8 +251,8 @@ class WaveEquationBinnedConfig:
     # "all_neighbors" = faithful dense physics graph emission
     # "thresholded"   = sparse eventization layer on top of the same physics graph
     event_mode: str = "thresholded"
-    interaction_threshold: float = 658.964
-    threshold_metric: str = "pair_accel"   # {"pair_accel","rel_q","rel_v","pair_grad"}
+    interaction_threshold: float = 0.16088
+    threshold_metric: str = "rel_q"   # {"pair_accel","rel_q","rel_v","pair_grad"}
     threshold_use_absolute: bool = True
     threshold_keep_one_if_empty: bool = True
 
@@ -270,16 +270,16 @@ class WaveEquationBinnedConfig:
 
 _EDGE_FEATURE_NAMES: Sequence[str] = (
     # geometry on the ring
-    "recv_x",
-    "send_x",
+    #"recv_x",
+    #"send_x",
 
     # receiver local state
-    "recv_q",
-    "recv_v",
+    #"recv_q",
+    #"recv_v",
 
     # sender local state
-    "send_q",
-    "send_v",
+    #"send_q",
+    #"send_v",
 
     # pairwise relative state
     "rel_q",
@@ -292,8 +292,8 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     "pair_accel_contrib",     # c^2 * (q_j - q_i) / dx^2
 
     # optional summary features
-    "recv_local_energy",
-    "global_energy",
+    #"recv_local_energy",
+    #"global_energy",
 )
 
 
@@ -340,20 +340,20 @@ def _pair_record(
 
     feats = np.array(
         [
-            x_positions[receiver],
-            x_positions[sender],
-            recv_q,
-            recv_v,
-            send_q,
-            send_v,
+            # x_positions[receiver],
+            # x_positions[sender],
+            # recv_q,
+            # recv_v,
+            # send_q,
+            # send_v,
             rel_q,
             rel_v,
             direction,
             dx,
             pair_grad,
             pair_accel_contrib,
-            recv_local_e,
-            global_e,
+            # recv_local_e,
+            # global_e,
         ],
         dtype=np.float32,
     )
