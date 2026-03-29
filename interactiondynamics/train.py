@@ -1,5 +1,6 @@
 # train.py
 
+import os
 # helps make combinations of settings
 import itertools
 # save results to json
@@ -240,6 +241,13 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+    #added to see if i can fix seed reproducability issue
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True)
+    
 
 
 # BUILDS HUGE EXPERIMENT SWEEP!

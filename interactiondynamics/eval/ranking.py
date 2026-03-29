@@ -165,6 +165,7 @@ def ranking_loss_and_metrics(
         candidates_dst=candidates_dst,
         t=next_events.t,
         features=next_events.features,
+        #features=None,
     )
 
     assert cand_batch.src.numel() == M * K1
@@ -197,7 +198,36 @@ def ranking_loss_and_metrics(
 
     scores = model.score(state_eval, cand_batch)  # (M*K1,)
 
+    # ---- DEBUG: inspect a few candidate rows manually ----
+    # if not torch.is_grad_enabled():
 
+    #     with torch.no_grad():
+    #         scores_mat = scores.view(M, K1)   # each row = [positive, neg1, neg2, ...]
+    #         ranks = (scores_mat >= scores_mat[:, :1]).sum(dim=1)  # 1 = best rank
+    #         # if you want strict ranking instead:
+    #         # ranks = 1 + (scores_mat[:, 1:] > scores_mat[:, :1]).sum(dim=1)
+
+    #         n_show = min(5, M)
+    #         print("\n===== DEBUG CANDIDATE ROWS =====")
+    #         for i in range(n_show):
+    #             src_i = int(next_events.src[i].item())
+    #             pos_i = int(next_events.dst[i].item())
+    #             cand_i = candidates_dst[i].tolist()
+    #             score_i = [float(x) for x in scores_mat[i].detach().cpu()]
+    #             rank_i = int(ranks[i].item())
+
+    #             print(f"\nrow {i}")
+    #             print(f"  src           : {src_i}")
+    #             print(f"  positive dst  : {pos_i}")
+    #             print(f"  candidates dst: {cand_i}")
+    #             print(f"  scores        : {score_i}")
+    #             print(f"  positive rank : {rank_i}")
+
+    #             # optional: best candidate according to model
+    #             best_col = int(torch.argmax(scores_mat[i]).item())
+    #             best_dst = int(candidates_dst[i, best_col].item())
+    #             print(f"  predicted dst : {best_dst} (col {best_col})")
+    #         print("===== END DEBUG =====\n")
     assert torch.equal(before, state.node.detach()), "score() mutated state.node"
     
     assert scores.shape == (M * K1,), f"scores has shape {tuple(scores.shape)} expected {(M*K1,)}"

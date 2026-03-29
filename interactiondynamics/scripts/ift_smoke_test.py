@@ -8,6 +8,8 @@ from core.config import ModelConfig
 from data.jodie import JODIEBinnedDataset, JODIEConfig
 from eval.evaluate import EvalSlices
 from models.tgn_model import build_tgn_model
+from data.nbody_continuous import NBodyConfig, NBodyDataset
+from data.spring_mass import SpringMassConfig, SpringMassDataset
 
 """
 - just one run/one epoch with IFT x IFT to check if this works
@@ -19,13 +21,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Dataset
-    ds = JODIEBinnedDataset(
-        JODIEConfig(
-            root="./data/JODIE",
-            name="Wikipedia",
-            device=device,
-        )
-    )
+
+    ds = NBodyDataset(NBodyConfig(device=device))
+    # ds = SpringMassDataset(SpringMassConfig(device=device))
+    # ds = JODIEBinnedDataset(
+    #     JODIEConfig(
+    #         root="./data/JODIE",
+    #         name="Wikipedia",
+    #         device=device,
+    #     )
+    # )
     spec = ds.spec()
 
     print("Loaded dataset spec:", spec)
@@ -49,12 +54,12 @@ def main():
         event_dim=spec.event_dim,
         scorer="mlp",
         scorer_hidden=256,
-        aggregator="ift",
+        aggregator="sum",
         use_time_features=False,
         dropout=0.0,
         scorer_dropout=0.0,
         encoder_hidden=256,
-        update="ift_update",
+        update="tgn_gru",
         ift_kappa_param="softplus",
         ift_dt=0.05,
         ift_gamma=0.0,
@@ -80,8 +85,8 @@ def main():
         build_model_fn=build_tgn_model,
         epochs=6, # 1 or 6 atm
         eval_slices=EvalSlices(early_steps=10),
-        save_jsonl_path="results/ift_results_6ep.jsonl", # results go into this file/folder
-        save_summary_path="results/ift_summary_6ep.jsonl", #that summary at the end is here
+        save_jsonl_path="results/newbl_results_nbody.jsonl", # results go into this file/folder
+        save_summary_path="results/newbl_summary_nbody.json",
     )
 
     # yay hearts

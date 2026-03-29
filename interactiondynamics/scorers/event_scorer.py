@@ -102,14 +102,14 @@ class MLPEdgeScorer(ScoringHead):
                 assert candidate_events.features.size(1) == self.event_dim, \
                     f"features dim {candidate_events.features.size(1)} != event_dim {self.event_dim}"
                 e = candidate_events.features.to(device=H.device, dtype=H.dtype)
-            pieces.append(e)
+            pieces.append(e) # append event feature
 
         # time features
         if self.use_time: # take timestamp t and include that in MLP
             assert candidate_events.t is not None, "use_time=True but candidate_events.t is None"
             t = candidate_events.t.to(device=H.device, dtype=H.dtype).view(-1, 1)
             assert self.time_mlp is not None
-            pieces.append(self.time_mlp(t))
+            pieces.append(self.time_mlp(t)) # append learned time embedding if use_time =true
         
         # concatenate and score -- gives one scalar score per candidate event
         x = torch.cat(pieces, dim=-1)

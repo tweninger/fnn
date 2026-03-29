@@ -11,32 +11,42 @@ from models.tgn_model import build_tgn_model
 
 
 def main():
-    print("entered main", flush=True)
+    # print("entered main", flush=True)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        choices=["Wikipedia", "Reddit", "MOOC", "LastFM"],
-        help="Which JODIE dataset to run",
-    )
-    parser.add_argument("--epochs", type=int, default=6)
-    parser.add_argument("--results_dir", type=str, default="results")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument(
+    #     "--dataset",
+    #     type=str,
+    #     required=True,
+    #     choices=["Wikipedia", "Reddit", "MOOC", "LastFM"],
+    #     help="Which JODIE dataset to run",
+    # )
+    # parser.add_argument("--epochs", type=int, default=6)
+    # parser.add_argument("--results_dir", type=str, default="results")
+    # args = parser.parse_args()
 
-    print(f"args = {args}", flush=True)
+    # print(f"args = {args}", flush=True)
 
-    os.makedirs(args.results_dir, exist_ok=True)
+    # os.makedirs(args.results_dir, exist_ok=True)
 
-    dataset_name = args.dataset
+    # dataset_name = args.dataset
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device = {device}", flush=True)
 
+    # ds = JODIEBinnedDataset(
+    #     JODIEConfig(root="./data/JODIE", name=dataset_name, device=device)
+    # )
+    # print("dataset constructed", flush=True)
+
+    # Dataset
     ds = JODIEBinnedDataset(
-        JODIEConfig(root="./data/JODIE", name=dataset_name, device=device)
+        JODIEConfig(
+            root="./data/JODIE",
+            name="Wikipedia",
+            device=device,
+        )
     )
-    print("dataset constructed", flush=True)
 
     spec = ds.spec()
     print(f"spec = {spec}", flush=True)
@@ -45,11 +55,12 @@ def main():
         num_nodes=spec.num_nodes,
         num_neg=20,
         tbptt_steps=1,
-        log_every=1000 if dataset_name == "LastFM" else 50,
+        log_every=1000, #if dataset_name == "LastFM" else 50,
         device=device,
         weight_decay=1e-3,
         lr=1e-3,
     )
+
 
     base_model_cfg = ModelConfig(
         node_dim=128,
@@ -72,15 +83,15 @@ def main():
         seeds=(0,),  # one seed
         aggregator=("sum", "deepsets", "ift", "settransformer"),
         upd=("ift_update", "tgn_gru", "hopfield_update"),
-        dropout=(0.0,),
+        dropout=(0.0, 0.3),
         scorer_dropout=(0.0,),
         use_time_features=(False, True),
         ift_kappa_param=("softplus",),
-        ift_dt=(0.01, 0.05, 0.1, 0.2),
-        ift_gamma=(0.0, 0.01, 0.05, 0.1),
-        ift_kappa_init=(0.1, 0.5, 1.0, 2.0),
-        ift_kappa_cap=(False,),
-        ift_kappa_max=(None),
+        ift_dt=(0.01, 0.2),
+        ift_gamma=(0.0, 0.1),
+        ift_kappa_init=(0.1, 2.0),
+        ift_kappa_cap=(False, True),
+        ift_kappa_max=(1.0, None),
     )
 
     # Only keep these exact architecture pairs
@@ -113,13 +124,18 @@ def main():
 
         runs.append(run)
 
+
     print(f"Kept {len(runs)} runs after filtering.", flush=True)
 
+    dataset_name = "Wikipedia"
+    results_dir = "results"
+    os.makedirs(results_dir, exist_ok=True)
+
     results_jsonl = os.path.join(
-        args.results_dir, f"specific_ift_models_{dataset_name}_results_{args.epochs}ep_1seed.jsonl"
+        results_dir, f"specific_ift_models_{dataset_name}_results_10ep_1seed.jsonl"
     )
     summary_jsonl = os.path.join(
-        args.results_dir, f"specific_ift_models_{dataset_name}_summary_{args.epochs}ep_1seed.jsonl"
+        results_dir, f"specific_ift_models_{dataset_name}_summary_10ep_1seed.jsonl"
     )
 
     results = []
@@ -136,7 +152,7 @@ def main():
                 base_train_cfg=base_train_cfg,
                 run=run_for_ds,
                 build_model_fn=build_tgn_model,
-                epochs=args.epochs,
+                epochs= 10, #args.epochs,
                 eval_slices=EvalSlices(early_steps=10),
                 save_jsonl_path=results_jsonl,
                 save_summary_path=summary_jsonl,
