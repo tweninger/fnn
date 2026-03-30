@@ -258,8 +258,8 @@ class ChargedParticlesBinnedConfig:
     name: str = "charged_particles_binned"
 
     # DATASET LENGTH / SPLIT
-    num_nodes: int = 32
-    num_bins: int = 400
+    num_nodes: int = 16
+    num_bins: int = 256
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
 
     # SIMULATION

@@ -274,7 +274,7 @@ class ThreeBodyBinnedConfig:
 
     # DATASET LENGTH + TIME SPAN
     # One long orbit, split by time into train/val/test to match the current harness.
-    num_bins: int = 2000
+    num_bins: int = 1024
     t_span: Tuple[float, float] = (0.0, 40.0)
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
 

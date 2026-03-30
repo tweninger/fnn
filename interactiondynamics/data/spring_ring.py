@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Optional, cast, List
+from typing import Iterable, Iterator, Optional, cast, List, Sequence
 
 import math
 import torch
@@ -20,19 +20,19 @@ class SpringRing2DConfig:
     name: str = "spring_ring_2d"
 
     num_nodes: int = 64
-    num_bins: int = 4000
+    num_bins: int = 1024
 
     # simulation parameters
     dt: float = 0.05 # lower for more stability
-    spring_k: float = 2.0 # increase for stronger events
+    spring_k: float = 1.0 # increase for stronger events
     damping: float = 0.995
 
     # geometry
     ring_radius: float = 5.0
 
     # random perturbations
-    init_pos_noise: float = 0.30
-    init_vel_noise: float = 0.25
+    init_pos_noise: float = 0.05
+    init_vel_noise: float = 0.05
 
     # only emit events when spring force magnitude exceeds threshold
     force_threshold: float = 0.015 # lower for more events
@@ -44,6 +44,17 @@ class SpringRing2DConfig:
     seed: int = 0
     device: Optional[torch.device] = None
 
+_EDGE_FEATURE_NAMES: Sequence[str] = (
+    # "dx",
+    # "dy",
+    # "dvx",
+    # "dvy",
+    "dist",
+    #"extension",
+    # "fx",
+    # "fy",
+)
+
 
 class SpringRing2DDataset(EventStreamDataset):
     def __init__(self, cfg: SpringRing2DConfig):
@@ -51,7 +62,7 @@ class SpringRing2DDataset(EventStreamDataset):
 
         # features:
         # [dx, dy, dvx, dvy, dist, extension, fx, fy]
-        self._event_dim = 8
+        self._event_dim = len(_EDGE_FEATURE_NAMES)
 
         self._build()
         self._split()
@@ -137,14 +148,14 @@ class SpringRing2DDataset(EventStreamDataset):
 
                 if force_mag > thr:
                     feat = [
-                        float(dpos[0]),
-                        float(dpos[1]),
-                        float(dvel[0]),
-                        float(dvel[1]),
+                        # float(dpos[0]),
+                        # float(dpos[1]),
+                        # float(dvel[0]),
+                        # float(dvel[1]),
                         float(dist),
-                        float(extension),
-                        float(force_vec[0]),
-                        float(force_vec[1]),
+                        #float(extension),
+                        # float(force_vec[0]),
+                        # float(force_vec[1]),
                     ]
 
                     src_list.append(i)
@@ -153,14 +164,14 @@ class SpringRing2DDataset(EventStreamDataset):
 
                     if bidir:
                         feat_rev = [
-                            float(-dpos[0]),
-                            float(-dpos[1]),
-                            float(-dvel[0]),
-                            float(-dvel[1]),
+                            # float(-dpos[0]),
+                            # float(-dpos[1]),
+                            # float(-dvel[0]),
+                            # float(-dvel[1]),
                             float(dist),          # distance stays positive
-                            float(extension),     # extension stays the same
-                            float(-force_vec[0]),
-                            float(-force_vec[1]),
+                            #float(extension),     # extension stays the same
+                            # float(-force_vec[0]),
+                            # float(-force_vec[1]),
                         ]
                         src_list.append(j)
                         dst_list.append(i)

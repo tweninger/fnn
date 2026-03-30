@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Optional, cast, List
+from typing import Iterable, Iterator, Optional, cast, List, Sequence
 
 import torch # hi tensors and randomness
 
@@ -23,9 +23,9 @@ class SpringMassConfig:
     name: str = "spring_mass"
 
     # number of masses (aka nodes, entities, whatever)
-    num_nodes: int = 32
+    num_nodes: int = 64
     # number of simulated time steps to run
-    num_bins: int = 2000
+    num_bins: int = 1024
 
     # physics-ish params 
     dt: float = 0.05 # integration time step (how big each time step is)
@@ -34,11 +34,11 @@ class SpringMassConfig:
     rest_length: float = 1.0 # preferred spacing between neighboring masses (the spring wants neighboring nodes to be 1 unit apart)
 
     # random initial condition scales
-    init_pos_noise: float = 0.25 # how much random displacement initially
+    init_pos_noise: float = 0.05 # how much random displacement initially
     init_vel_noise: float = 0.05 # how much random initial motion
 
     # only emit an interaction if force is above this threshold (aka "strong enough")
-    force_threshold: float = 0.03
+    force_threshold: float = 0.015
     
     # if true, store both i->j and j->i for each active spring
     bidirectional: bool = True
@@ -52,13 +52,23 @@ class SpringMassConfig:
     #frankly idek what this is
     device: Optional[torch.device] = None
 
+_EDGE_FEATURE_NAMES: Sequence[str] = (
+    # "dx",
+    # "dy",
+    # "dvx",
+    # "dvy",
+    "dist",
+    #"extension",
+    # "fx",
+    # "fy",
+)
 # dataset class shell - aka actual dataset object
 class SpringMassDataset(EventStreamDataset):
     def __init__(self, cfg: SpringMassConfig):
         self.cfg = cfg
 
         #we have 4, dx, dv, extension, and force... JODIE has msg features fyi
-        self._event_dim = 4
+        self._event_dim = len(_EDGE_FEATURE_NAMES)
 
         # build the synthetic simulation and define train/val/test splits
         self._build()
@@ -133,6 +143,7 @@ class SpringMassDataset(EventStreamDataset):
 
                 # hooke's law force magnitude/sign
                 force = k * extension
+                dist = torch.norm(dx) + 1e-8
 
                 # newton's third law:
                 # i gets +force, g gets -force
@@ -143,7 +154,8 @@ class SpringMassDataset(EventStreamDataset):
                 # only create an edge if the interaction is "strong enough" -> bc i say so
                 if torch.abs(force) > thr:
                     # event feature vector hello
-                    feat = [float(dx), float(dv), float(extension), float(force)]
+                    #feat = [float(dx), float(dv), float(extension), float(dist)]
+                    feat = [float(dist)]
 
                     #record forward edge
                     src_list.append(i)
@@ -154,7 +166,8 @@ class SpringMassDataset(EventStreamDataset):
                     if bidir:
                         src_list.append(j)
                         dst_list.append(i)
-                        feat_list.append([-feat[0], -feat[1], -feat[2], -feat[3]])
+                        #feat_list.append([-feat[0], -feat[1], -feat[2], -feat[3]])
+                        feat_list.append([-feat[0]])
 
             # if at least one spring was active, store this as a real event bin
             # aka convert python lists to tensors, create timestamp tensor t, and store the bin
