@@ -23,7 +23,7 @@ Thumbs.db
 #logs and results
 exports_suite/
 results/
-data/**
-!data/*.py
+data/JODIE
+data/MD_DATA
 logs/
 plots/
