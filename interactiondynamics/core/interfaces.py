@@ -215,12 +215,28 @@ class ScoringHead(nn.Module, ABC):
     ) -> torch.Tensor:
         pass
 
+class NodePredictionHead(nn.Module, ABC):
+    """
+    Maps latent node state to per-node predictions.
+    """
+    @abstractmethod
+    def forward(
+        self,
+        state: Optional[ModelState],
+    ) -> torch.Tensor:
+        """
+        Returns
+        -------
+        pred : Tensor [num_nodes, d_out]
+        """
+        pass
+
 # WOWOWOW real concrete model implementation that follows interactionModel interface
 # pulls everything together
 class ComposedInteractionModel(InteractionModel):
     """
     Canonical composition:
-        EventEncoder -> Aggregator -> UpdateLaw -> ScoringHead
+        EventEncoder -> Aggregator -> UpdateLaw -> (ScoringHead and/or NodePredictionHead)
     """
 
     def __init__(
@@ -228,27 +244,35 @@ class ComposedInteractionModel(InteractionModel):
         encoder: EventEncoder,
         aggregator: Aggregator,
         update: UpdateLaw,
-        scorer: ScoringHead,
         num_nodes: int,
+        scorer: Optional[ScoringHead] = None,
+        predictor: Optional[NodePredictionHead] = None,
     ):
-        super().__init__() 
+        super().__init__()
         self.encoder = encoder
         self.aggregator = aggregator
         self.update = update
         self.scorer = scorer
+        self.predictor = predictor
         self.num_nodes = num_nodes
 
-    def init_state(self, batch_size, num_nodes, device): # hidden state is owned by the update modeule... diff update laws might want diff state structure
+    def init_state(self, batch_size, num_nodes, device):
         return self.update.init_state(batch_size, num_nodes, device)
 
-    # pipelineeee for forward time
     def step(self, state, events, drive=None):
-        event_emb = self.encoder(state, events) # encode raw evenets into event embeddings
-        messages = self.aggregator( # this stuff aggregates event embeddings into per node messages
+        event_emb = self.encoder(state, events)
+        messages = self.aggregator(
             state, event_emb, events, self.num_nodes
         )
-        next_state, aux = self.update(state, messages, drive) # update hidden state with those messages
+        next_state, aux = self.update(state, messages, drive)
         return next_state, aux
-    # prediction is delegated to scorer (step - state evolution, score - event ranking/prediction)
+
     def score(self, state, candidate_events):
+        if self.scorer is None:
+            raise RuntimeError("This model was built without a scorer.")
         return self.scorer(state, candidate_events)
+
+    def predict_nodes(self, state):
+        if self.predictor is None:
+            raise RuntimeError("This model was built without a node predictor.")
+        return self.predictor(state)

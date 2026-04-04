@@ -250,7 +250,7 @@ class WaveEquationBinnedConfig:
     # EVENT EMISSION
     # "all_neighbors" = faithful dense physics graph emission
     # "thresholded"   = sparse eventization layer on top of the same physics graph
-    event_mode: str = "thresholded"
+    event_mode: str = "all_neighbors"
     interaction_threshold: float = 0.16088
     threshold_metric: str = "rel_q"   # {"pair_accel","rel_q","rel_v","pair_grad"}
     threshold_use_absolute: bool = True
@@ -286,10 +286,10 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     "rel_v",
 
     # local coupling bookkeeping
-    "direction",              # -1 for left neighbor, +1 for right neighbor
-    "dx",
-    "pair_grad",              # (q_j - q_i) / dx
-    "pair_accel_contrib",     # c^2 * (q_j - q_i) / dx^2
+    # "direction",              # -1 for left neighbor, +1 for right neighbor
+    # "dx",
+    #"pair_grad",              # (q_j - q_i) / dx
+    #"pair_accel_contrib",     # c^2 * (q_j - q_i) / dx^2
 
     # optional summary features
     #"recv_local_energy",
@@ -348,10 +348,10 @@ def _pair_record(
             # send_v,
             rel_q,
             rel_v,
-            direction,
-            dx,
-            pair_grad,
-            pair_accel_contrib,
+            # direction,
+            # dx,
+            #pair_grad,
+            #pair_accel_contrib,
             # recv_local_e,
             # global_e,
         ],
@@ -435,6 +435,9 @@ def _state_to_event_batch(
     """
     records_all: List[dict] = []
     num_nodes = q.shape[0]
+    dx = cfg.domain_length / float(cfg.num_nodes)
+    dt = (cfg.t_span[1] - cfg.t_span[0]) / float(cfg.num_bins - 1)
+
     x_positions = np.linspace(
         0.0,
         cfg.domain_length,
@@ -442,7 +445,7 @@ def _state_to_event_batch(
         endpoint=False,
         dtype=np.float64,
     )
-    global_e = discrete_total_energy(q, v, cfg.wave_speed, cfg.domain_length / float(cfg.num_nodes))
+    global_e = discrete_total_energy(q, v, cfg.wave_speed, dx)
 
     for receiver in range(num_nodes):
         left = (receiver - 1) % num_nodes
@@ -482,16 +485,33 @@ def _state_to_event_batch(
     )
     t = torch.full((src.numel(),), int(t_idx), dtype=torch.long, device=cfg.device)
 
+    # ---- node regression target: dv ----
+    q_xx = periodic_laplacian(q, dx=dx)                          # [N]
+    accel = (cfg.wave_speed ** 2) * q_xx - cfg.damping * v      # [N]
+    dv = dt * accel                                              # [N]
+
+    node_targets = torch.tensor(
+        dv[:, None], #q_xx[:, None], #dv[:, None] shape [N, 1]
+        dtype=torch.float32,
+        device=cfg.device,
+    )
+    node_mask = torch.ones(
+        (num_nodes,),
+        dtype=torch.bool,
+        device=cfg.device,
+    )
+
     eb = EventBatch(
         src=cast(torch.LongTensor, src),
         dst=cast(torch.LongTensor, dst),
         t=cast(torch.LongTensor, t),
         features=feats,
+        node_targets=node_targets,
+        node_mask=node_mask,
     )
     if cfg.device is not None:
         eb = eb.to(cfg.device)
     return eb
-
 
 # -----------------------------------------------------------------------------
 # PART 4: DATASET OBJECT THAT THE REST OF THE REPO CAN USE
@@ -575,6 +595,8 @@ class WaveEquationBinnedDataset(EventStreamDataset):
                 "threshold_keep_one_if_empty": bool(self.cfg.threshold_keep_one_if_empty),
                 "observation_noise_q": float(self.cfg.observation_noise_q),
                 "observation_noise_v": float(self.cfg.observation_noise_v),
+                "node_target_dim": 1,
+                "node_target_names": ["dv"],
             },
         )
 

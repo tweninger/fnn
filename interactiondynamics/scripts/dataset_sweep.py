@@ -16,6 +16,7 @@ from data.three_body_binned import ThreeBodyBinnedConfig, ThreeBodyBinnedDataset
 from data.one_dimension_wave_binned import WaveEquationBinnedDataset, WaveEquationBinnedConfig
 from data.md22_binned import MD22BinnedConfig, MD22BinnedDataset
 from data.nbody_continuous import ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset 
+from data.spring_ring import SpringRing2DConfig, SpringRing2DDataset
 
 """
 - small sweep again, but we are checking across all JODIE datasets
@@ -99,6 +100,7 @@ def summarize_event_counts(ds, split="train"):
 
     return counts
 
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results = []
@@ -109,7 +111,8 @@ def main():
         #ds = MD22BinnedDataset(MD22BinnedConfig(device=device))
         # ds = WaveEquationBinnedDataset(WaveEquationBinnedConfig(device=device))
         # ds = ThreeBodyBinnedDataset(ThreeBodyBinnedConfig(device=device))
-        ds = ChargedParticlesBinnedDataset(ChargedParticlesBinnedConfig(device=device))
+        #ds = ChargedParticlesBinnedDataset(ChargedParticlesBinnedConfig(device=device))
+        ds = SpringRing2DDataset(SpringRing2DConfig(device=device))
         # ds = JODIEBinnedDataset(
         #     JODIEConfig(root="./data/JODIE", name=dataset_name, device=device)
         # )
@@ -172,7 +175,7 @@ def main():
         )
 
         allowed_pairs = {
-        ("sum", "tgn_gru"),
+        #("sum", "tgn_gru"),
         ("ift", "ift_update"),
         #("sum", "lnn")
         }
@@ -194,7 +197,7 @@ def main():
                     base_train_cfg=base_train_cfg,
                     run= run_for_ds,
                     build_model_fn=build_tgn_model,
-                    epochs=6, # freestyling here
+                    epochs=1, # freestyling here
                     eval_slices=EvalSlices(early_steps=10),
                     save_jsonl_path="results/wave_ift_bl_debug_results.jsonl",
                     save_summary_path="results/wave_ift_bl_debug_summary.json",

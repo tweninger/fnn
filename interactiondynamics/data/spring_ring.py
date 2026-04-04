@@ -8,12 +8,6 @@ import torch
 from core.events import EventBatch
 from data.interfaces import DataSpec, EventStreamDataset
 
-"""
-- Its spring_mass.py... but a cycle instead of a chain
-- Main changes:
-    + nodes start on a circle
-    + spring force is now a vector (for chain its scalar foce because its on a line). Now the spring can pull in both x and y directions
-"""
 
 @dataclass
 class SpringRing2DConfig:
@@ -23,8 +17,8 @@ class SpringRing2DConfig:
     num_bins: int = 1024
 
     # simulation parameters
-    dt: float = 0.05 # lower for more stability
-    spring_k: float = 1.0 # increase for stronger events
+    dt: float = 0.05
+    spring_k: float = 1.0
     damping: float = 0.995
 
     # geometry
@@ -35,7 +29,7 @@ class SpringRing2DConfig:
     init_vel_noise: float = 0.05
 
     # only emit events when spring force magnitude exceeds threshold
-    force_threshold: float = 0.015 # lower for more events
+    force_threshold: float = 0.015
     bidirectional: bool = True
 
     # train/val/test split by time
@@ -44,13 +38,15 @@ class SpringRing2DConfig:
     seed: int = 0
     device: Optional[torch.device] = None
 
+
+# Keep whichever features you want uncommented.
 _EDGE_FEATURE_NAMES: Sequence[str] = (
-    # "dx",
-    # "dy",
-    # "dvx",
-    # "dvy",
+    "dx",
+    "dy",
+    "dvx",
+    "dvy",
     "dist",
-    #"extension",
+    "extension",
     # "fx",
     # "fy",
 )
@@ -60,8 +56,7 @@ class SpringRing2DDataset(EventStreamDataset):
     def __init__(self, cfg: SpringRing2DConfig):
         self.cfg = cfg
 
-        # features:
-        # [dx, dy, dvx, dvy, dist, extension, fx, fy]
+        # event feature dimension
         self._event_dim = len(_EDGE_FEATURE_NAMES)
 
         self._build()
@@ -91,17 +86,13 @@ class SpringRing2DDataset(EventStreamDataset):
                 radius * torch.sin(angles),
             ],
             dim=1,
-        )  # shape [N, 2]
+        )  # [N, 2]
 
-        # add a little positional noise
         x = x + self.cfg.init_pos_noise * torch.randn(N, 2, generator=g)
-
-        # small random initial velocities in 2D
         v = self.cfg.init_vel_noise * torch.randn(N, 2, generator=g)
 
         # --------------------------------------------------
-        # 2) Rest length = distance between neighboring points
-        #    on the ideal ring
+        # 2) Rest length between neighboring points
         # --------------------------------------------------
         neighbor_angle = 2 * math.pi / N
         rest = 2 * radius * math.sin(neighbor_angle / 2)
@@ -110,6 +101,7 @@ class SpringRing2DDataset(EventStreamDataset):
         self.dst_bins: List[torch.Tensor] = []
         self.t_bins: List[torch.Tensor] = []
         self.feat_bins: List[torch.Tensor] = []
+        self.node_target_bins: List[torch.Tensor] = []
 
         # --------------------------------------------------
         # 3) Simulate through time
@@ -117,28 +109,22 @@ class SpringRing2DDataset(EventStreamDataset):
         for b in range(T):
             net_force = torch.zeros(N, 2, dtype=torch.float32)
 
-            src_list, dst_list, feat_list = [], [], []
+            src_list: List[int] = []
+            dst_list: List[int] = []
+            feat_list: List[List[float]] = []
 
             # ring topology: i connected to (i+1)%N
-            # dpos: where j is relative to i
-            # dist: how far apart they are
-            # direction: which way the spring points
-            # extension: stretched vs compressed
-            # force_vec: gives actual 2D force
             for i in range(N):
                 j = (i + 1) % N
 
-                # vector from i to j
-                dpos = x[j] - x[i]         # shape [2]
-                dvel = v[j] - v[i]         # shape [2]
+                dpos = x[j] - x[i]   # [2]
+                dvel = v[j] - v[i]   # [2]
 
                 dist = torch.norm(dpos) + 1e-8
                 direction = dpos / dist
-
                 extension = dist - rest
 
-                # Hooke's law in vector form:
-                # force points along the spring direction
+                # Hooke's law
                 force_vec = k * extension * direction
 
                 net_force[i] += force_vec
@@ -147,15 +133,16 @@ class SpringRing2DDataset(EventStreamDataset):
                 force_mag = torch.norm(force_vec)
 
                 if force_mag > thr:
+                    feat = []
                     feat = [
-                        # float(dpos[0]),
-                        # float(dpos[1]),
-                        # float(dvel[0]),
-                        # float(dvel[1]),
+                        float(dpos[0]),
+                        float(dpos[1]),
+                        float(dvel[0]),
+                        float(dvel[1]),
                         float(dist),
-                        #float(extension),
-                        # float(force_vec[0]),
-                        # float(force_vec[1]),
+                        float(extension),
+                    #     float(force_vec[0]),
+                    #     float(force_vec[1]),
                     ]
 
                     src_list.append(i)
@@ -163,37 +150,55 @@ class SpringRing2DDataset(EventStreamDataset):
                     feat_list.append(feat)
 
                     if bidir:
+                        feat_rev = []
                         feat_rev = [
-                            # float(-dpos[0]),
-                            # float(-dpos[1]),
-                            # float(-dvel[0]),
-                            # float(-dvel[1]),
-                            float(dist),          # distance stays positive
-                            #float(extension),     # extension stays the same
-                            # float(-force_vec[0]),
-                            # float(-force_vec[1]),
-                        ]
+                             float(-dpos[0]),
+                             float(-dpos[1]),
+                             float(-dvel[0]),
+                             float(-dvel[1]),
+                             float(dist),
+                             float(extension),
+                        #     float(-force_vec[0]),
+                        #     float(-force_vec[1]),
+                         ]
+
                         src_list.append(j)
                         dst_list.append(i)
                         feat_list.append(feat_rev)
 
+            # --------------------------------------------------
+            # 4) Compute next state and node targets
+            # --------------------------------------------------
+            v_prev = v.clone()
+
+            a = net_force                      # assume unit mass
+            v_next = damping * (v + dt * a)
+            x_next = x + dt * v_next
+
+            # next-step delta velocity target: [N, 2]
+            node_targets = (v_next - v_prev).clone()
+
+            # store this bin only if it has events
             if len(src_list) > 0:
                 src = torch.tensor(src_list, dtype=torch.long)
                 dst = torch.tensor(dst_list, dtype=torch.long)
-                feats = torch.tensor(feat_list, dtype=torch.float32)
+
+                if self._event_dim == 0:
+                    feats = torch.empty((len(src_list), 0), dtype=torch.float32)
+                else:
+                    feats = torch.tensor(feat_list, dtype=torch.float32)
+
                 t = torch.full((len(src_list),), b, dtype=torch.long)
 
                 self.src_bins.append(src)
                 self.dst_bins.append(dst)
                 self.t_bins.append(t)
                 self.feat_bins.append(feats)
+                self.node_target_bins.append(node_targets)
 
-            # --------------------------------------------------
-            # 4) Update dynamics
-            # --------------------------------------------------
-            a = net_force                    # assume unit mass
-            v = damping * (v + dt * a)
-            x = x + dt * v
+            # advance system
+            x = x_next
+            v = v_next
 
         self._num_bins = len(self.src_bins)
         self._num_events = sum(s.numel() for s in self.src_bins)
@@ -218,6 +223,10 @@ class SpringRing2DDataset(EventStreamDataset):
             event_dim=self._event_dim,
             num_events=self._num_events,
             num_bins=self._num_bins,
+            extra={
+                "node_target_dim": 2,
+                "node_target_names": ["dvx", "dvy"],
+            },
         )
 
     def bins(self, split: str = "train") -> Iterable[EventBatch]:
@@ -226,17 +235,19 @@ class SpringRing2DDataset(EventStreamDataset):
             self.dst_bins,
             self.t_bins,
             self.feat_bins,
+            self.node_target_bins,
             self.split_bins[split],
             self.cfg.device,
         )
 
 
 class _Stream(Iterable[EventBatch]):
-    def __init__(self, src, dst, t, feat, idxs, device):
+    def __init__(self, src, dst, t, feat, node_targets, idxs, device):
         self.src = src
         self.dst = dst
         self.t = t
         self.feat = feat
+        self.node_targets = node_targets
         self.idxs = idxs
         self.device = device
 
@@ -247,6 +258,7 @@ class _Stream(Iterable[EventBatch]):
                 dst=cast(torch.LongTensor, self.dst[i]),
                 t=cast(torch.LongTensor, self.t[i]),
                 features=self.feat[i],
+                node_targets=self.node_targets[i],
             )
             if self.device is not None:
                 eb = eb.to(self.device)

@@ -38,6 +38,7 @@ class SpringMassConfig:
     init_vel_noise: float = 0.05 # how much random initial motion
 
     # only emit an interaction if force is above this threshold (aka "strong enough")
+    use_force_threshold: bool = False
     force_threshold: float = 0.015
     
     # if true, store both i->j and j->i for each active spring
@@ -57,7 +58,7 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     # "dy",
     # "dvx",
     # "dvy",
-    "dist",
+    #"dist",
     #"extension",
     # "fx",
     # "fy",
@@ -109,6 +110,7 @@ class SpringMassDataset(EventStreamDataset):
         self.dst_bins: List[torch.Tensor] = []
         self.t_bins: List[torch.Tensor] = []
         self.feat_bins: List[torch.Tensor] = []
+        self.node_target_bins: List[torch.Tensor] = []
 
         # simulate forward in time!! -> main simulation loop
         # simulate one time step at a time, for T total steps
@@ -152,38 +154,37 @@ class SpringMassDataset(EventStreamDataset):
                 net_force[j] -= force
 
                 # only create an edge if the interaction is "strong enough" -> bc i say so
-                if torch.abs(force) > thr:
-                    # event feature vector hello
-                    #feat = [float(dx), float(dv), float(extension), float(dist)]
-                    feat = [float(dist)]
+                keep_edge = (torch.abs(force) > thr) if self.cfg.use_force_threshold else True
 
-                    #record forward edge
+                if keep_edge:
+                    #feat = [float(dist)]
+                    feat = []
+
+
                     src_list.append(i)
                     dst_list.append(j)
                     feat_list.append(feat)
 
-                    # optional reverse event with sign-flipped relative quantities if bidir is true
                     if bidir:
                         src_list.append(j)
                         dst_list.append(i)
-                        #feat_list.append([-feat[0], -feat[1], -feat[2], -feat[3]])
-                        feat_list.append([-feat[0]])
+                        feat_list.append([])
 
+            node_targets = torch.stack([x, v], dim=-1)   # [N, 2]
             # if at least one spring was active, store this as a real event bin
             # aka convert python lists to tensors, create timestamp tensor t, and store the bin
             if len(src_list) > 0:
                 src = torch.tensor(src_list, dtype=torch.long)
                 dst = torch.tensor(dst_list, dtype=torch.long)
-                feats = torch.tensor(feat_list, dtype=torch.float32)
+                feats = torch.zeros((len(src_list), self._event_dim), dtype=torch.float32)
                 # every event in this bin gets the same discrete timestamp b
                 t = torch.full((len(src_list),), b, dtype=torch.long)
-
+                
                 self.src_bins.append(src)
                 self.dst_bins.append(dst)
                 self.t_bins.append(t)
                 self.feat_bins.append(feats)
-
-            # update the physical system
+                self.node_target_bins.append(node_targets.clone()) # update the physical system
             
             # a = F / m ; here m is implicitly 1
             a = net_force # acceleration is being treated as force, because mass is 1
@@ -222,6 +223,10 @@ class SpringMassDataset(EventStreamDataset):
             event_dim=self._event_dim,
             num_events=self._num_events,
             num_bins=self._num_bins,
+            extra={
+                "node_target_dim": 2,
+                "node_target_names": ["x", "v"],
+            }
         )
 
     # returns re-iterable stream object
@@ -231,21 +236,22 @@ class SpringMassDataset(EventStreamDataset):
             self.dst_bins,
             self.t_bins,
             self.feat_bins,
+            self.node_target_bins,
             self.split_bins[split],
             self.cfg.device,
         )
 
 # stores references
 class _Stream(Iterable[EventBatch]):
-    def __init__(self, src, dst, t, feat, idxs, device):
+    def __init__(self, src, dst, t, feat, node_targets, idxs, device):
         self.src = src
         self.dst = dst
         self.t = t
         self.feat = feat
+        self.node_targets = node_targets
         self.idxs = idxs
         self.device = device
 
-    # everytime you loop over the stream we get one EventBatch per selected bin
     def __iter__(self) -> Iterator[EventBatch]:
         for i in self.idxs:
             eb = EventBatch(
@@ -253,6 +259,7 @@ class _Stream(Iterable[EventBatch]):
                 dst=cast(torch.LongTensor, self.dst[i]),
                 t=cast(torch.LongTensor, self.t[i]),
                 features=self.feat[i],
+                node_targets=self.node_targets[i],
             )
             if self.device is not None:
                 eb = eb.to(self.device)

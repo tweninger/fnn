@@ -23,19 +23,26 @@ class EventBatch:
         Time associated with each event.
         Can be a discrete bin index or continuous timestamp.
     """
+
     src: torch.LongTensor
     dst: torch.LongTensor
     features: Optional[torch.Tensor] = None
     t: Optional[torch.LongTensor] = None
+    
+    node_targets: Optional[torch.Tensor] = None   # [N, d_y]
+    node_mask: Optional[torch.Tensor] = None      # [N] bool, optional
 
     def to(self, device):
-        """Move all tensors to a device."""
         self.src = cast(torch.LongTensor, self.src.to(device))
         self.dst = cast(torch.LongTensor, self.dst.to(device))
         if self.features is not None:
             self.features = self.features.to(device)
         if self.t is not None:
             self.t = cast(torch.LongTensor, self.t.to(device))
+        if self.node_targets is not None:
+            self.node_targets = self.node_targets.to(device)
+        if self.node_mask is not None:
+            self.node_mask = self.node_mask.to(device)
         return self
 
     @property

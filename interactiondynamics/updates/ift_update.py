@@ -153,6 +153,45 @@ class IFTDiffusionUpdate(UpdateLaw):
         h_next = h + self.dt * dh    # euler step... simple discrete time update: take curr state and add a timestep sized change
         # ^^ simpler than HNN symplectic update 
 
+        #DEBUGGGINGGGG
+        if state.aux is not None:
+            step_idx = state.aux.get("debug_step", 0)
+            if step_idx < 50:
+                with torch.no_grad():
+                    print(
+                        f"[IFT DEBUG] "
+                        f"kappa={float(kappa.item()):.6f} | "
+                        f"||h||={float(h.norm().item()):.6f} | "
+                        f"||messages||={float(messages.norm().item()):.6f} | "
+                        f"||inj||={float(inj.norm().item()):.6f} | "
+                        f"||Lh||={float(Lh.norm().item()):.6f} | "
+                        f"||dh||={float(dh.norm().item()):.6f} | "
+                        f"||h_next||={float(h_next.norm().item()):.6f}"
+                    )
+
+                    print(
+                        f"[IFT DEBUG] "
+                        f"max|h|={float(h.abs().max().item()):.6f} | "
+                        f"max|messages|={float(messages.abs().max().item()):.6f} | "
+                        f"max|inj|={float(inj.abs().max().item()):.6f} | "
+                        f"max|Lh|={float(Lh.abs().max().item()):.6f} | "
+                        f"max|dh|={float(dh.abs().max().item()):.6f} | "
+                        f"max|h_next|={float(h_next.abs().max().item()):.6f}"
+                    )
+                decay_term = -self.gamma * h
+                diff_term = -(kappa * Lh)
+                inj_term = inj
+
+                with torch.no_grad():
+                    print(
+                        f"[IFT TERMS] "
+                        f"||decay||={float(decay_term.norm().item()):.6f} | "
+                        f"||diff||={float(diff_term.norm().item()):.6f} | "
+                        f"||inj||={float(inj_term.norm().item()):.6f}"
+                    )
+
+                state.aux["debug_step"] = step_idx + 1
+        
         next_state = ModelState( # return next state, new node memory is h_next + aux info, so L and metadata can continue being carried around
             node=h_next,
             aux=dict(state.aux) if state.aux is not None else {}

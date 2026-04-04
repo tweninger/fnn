@@ -258,8 +258,8 @@ class ChargedParticlesBinnedConfig:
     name: str = "charged_particles_binned"
 
     # DATASET LENGTH / SPLIT
-    num_nodes: int = 16
-    num_bins: int = 256
+    num_nodes: int = 32
+    num_bins: int = 512
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
 
     # SIMULATION
@@ -277,20 +277,20 @@ class ChargedParticlesBinnedConfig:
     charge_probs: Tuple[float, float, float] = (0.4, 0.2, 0.4)
 
     # OBSERVATION NOISE (added after latent rollout)
-    observation_noise_loc: float = 0.01
-    observation_noise_vel: float = 0.01
+    observation_noise_loc: float = 0.0
+    observation_noise_vel: float = 0.0
 
     distance_threshold_jitter_std: float = 0.01
     force_threshold_jitter_std: float = 0.01
 
-    obs_edge_keep_prob: float = 0.8     # 1.0 = keep all selected edges
+    obs_edge_keep_prob: float = 1.0     # 1.0 = keep all selected edges
 
     # EVENT EMISSION
     # all_pairs: every directed pair i <- j, j != i
     # distance_threshold: keep if distance <= threshold
     # force_threshold: keep if pair_force_mag >= threshold
     # top_k: keep strongest k directed pairwise forces in the bin
-    interaction_rule: str = "force_threshold"
+    interaction_rule: str = "all_pairs"
     distance_threshold: float = 2.5
     force_threshold: float = 0.20
     top_k: int = 64
@@ -319,12 +319,12 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     # "send_vy",
     "rel_px",
     "rel_py",
-    "rel_vx",
-    "rel_vy",
-    #"distance",
-    #"charge_product",
-    # "force_x",
-    # "force_y",
+    #"rel_vx",
+    #"rel_vy",
+    "distance",
+    "charge_product",
+    # # "force_x",
+    # # "force_y",
     # "force_mag",
     # "energy",
 )
@@ -373,12 +373,12 @@ def _pair_record(
             # float(send_vel[1]),
             float(rel_pos[0]),
             float(rel_pos[1]),
-            float(rel_vel[0]),
-            float(rel_vel[1]),
-            #distance,
-            #charge_product,
-            # float(force_vec[0]),
-            # float(force_vec[1]),
+            # float(rel_vel[0]),
+            # float(rel_vel[1]),
+            distance,
+            charge_product,
+            # # float(force_vec[0]),
+            # # float(force_vec[1]),
             # force_mag,
             # global_energy,
         ],
@@ -490,14 +490,47 @@ def _state_to_event_batch(
 
     src = torch.tensor([r["src"] for r in chosen], dtype=torch.long, device=cfg.device)
     dst = torch.tensor([r["dst"] for r in chosen], dtype=torch.long, device=cfg.device)
-    feats = torch.tensor(np.stack([r["features"] for r in chosen], axis=0), dtype=torch.float32, device=cfg.device)
+    feats = torch.tensor(
+        np.stack([r["features"] for r in chosen], axis=0),
+        dtype=torch.float32,
+        device=cfg.device,
+    )
     t = torch.full((src.numel(),), int(t_idx), dtype=torch.long, device=cfg.device)
+
+    # compute per-node net force from the current latent state
+    # _pair_force_matrix expects loc shape [2, N], so transpose loc from [N, 2] -> [2, N]
+    _, force_pair, _ = _pair_force_matrix(
+        loc.T,
+        charges,
+        interaction_strength=cfg.interaction_strength,
+        softening=cfg.softening,
+        max_force=cfg.max_force_clip,
+    )
+
+    # force_pair: [N, N, 2]
+    # sum over senders j to get total force on each receiver i
+    net_force = force_pair.sum(axis=1)   # [N, 2]
+    delta_v = cfg.micro_dt * net_force
+    
+    # node regression targets: [fx, fy] or dvx dvy
+    node_targets = torch.tensor(
+        delta_v, # net_force
+        dtype=torch.float32,
+        device=cfg.device,
+    )
+    node_mask = torch.ones(
+        (num_nodes,),
+        dtype=torch.bool,
+        device=cfg.device,
+    )
 
     eb = EventBatch(
         src=cast(torch.LongTensor, src),
         dst=cast(torch.LongTensor, dst),
         t=cast(torch.LongTensor, t),
         features=feats,
+        node_targets=node_targets,
+        node_mask=node_mask,
     )
     if cfg.device is not None:
         eb = eb.to(cfg.device)
@@ -581,6 +614,8 @@ class ChargedParticlesBinnedDataset(EventStreamDataset):
                 "feature_names": list(_EDGE_FEATURE_NAMES),
                 "observation_noise_loc": float(self.cfg.observation_noise_loc),
                 "observation_noise_vel": float(self.cfg.observation_noise_vel),
+                "node_target_dim": 2,
+                "node_target_names": ["dvx", "dvy"],
             },
         )
 

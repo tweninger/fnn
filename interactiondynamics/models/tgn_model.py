@@ -11,7 +11,7 @@ from updates.hopfield_update import HopfieldUpdate
 from updates.hnn import HNNUpdate
 from updates.lnn import LNNUpdate
 from updates.tgn_gru import TGNGRUUpdate
-from scorers.event_scorer import DotProductScorer, MLPEdgeScorer
+from scorers.event_scorer import DotProductScorer, MLPEdgeScorer, MLPNodePredictor
 from core.config import ModelConfig
 from data.interfaces import DataSpec
 
@@ -143,17 +143,50 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             dropout=c.scorer_dropout,
         ),
     }
-    sc_fn = SCORER_BUILDERS.get(cfg.scorer)
-    if sc_fn is None:
-        raise NotImplementedError(f"scorer={cfg.scorer} not supported")
-    scorer = sc_fn(cfg)
 
-    # full model composed object built from encoder, aggregater, update, scorer, num _ nodes
-    # repo arcitectured as pipeline of interchangeable modules
-    return ComposedInteractionModel(
-        encoder=encoder,
-        aggregator=aggregator,
-        update=update,
-        scorer=scorer,
-        num_nodes=num_nodes,
-    )
+    PREDICTOR_BUILDERS = {
+        "mlp_node": lambda c: MLPNodePredictor(
+            node_dim=c.node_dim,
+            out_dim=spec.extra["node_target_dim"],
+            hidden_dim=c.scorer_hidden,
+            dropout=c.scorer_dropout,
+        ),
+    }
+    
+    task = getattr(cfg, "task", "ranking")
+
+    if task == "ranking":
+        sc_fn = SCORER_BUILDERS.get(cfg.scorer)
+        if sc_fn is None:
+            raise NotImplementedError(f"scorer={cfg.scorer} not supported")
+
+        scorer = sc_fn(cfg)
+
+        return ComposedInteractionModel(
+            encoder=encoder,
+            aggregator=aggregator,
+            update=update,
+            scorer=scorer,
+            predictor=None,
+            num_nodes=num_nodes,
+        )
+
+    elif task == "node_regression":
+        pred_name = getattr(cfg, "predictor", "mlp_node")
+        pred_fn = PREDICTOR_BUILDERS.get(pred_name)
+        if pred_fn is None:
+            raise NotImplementedError(f"predictor={pred_name} not supported")
+
+        predictor = pred_fn(cfg)
+
+        return ComposedInteractionModel(
+            encoder=encoder,
+            aggregator=aggregator,
+            update=update,
+            scorer=None,
+            predictor=predictor,
+            num_nodes=num_nodes,
+        )
+
+    else:
+        raise NotImplementedError(f"task={task} not supported")

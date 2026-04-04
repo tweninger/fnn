@@ -328,11 +328,11 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     # "send_vy",
 
     # relationship features between sender and receiver
-    "rel_px",
-    "rel_py",
-    "rel_vx",
-    "rel_vy",
-    "distance",
+    # "rel_px",
+    # "rel_py",
+    # "rel_vx",
+    # "rel_vy",
+    # "distance",
 
     # force like / influence features
     # "acc_x",
@@ -389,11 +389,11 @@ def _pair_record(state: np.ndarray, sender: int, receiver: int, epsilon: float) 
             # send_pos[1],
             # send_vel[0],
             # send_vel[1],
-            rel_pos[0],
-            rel_pos[1],
-            rel_vel[0],
-            rel_vel[1],
-            distance,
+            # rel_pos[0],
+            # rel_pos[1],
+            # rel_vel[0],
+            # rel_vel[1],
+            # distance,
             # acc_vec[0],
             # acc_vec[1],
             # acc_mag,
@@ -455,6 +455,12 @@ def _state_to_event_batch(
     src = torch.tensor([r["src"] for r in chosen], dtype=torch.long, device=cfg.device)
     dst = torch.tensor([r["dst"] for r in chosen], dtype=torch.long, device=cfg.device)
     feats = torch.tensor(np.stack([r["features"] for r in chosen], axis=0), dtype=torch.float32, device=cfg.device)
+    node_targets = torch.tensor(
+        state[:, 1:5],   # [px, py, vx, vy]
+        dtype=torch.float32,
+        device=cfg.device,
+    )
+    node_mask = torch.ones((state.shape[0],), dtype=torch.bool, device=cfg.device)
 
     # All events in this batch share the same discrete time index
     t = torch.full((src.numel(),), int(t_idx), dtype=torch.long, device=cfg.device)
@@ -464,6 +470,8 @@ def _state_to_event_batch(
         dst=cast(torch.LongTensor, dst),
         t=cast(torch.LongTensor, t),
         features=feats,
+        node_targets=node_targets,
+        node_mask=node_mask,
     )
     if cfg.device is not None:
         eb = eb.to(cfg.device)
@@ -557,6 +565,8 @@ class ThreeBodyBinnedDataset(EventStreamDataset):
                 "feature_names": list(_EDGE_FEATURE_NAMES),
                 "observation_noise_pos": float(self.cfg.observation_noise_pos),
                 "observation_noise_vel": float(self.cfg.observation_noise_vel),
+                "node_target_dim": 4,
+                "node_target_names": ["px", "py", "vx", "vy"],
             },
         )
 

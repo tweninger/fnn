@@ -105,11 +105,11 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     # "send_fz",
 
     # pairwise relation
-     "rel_px",
-     "rel_py",
-     "rel_pz",
-    "distance",
-    "distance_delta",
+    #  "rel_px",
+    #  "rel_py",
+    #  "rel_pz",
+    # "distance",
+    # "distance_delta",
 
     # force relation
     # "rel_fx",
@@ -219,11 +219,11 @@ def _pair_record(
             # send_force[0],
             # send_force[1],
             # send_force[2],
-            rel_pos[0],
-            rel_pos[1],
-            rel_pos[2],
-            curr_dist,
-            distance_delta,
+            # rel_pos[0],
+            # rel_pos[1],
+            # rel_pos[2],
+            # curr_dist,
+            # distance_delta,
             # rel_force[0],
             # rel_force[1],
             # rel_force[2],
@@ -349,14 +349,33 @@ def _frame_to_event_batch(
 
     src = torch.tensor([r["src"] for r in chosen], dtype=torch.long, device=cfg.device)
     dst = torch.tensor([r["dst"] for r in chosen], dtype=torch.long, device=cfg.device)
-    feats = torch.tensor(np.stack([r["features"] for r in chosen], axis=0), dtype=torch.float32, device=cfg.device)
+    feats = torch.tensor(
+        np.stack([r["features"] for r in chosen], axis=0),
+        dtype=torch.float32,
+        device=cfg.device,
+    )
     t = torch.full((src.numel(),), int(t_idx), dtype=torch.long, device=cfg.device)
+
+    # node regression targets: [px, py, pz]
+    node_targets = torch.tensor(
+        coords,
+        dtype=torch.float32,
+        device=cfg.device,
+    )  # [N, 3]
+
+    node_mask = torch.ones(
+        (coords.shape[0],),
+        dtype=torch.bool,
+        device=cfg.device,
+    )
 
     eb = EventBatch(
         src=cast(torch.LongTensor, src),
         dst=cast(torch.LongTensor, dst),
         features=feats,
         t=cast(torch.LongTensor, t),
+        node_targets=node_targets,
+        node_mask=node_mask,
     )
     if cfg.device is not None:
         eb = eb.to(cfg.device)
@@ -458,6 +477,8 @@ class MD22BinnedDataset(EventStreamDataset):
             "feature_names": list(_EDGE_FEATURE_NAMES),
             "observation_noise_pos": float(self.cfg.observation_noise_pos),
             "observation_noise_force": float(self.cfg.observation_noise_force),
+            "node_target_dim": 3,
+            "node_target_names": ["px", "py", "pz"],
         }
         if "r_unit" in self._meta:
             extra["r_unit"] = str(self._meta["r_unit"])

@@ -5,6 +5,8 @@ from typing import Literal, Optional
 
 AggregatorType = Literal["ift", "sum", "deepsets", "settransformer", "hopfield"]
 ScorerType = Literal["dot", "mlp"]
+PredictorType = Literal["mlp_node", "linear_node"]
+TaskType = Literal["ranking,", "node_regression"]
 UpdateType = Literal["ift_update", "tgn_gru", "lnn", "hnn", "hopfield_update"]
 KappaParam = Literal["exp", "softplus"]
 
@@ -21,6 +23,8 @@ class ModelConfig:
     aggregator: AggregatorType = "sum"
     scorer: ScorerType = "mlp"
     update: UpdateType = "tgn_gru"
+    task: TaskType = "ranking"
+    predictor: Optional[PredictorType] = "mlp_node"
 
     # MLP sizes
     encoder_hidden: int = 256
