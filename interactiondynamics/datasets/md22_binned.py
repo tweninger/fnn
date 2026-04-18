@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from core.events import EventBatch
-from data.interfaces import DataSpec, EventStreamDataset
+from datasets import DataSpec, EventStreamDataset
 
 """
 MD22 / MD17-style molecular trajectory dataset adapted to the repo's

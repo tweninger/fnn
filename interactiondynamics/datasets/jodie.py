@@ -8,7 +8,7 @@ import torch
 from torch_geometric.datasets import JODIEDataset
 
 from core.events import EventBatch
-from data.interfaces import DataSpec, EventStreamDataset
+from datasets import DataSpec, EventStreamDataset
 
 
 @dataclass

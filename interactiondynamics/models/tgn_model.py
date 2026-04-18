@@ -11,9 +11,12 @@ from updates.hopfield_update import HopfieldUpdate
 from updates.hnn import HNNUpdate
 from updates.lnn import LNNUpdate
 from updates.tgn_gru import TGNGRUUpdate
-from scorers.event_scorer import DotProductScorer, MLPEdgeScorer, MLPNodePredictor
+
+from scorers.interaction_prediction_heads import DotProductScorer, MLPEdgeScorer
+from scorers.node_regression_heads import MLPNodePredictor, LinearNodePredictor
+
 from core.config import ModelConfig
-from data.interfaces import DataSpec
+from datasets.interfaces import DataSpec
 
 # main function - take dataset metadata/spec and cfg/settings for arch and return a complete model
 def build_tgn_model(spec: DataSpec, cfg: ModelConfig):

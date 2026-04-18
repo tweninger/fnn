@@ -13,40 +13,30 @@ from models.tgn_model import build_tgn_model
 from dataclasses import asdict, replace
 from collections import defaultdict
 import os
-from train_node import NodeTrainConfig, run_one_node_experiment
-from experiments.node_runs import make_node_runs
+
+from training.node_regression import NodeTrainConfig, run_one_node_experiment, make_node_runs
 from eval.node_regression import collect_node_predictions_over_time
 from plotting.node_regression import plot_node_targets_by_feature
 
-from experiments.physical_systems import (
-    build_physical_datasets,
-    build_base_model_cfg,
-    build_base_train_cfg,
-)
+from experiments.physical_systems import build_physical_datasets
+from experiments.defaults import build_base_model_cfg, build_base_train_cfg
 from experiments.results_summary import describe_run_result
+
 from utils.io import append_jsonl, ensure_parent, make_safe_name
 from utils.metric_selection import higher_is_better, is_better_metric
+from utils.output_paths import dataset_group_name, experiment_output_paths, prediction_npz_path, run_plot_path
 
-from data.spring_mass import SpringMassDataset, SpringMassConfig
-from data.spring_ring import SpringRing2DDataset, SpringRing2DConfig
-from data.one_dimension_wave_binned import WaveEquationBinnedDataset, WaveEquationBinnedConfig, make_wave_variants
-from data.three_body_binned import ThreeBodyBinnedDataset, ThreeBodyBinnedConfig
-from data.nbody_continuous import ChargedParticlesBinnedDataset, ChargedParticlesBinnedConfig
-from data.md22_binned import MD22BinnedDataset, MD22BinnedConfig
-from data.spring_web_2d import SpringWeb2DConfig, SpringWeb2DDataset, make_spring_web_variants
-
+from datasets.spring_mass import SpringMassDataset, SpringMassConfig
+from datasets.spring_ring_2d import SpringRing2DDataset, SpringRing2DConfig
+from datasets.wave_1d import WaveEquationBinnedDataset, WaveEquationBinnedConfig, make_wave_variants
+from datasets.three_body_binned import ThreeBodyBinnedDataset, ThreeBodyBinnedConfig
+from datasets.charged_particles import ChargedParticlesBinnedDataset, ChargedParticlesBinnedConfig
+from datasets.md22_binned import MD22BinnedDataset, MD22BinnedConfig
+from datasets.spring_web_2d import SpringWeb2DConfig, SpringWeb2DDataset, make_spring_web_variants
 
 # -----------------------------
 # small helpers
 # -----------------------------
-
-def plot_group_name(dataset_name: str) -> str:
-    if dataset_name.startswith("springweb"):
-        return "spring_web_2d"
-    if dataset_name.startswith("wave"):
-        return "wave"
-    return dataset_name
-
 
 def unpack_prediction_pack(pack):
     """
@@ -73,28 +63,20 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # PATHSSSSS
-    out_dir = Path("/home/akapociu/ift/interactiondynamics/results/wave")
-    plot_dir = Path("/home/akapociu/ift/interactiondynamics/plots/11")
-    
-    out_dir.mkdir(parents=True, exist_ok=True)
+    EXPERIMENT_NAME = "physics_sweep"
+    RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
+    PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
+
+    paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
+
+    results_dir = paths["results_dir"]
+    plot_dir = paths["plots_dir"]
+    pred_dir = paths["preds_dir"]
+    save_jsonl_path = paths["results_jsonl"]
+    save_summary_path = paths["summary_jsonl"]
+
+    results_dir.mkdir(parents=True, exist_ok=True)
     plot_dir.mkdir(parents=True, exist_ok=True)
-
-    # summary and results output
-    save_jsonl_path = out_dir / "1.jsonl"
-    save_summary_path = out_dir / "11.jsonl"
-    #deletes them each run
-    for p in [save_jsonl_path, save_summary_path]:
-        if p.exists():
-            p.unlink()
-
-    ensure_parent(save_jsonl_path)
-    ensure_parent(save_summary_path)
-
-    #outputs for correlation stats
-    pred_dir = Path("/home/akapociu/ift/interactiondynamics/results/wave/11")
-    #also deletes each run
-    shutil.rmtree(pred_dir, ignore_errors=True)
     pred_dir.mkdir(parents=True, exist_ok=True)
 
     md22_npz_paths = [
@@ -106,7 +88,7 @@ def main():
     datasets = build_physical_datasets(
         device=device,
         md22_npz_paths=md22_npz_paths,
-        include=("spring_web_2d",)
+        include=("wave",)
         # include=("nbody", "wave", "threebody", "spring_ring", "spring_mass", "md22"),
     )
 
@@ -139,7 +121,7 @@ def main():
 
         runs = make_node_runs(
             base_model_cfg,
-            seeds=(42,0,123 ),
+            seeds=(0,),
             aggregator=("ift", "sum", "hopfield", "settransformer"),
             upd = ("ift_update", "tgn_gru", "hopfield_update"),
             dropout=(0.0,),
@@ -165,20 +147,20 @@ def main():
         best_train_cfg = None
         plot_payloads = [] if PLOT_ALL_RUNS else None
         
-        #allowed_pairs = None
-        #allowed_pairs = { # set to None for all pairs
-            #("ift", "hopfield_update"),
-            #("ift", "ift_update"),
-            #("ift", "tgn_gru"),
-            #("settransformer", "tgn_gru"),
-            #("sum", "tgn_gru"),
-        #}
+        allowed_pairs = None
+        allowed_pairs = { # set to None for all pairs
+            # ("ift", "hopfield_update"),
+            # ("ift", "ift_update"),
+            # ("ift", "tgn_gru"),
+            # ("settransformer", "tgn_gru"),
+            ("sum", "tgn_gru"),
+        }
 
-        # if allowed_pairs is not None:
-        #     runs = [ 
-        #         run for run in runs
-        #         if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
-        #     ]
+        if allowed_pairs is not None:
+            runs = [ 
+                run for run in runs
+                if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
+            ]
 
         for run in runs:
             print("\n" + "🧹" * 60)
@@ -258,12 +240,11 @@ def main():
         # -----------------------------
 
         if PLOT_RESULTS:
-            plot_group = plot_group_name(dataset_name)
-            dataset_plot_dir = plot_dir / plot_group
+            dataset_plot_dir = plot_dir / dataset_group_name(dataset_name)
 
-            if plot_group not in cleared_plot_dirs:
+            if dataset_plot_dir not in cleared_plot_dirs:
                 shutil.rmtree(dataset_plot_dir, ignore_errors=True)
-                cleared_plot_dirs.add(plot_group)
+                cleared_plot_dirs.add(dataset_plot_dir)
 
             dataset_plot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -286,14 +267,21 @@ def main():
                     if node_mask is not None:
                         save_dict["node_mask"] = node_mask
   
-                    safe_dataset_name = make_safe_name(dataset_name)
-                    safe_run_name = make_safe_name(run.name)
+                    pred_path = prediction_npz_path(
+                        pred_dir,
+                        dataset_name=dataset_name,
+                        run_name=run.name,
+                        seed=run.seed,
+                    )
 
-                    pred_path = pred_dir / f"{safe_dataset_name}__{safe_run_name}_seed-{run.seed}.npz"
                     np.savez(pred_path, **save_dict)
 
-                    plot_path = dataset_plot_dir / (
-                        f"{safe_dataset_name}__{safe_run_name}_seed-{run.seed}_epoch-{result.best_epoch}.png"
+                    plot_path = run_plot_path(
+                        plot_dir,
+                        dataset_name=dataset_name,
+                        run_name=run.name,
+                        seed=run.seed,
+                        best_epoch=result.best_epoch,
                     )
 
                     plot_node_targets_by_feature(
@@ -321,8 +309,12 @@ def main():
                 )
                 times, y_true, y_pred, node_mask = unpack_prediction_pack(pack)
 
-                safe_run_name = make_safe_name(best_result.name)
-                plot_path = dataset_plot_dir / f"{safe_run_name}_seed-{best_result.seed}.png"
+                plot_path = run_plot_path(
+                    plot_dir,
+                    dataset_name=dataset_name,
+                    run_name=best_result.name,
+                    seed=best_result.seed,
+                )
 
                 plot_node_targets_by_feature(
                     times=times,

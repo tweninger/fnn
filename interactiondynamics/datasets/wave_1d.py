@@ -8,7 +8,7 @@ import scipy.integrate
 import torch
 
 from core.events import EventBatch
-from data.interfaces import DataSpec, EventStreamDataset
+from datasets import DataSpec, EventStreamDataset
 
 """
 LNN-inspired 1D wave equation benchmark adapted to this repo's EventStreamDataset interface.

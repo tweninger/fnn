@@ -6,17 +6,18 @@ from pathlib import Path
 from collections import defaultdict
 
 # add make_runs function from train.py for our sweepingggg
-from train import TrainConfig, SweepRun, run_one_experiment, make_runs
+from training.interaction_prediction import TrainConfig, run_one_experiment
+from experiments.interaction_prediction_runs import SweepRun, make_runs
 from core.config import ModelConfig
-from data.jodie import JODIEBinnedDataset, JODIEConfig
+from datasets import JODIEBinnedDataset, JODIEConfig
 from eval.evaluate import EvalSlices
 from models.tgn_model import build_tgn_model
 from collections import defaultdict
-from data.three_body_binned import ThreeBodyBinnedConfig, ThreeBodyBinnedDataset
-from data.one_dimension_wave_binned import WaveEquationBinnedDataset, WaveEquationBinnedConfig
-from data.md22_binned import MD22BinnedConfig, MD22BinnedDataset
-from data.nbody_continuous import ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset 
-from data.spring_ring import SpringRing2DConfig, SpringRing2DDataset
+from datasets import ThreeBodyBinnedConfig, ThreeBodyBinnedDataset
+from datasets import WaveEquationBinnedDataset, WaveEquationBinnedConfig
+from datasets import MD22BinnedConfig, MD22BinnedDataset
+from datasets import ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset 
+from datasets import SpringRing2DConfig, SpringRing2DDataset
 
 """
 - small sweep again, but we are checking across all JODIE datasets

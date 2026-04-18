@@ -1,3 +1,16 @@
+from pathlib import Path
+
+from datasets import (
+    ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset,
+    WaveEquationBinnedConfig, WaveEquationBinnedDataset,
+    ThreeBodyBinnedConfig, ThreeBodyBinnedDataset,
+    SpringRing2DConfig, SpringRing2DDataset,
+    SpringMassConfig, SpringMassDataset,
+    MD22BinnedConfig, MD22BinnedDataset,
+    SpringWeb2DConfig, make_spring_web_variants,
+)
+
+
 def build_physical_datasets(
     device,
     md22_npz_paths=(),
@@ -23,7 +36,7 @@ def build_physical_datasets(
             standardize_node_targets=False,
             target_name="dv",
         )
-        datasets[cfg.name] = WaveEquationBinnedDataset(cfg)
+        datasets[base_cfg.name] = WaveEquationBinnedDataset(base_cfg)
         # wave_variants = make_wave_variants(
         #     base_cfg,
         #     event_modes=("thresholded", "all_neighbors"),

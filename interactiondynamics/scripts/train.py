@@ -20,18 +20,17 @@ from traitlets import Any
 # how event data is stored
 from core.events import EventBatch
 # toy synthetic data
-from datasets.toy import ToyShiftConfig, ToyShiftDataset
+from datasets import ToyShiftConfig, ToyShiftDataset
 # evaluation logic
 from eval.evaluate import EvalSlices, evaluate_stream_sliced
 # model config object
 from core.config import ModelConfig
 # real temporal datasets
-from datasets.jodie import JODIEBinnedDataset, JODIEConfig # type: ignore
+from datasets import JODIEBinnedDataset, JODIEConfig # type: ignore
 from models.tgn_model import build_tgn_model
 
 from eval.ranking import ranking_loss_and_metrics
 
-from training.interaction_prediction import *
 
 # what happens when you run python train.py lol
 def main():   

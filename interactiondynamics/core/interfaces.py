@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .events import EventBatch
+from core.events import EventBatch
 
 # template for any interaction model in the repo using pytorch model class and abstract base class (states required funcitons)
 class InteractionModel(nn.Module, ABC):

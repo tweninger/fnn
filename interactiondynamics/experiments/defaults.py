@@ -1,3 +1,7 @@
+import torch
+from core.config import ModelConfig
+from training.node_regression import NodeTrainConfig
+
 def build_base_model_cfg(spec) -> ModelConfig:
     return ModelConfig(
         node_dim=64,

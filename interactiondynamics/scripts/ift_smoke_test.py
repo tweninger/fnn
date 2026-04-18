@@ -2,14 +2,15 @@ import torch
 from dataclasses import asdict
 
 #just importing dataclasses and functions from train.py so i don't have to copy and paste
-from train import TrainConfig, SweepRun, run_one_experiment
+from training.interaction_prediction import TrainConfig, run_one_experiment
+from experiments.interaction_prediction_runs import SweepRun
 
 from core.config import ModelConfig
-from data.jodie import JODIEBinnedDataset, JODIEConfig
+from datasets import JODIEBinnedDataset, JODIEConfig
 from eval.evaluate import EvalSlices
 from models.tgn_model import build_tgn_model
-from data.nbody_continuous import NBodyConfig, NBodyDataset
-from data.spring_mass import SpringMassConfig, SpringMassDataset
+from datasets import NBodyConfig, NBodyDataset
+from datasets import SpringMassConfig, SpringMassDataset
 
 """
 - just one run/one epoch with IFT x IFT to check if this works

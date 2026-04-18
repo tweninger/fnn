@@ -1,3 +1,6 @@
+from collections import defaultdict
+import numpy as np
+
 def print_seed_avg(results):
 
     grouped = defaultdict(list)

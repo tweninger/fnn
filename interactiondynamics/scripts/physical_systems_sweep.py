@@ -5,23 +5,23 @@ from pathlib import Path
 import torch
 import os
 from core.config import ModelConfig
-from train_node import NodeTrainConfig
+from training.node_regression import NodeTrainConfig, run_one_node_experiment, make_node_runs
 
-from data.md22_binned import MD22BinnedConfig, MD22BinnedDataset
-from data.nbody_continuous import ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset
-from data.one_dimension_wave_binned import (
+from datasets import MD22BinnedConfig, MD22BinnedDataset
+from datasets import ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset
+from datasets import (
     WaveEquationBinnedConfig,
     WaveEquationBinnedDataset,
     make_wave_variants,
 )
-from data.spring_mass import SpringMassConfig, SpringMassDataset
-from data.spring_ring import SpringRing2DConfig, SpringRing2DDataset
-from data.spring_web_2d import (
+from datasets import SpringMassConfig, SpringMassDataset
+from datasets import SpringRing2DConfig, SpringRing2DDataset
+from datasets import (
     SpringWeb2DConfig,
     SpringWeb2DDataset,
     make_spring_web_variants,
 )
-from data.three_body_binned import ThreeBodyBinnedConfig, ThreeBodyBinnedDataset
+from datasets import ThreeBodyBinnedConfig, ThreeBodyBinnedDataset
 from experiments.dataset_stats import (
     edge_set,
     summarize_edge_changes,
@@ -32,7 +32,7 @@ from experiments.physical_systems import build_physical_datasets
 from experiments.results_summary import print_seed_avg
 from utils.io import append_jsonl
 
-# --------------------------------------------------
+
 # main
 # --------------------------------------------------
 

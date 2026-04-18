@@ -3,9 +3,10 @@ import argparse
 import os
 import torch
 
-from train import TrainConfig, run_one_experiment, make_runs
+from training.interaction_prediction import TrainConfig, run_one_experiment
+from experiments.interaction_prediction_runs import make_runs
 from core.config import ModelConfig
-from data.jodie import JODIEBinnedDataset, JODIEConfig
+from datasets import JODIEBinnedDataset, JODIEConfig
 from eval.evaluate import EvalSlices
 from models.tgn_model import build_tgn_model
 

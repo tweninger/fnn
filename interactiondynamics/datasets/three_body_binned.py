@@ -8,7 +8,7 @@ import scipy.integrate # -> library for scientific computing (integration, optim
 import torch
 
 from core.events import EventBatch
-from data.interfaces import DataSpec, EventStreamDataset
+from datasets import DataSpec, EventStreamDataset
 
 """
 HNN paper's three-body gravitational dataset adapted to the repo's EventStreamDataset interface.
