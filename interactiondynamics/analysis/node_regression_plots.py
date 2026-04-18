@@ -24,6 +24,7 @@ def _compute_robust_ylim(values, robust_percentile=99.0, pad_frac=0.08, symmetri
 
     values: 1D array of plotted values
     """
+    
     values = np.asarray(values)
     values = values[np.isfinite(values)]
 

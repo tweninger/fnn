@@ -13,8 +13,8 @@ from data.interfaces import DataSpec, EventStreamDataset
 class SpringRing2DConfig:
     name: str = "spring_ring_2d"
 
-    num_nodes: int = 64
-    num_bins: int = 1024
+    num_nodes: int = 32
+    num_bins: int = 256
 
     # simulation parameters
     dt: float = 0.05
@@ -38,15 +38,17 @@ class SpringRing2DConfig:
     seed: int = 0
     device: Optional[torch.device] = None
 
+    standardize_node_targets: bool = True
+
 
 # Keep whichever features you want uncommented.
 _EDGE_FEATURE_NAMES: Sequence[str] = (
-    "dx",
-    "dy",
-    "dvx",
-    "dvy",
-    "dist",
-    "extension",
+    # "dx",
+    # "dy",
+    # "dvx",
+    # "dvy",
+    # "dist",
+    # "extension",
     # "fx",
     # "fy",
 )
@@ -61,6 +63,9 @@ class SpringRing2DDataset(EventStreamDataset):
 
         self._build()
         self._split()
+
+        self.dv_mean: Optional[torch.Tensor] = None   # shape [2]
+        self.dv_std: Optional[torch.Tensor] = None    # shape [2]
 
     def _build(self):
         g = torch.Generator().manual_seed(self.cfg.seed)
@@ -133,16 +138,15 @@ class SpringRing2DDataset(EventStreamDataset):
                 force_mag = torch.norm(force_vec)
 
                 if force_mag > thr:
-                    feat = []
                     feat = [
-                        float(dpos[0]),
-                        float(dpos[1]),
-                        float(dvel[0]),
-                        float(dvel[1]),
-                        float(dist),
-                        float(extension),
-                    #     float(force_vec[0]),
-                    #     float(force_vec[1]),
+                        # float(dpos[0]),
+                        # float(dpos[1]),
+                        # float(dvel[0]),
+                        # float(dvel[1]),
+                        # float(dist),
+                        # float(extension),
+                        # float(force_vec[0]),
+                        # float(force_vec[1]),
                     ]
 
                     src_list.append(i)
@@ -150,16 +154,15 @@ class SpringRing2DDataset(EventStreamDataset):
                     feat_list.append(feat)
 
                     if bidir:
-                        feat_rev = []
                         feat_rev = [
-                             float(-dpos[0]),
-                             float(-dpos[1]),
-                             float(-dvel[0]),
-                             float(-dvel[1]),
-                             float(dist),
-                             float(extension),
-                        #     float(-force_vec[0]),
-                        #     float(-force_vec[1]),
+                            #  float(-dpos[0]),
+                            #  float(-dpos[1]),
+                            #  float(-dvel[0]),
+                            #  float(-dvel[1]),
+                            #  float(dist),
+                            #  float(extension),
+                            # float(-force_vec[0]),
+                            # float(-force_vec[1]),
                          ]
 
                         src_list.append(j)
@@ -203,6 +206,26 @@ class SpringRing2DDataset(EventStreamDataset):
         self._num_bins = len(self.src_bins)
         self._num_events = sum(s.numel() for s in self.src_bins)
 
+
+        if self.cfg.standardize_node_targets and len(self.node_target_bins) > 0:
+            T = len(self.node_target_bins)
+            f_tr, f_va, f_te = self.cfg.split_fracs
+            n_tr = int(T * f_tr)
+
+            # concatenate only training-bin targets: each is [N, 2]
+            train_targets = torch.cat(
+                [self.node_target_bins[i] for i in range(n_tr)],
+                dim=0,   # [n_tr * N, 2]
+            )
+
+            self.dv_mean = train_targets.mean(dim=0)                     # [2]
+            self.dv_std = train_targets.std(dim=0).clamp_min(1e-8)      # [2]
+
+            # standardize every stored bin target using train stats
+            for i in range(len(self.node_target_bins)):
+                self.node_target_bins[i] = (self.node_target_bins[i] - self.dv_mean) / self.dv_std
+
+
     def _split(self):
         T = self._num_bins
         f_tr, f_va, f_te = self.cfg.split_fracs
@@ -225,8 +248,8 @@ class SpringRing2DDataset(EventStreamDataset):
             num_bins=self._num_bins,
             extra={
                 "node_target_dim": 2,
-                "node_target_names": ["dvx", "dvy"],
-            },
+                "node_target_names": ["dvx_std", "dvy_std"] if self.cfg.standardize_node_targets else ["dvx", "dvy"],
+            }
         )
 
     def bins(self, split: str = "train") -> Iterable[EventBatch]:

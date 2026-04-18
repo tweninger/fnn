@@ -8,7 +8,9 @@ from typing import Callable, Dict, Iterable, Optional, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import copy
 
+from scipy.stats import spearmanr
 from core.events import EventBatch
 from core.config import ModelConfig
 from data.spring_mass import SpringMassDataset, SpringMassConfig
@@ -20,7 +22,11 @@ from eval.node_regression import (
 from models.tgn_model import build_tgn_model
 from analysis.node_regression_plots import plot_node_targets_by_feature
 
+def higher_is_better(metric_name: str) -> bool:
+    return metric_name in {"r2", "pearson", "spearman", "mean_node_pearson", "mean_node_spearman", "mean_cosine"}
 
+def is_better(candidate: float, best: float, metric_name: str) -> bool:
+    return candidate > best if higher_is_better(metric_name) else candidate < best
 # -----------------------------
 # dataclasses
 # -----------------------------
@@ -41,10 +47,13 @@ class NodeRunResult:
     name: str
     seed: int
     epochs: int
-    best_val_mae: float
+    selection_metric: str
+    best_val_metric: float
     best_epoch: int
     best_snapshot: dict
     final_snapshot: dict
+    analysis_val: dict
+    analysis_test: dict
     wall_sec: float
 
 
@@ -58,7 +67,8 @@ class NodeTrainConfig:
     log_every: int = 50
     tbptt_steps: int = 1
     debug: bool = False
-    loss_name: str = "huber"   # "mse" | "mae" | "huber"
+    loss_name: str = "mse"   # "mse" | "mae" | "huber"
+    selection_metric: str = "rmse"    # start with "rmse"
 
 
 # -----------------------------
@@ -296,12 +306,13 @@ def run_one_node_experiment(
         weight_decay=train_cfg.weight_decay,
     )
 
-    best_val_mae = float("inf")
+    selection_metric = train_cfg.selection_metric
+    best_val_metric = float("-inf") if higher_is_better(selection_metric) else float("inf")
     best_epoch = -1
     best_snapshot: dict = {}
-
+    best_model_state = None
+    
     t0 = time.time()
-
     for epoch in range(1, epochs + 1):
         train_stats_step = train_one_epoch_node(model, ds.bins("train"), optimizer, train_cfg)
 
@@ -317,22 +328,24 @@ def run_one_node_experiment(
             "test": test_stats,
         }
 
+        cur_val_metric = float(val_stats[selection_metric])
+
         km = train_stats_step.get("kappa_mean", None)
         kappa_str = f"{km:.4f}" if km is not None else ""
         print(
             f"[{run.name} | seed={run.seed} | epoch {epoch:03d}] "
-            f"train(step) mae={train_stats_step['mae']:.4f} "
+            f"train(step) loss={train_stats_step['loss']:.4f} "
+            f"rmse={train_stats_step['rmse']:.4f} "
             f"kappa={kappa_str} | "
-            f"train(eval) mae={train_eval['mae']:.4f} "
-            f"val mae={val_stats['mae']:.4f} "
-            f"test mae={test_stats['mae']:.4f}"
+            f"val {selection_metric}={cur_val_metric:.4f} "
+            f"test rmse={test_stats['rmse']:.4f}"
         )
 
-        # lower is better now
-        if val_stats["mae"] < best_val_mae:
-            best_val_mae = float(val_stats["mae"])
+        if is_better(cur_val_metric, best_val_metric, selection_metric):
+            best_val_metric = cur_val_metric
             best_epoch = epoch
             best_snapshot = snapshot
+            best_model_state = copy.deepcopy(model.state_dict())
 
         if save_jsonl_path is not None:
             row = {
@@ -358,18 +371,44 @@ def run_one_node_experiment(
 
     wall = time.time() - t0
     final_snapshot = snapshot
+    
+    analysis_val = {}
+    analysis_test = {}     
+
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        val_pack = collect_node_predictions_over_time(model, ds.bins("val"), train_cfg)
+        test_pack = collect_node_predictions_over_time(model, ds.bins("test"), train_cfg)
+
+        if len(val_pack) == 4:
+            _, y_true_val, y_pred_val, node_mask_val = val_pack
+        else:
+            _, y_true_val, y_pred_val = val_pack
+            node_mask_val = None
+
+        if len(test_pack) == 4:
+            _, y_true_test, y_pred_test, node_mask_test = test_pack
+        else:
+            _, y_true_test, y_pred_test = test_pack
+            node_mask_test = None
+
+        analysis_val = compute_prediction_analysis(y_true_val, y_pred_val, node_mask_val)
+        analysis_test = compute_prediction_analysis(y_true_test, y_pred_test, node_mask_test)
 
     summary = {
         "dataset": dataset_name,
         "name": run.name,
         "seed": run.seed,
         "epochs": epochs,
-        "best_val_mae": best_val_mae,
+        "selection_metric": selection_metric,
+        "best_val_metric": best_val_metric,
         "best_epoch": best_epoch,
         "best_snapshot": best_snapshot,
         "final_snapshot": final_snapshot,
+        "analysis_val": analysis_val,
+        "analysis_test": analysis_test,
         "wall_sec": wall,
-    }
+        }
 
     if save_summary_path is not None:
         with open(save_summary_path, "a", encoding="utf-8") as f:
@@ -380,13 +419,18 @@ def run_one_node_experiment(
         name=run.name,
         seed=run.seed,
         epochs=epochs,
-        best_val_mae=best_val_mae,
+        selection_metric=selection_metric,
+        best_val_metric=best_val_metric,
         best_epoch=best_epoch,
         best_snapshot=best_snapshot,
         final_snapshot=final_snapshot,
+        analysis_val=analysis_val,
+        analysis_test=analysis_test,
         wall_sec=wall,
     )
+
     return result, model, train_cfg
+
 
 @torch.no_grad()
 def collect_node_predictions_over_time(model, bins, cfg):
@@ -403,6 +447,8 @@ def collect_node_predictions_over_time(model, bins, cfg):
     times : np.ndarray [T_scored]
     y_true : np.ndarray [T_scored, N, d_y]
     y_pred : np.ndarray [T_scored, N, d_y]
+    node_mask : np.ndarray [T_scored, N] or None
+        Returned only if masks are present in the stream.
     """
     model.eval()
     device = torch.device(cfg.device)
@@ -412,8 +458,11 @@ def collect_node_predictions_over_time(model, bins, cfg):
     times = []
     y_true = []
     y_pred = []
+    masks = []
 
     prev = None
+    saw_mask = False
+
     for curr in bins:
         curr = curr.to(device)
 
@@ -424,16 +473,25 @@ def collect_node_predictions_over_time(model, bins, cfg):
         # update memory with previous bin
         state, _aux = model.step(state, prev)
 
-        # predict node targets for current bin
-        pred = model.predict_nodes(state)  # [N, d_y]
+        # optional safety: predict on a detached clone so prediction cannot
+        # accidentally mutate the live recurrent state
+        state_eval = state.clone(detach=True) if state is not None else None
+
+        pred = model.predict_nodes(state_eval)  # [N, d_y]
         true = curr.node_targets
 
         if true is None:
             raise ValueError("curr.node_targets is None; dataset must provide node targets")
 
-        # record a scalar time for this bin
+        true = true.to(pred.device, pred.dtype)
+
+        # record one scalar time for this bin
         if curr.t is not None:
-            t_val = int(curr.t[0].item())
+            t_min = int(curr.t.min().item())
+            t_max = int(curr.t.max().item())
+            if t_min != t_max:
+                raise ValueError(f"Expected one timestamp per bin, got [{t_min}, {t_max}]")
+            t_val = t_min
         else:
             t_val = len(times)
 
@@ -441,8 +499,28 @@ def collect_node_predictions_over_time(model, bins, cfg):
         y_true.append(true.detach().cpu().numpy())
         y_pred.append(pred.detach().cpu().numpy())
 
+        if curr.node_mask is not None:
+            saw_mask = True
+            masks.append(curr.node_mask.detach().cpu().numpy().astype(bool))
+        else:
+            masks.append(None)
+
         prev = curr
-    # debugging
+
+    if len(times) == 0:
+        raise ValueError("No scored steps were collected. Need at least two bins in the stream.")
+
+    times_np = np.asarray(times)
+    y_true_np = np.stack(y_true, axis=0)   # [T, N, d_y]
+    y_pred_np = np.stack(y_pred, axis=0)   # [T, N, d_y]
+
+    if saw_mask:
+        node_mask_np = np.stack(
+            [m if m is not None else np.ones((cfg.num_nodes,), dtype=bool) for m in masks],
+            axis=0,
+        )  # [T, N]
+
+        # debugging
     # times = np.asarray(times)
     # y_true = np.asarray(y_true)
     # y_pred = np.asarray(y_pred)
@@ -453,13 +531,103 @@ def collect_node_predictions_over_time(model, bins, cfg):
     # print("first 5 times:", times[:5])
     # print("first 5 pred node0:", y_pred[:5, 0, :])
     # print("first 5 true node0:", y_true[:5, 0, :])
+        return times_np, y_true_np, y_pred_np, node_mask_np
 
-    return (
-        np.asarray(times),
-        np.stack(y_true, axis=0),   # [T, N, d_y]
-        np.stack(y_pred, axis=0),   # [T, N, d_y]
-    )
+    return times_np, y_true_np, y_pred_np
 
+def compute_prediction_analysis(y_true, y_pred, node_mask=None):
+    """
+    y_true, y_pred: [T, N, D]
+    node_mask: [T, N] or None
+    """
+    eps = 1e-12
+
+    if node_mask is None:
+        yt = y_true.reshape(-1, y_true.shape[-1])
+        yp = y_pred.reshape(-1, y_pred.shape[-1])
+        mask = np.ones((y_true.shape[0], y_true.shape[1]), dtype=bool)
+    else:
+        mask = node_mask.astype(bool)
+        yt = y_true[mask]   # [M, D]
+        yp = y_pred[mask]   # [M, D]
+
+    diff = yp - yt
+    mse = float(np.mean(diff ** 2))
+    rmse = float(np.sqrt(mse))
+    mae = float(np.mean(np.abs(diff)))
+
+    yt_mean = np.mean(yt, axis=0, keepdims=True)
+    ss_res = float(np.sum((yt - yp) ** 2))
+    ss_tot = float(np.sum((yt - yt_mean) ** 2))
+    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > eps else float("nan")
+
+    # per-node trajectory metrics over time
+    T, N, D = y_true.shape
+    node_pearsons = []
+    node_spearmans = []
+    node_r2s = []
+
+    for n in range(N):
+        valid_t = mask[:, n]
+        if valid_t.sum() < 2:
+            continue
+
+        for d in range(D):
+            yt_nd = y_true[valid_t, n, d]
+            yp_nd = y_pred[valid_t, n, d]
+
+            if yt_nd.size < 2:
+                continue
+
+            # Pearson
+            if np.std(yt_nd) > eps and np.std(yp_nd) > eps:
+                r = np.corrcoef(yt_nd, yp_nd)[0, 1]
+                if np.isfinite(r):
+                    node_pearsons.append(float(r))
+
+                rho = spearmanr(yt_nd, yp_nd).statistic
+                if np.isfinite(rho):
+                    node_spearmans.append(float(rho))
+
+            # per-node R²
+            ss_res_nd = float(np.sum((yt_nd - yp_nd) ** 2))
+            ss_tot_nd = float(np.sum((yt_nd - np.mean(yt_nd)) ** 2))
+            if ss_tot_nd > eps:
+                node_r2s.append(float(1.0 - ss_res_nd / ss_tot_nd))
+
+    out = {
+        "mae": mae,
+        "mse": mse,
+        "rmse": rmse,
+        "r2": r2,
+        "mean_node_pearson": float(np.mean(node_pearsons)) if node_pearsons else float("nan"),
+        "mean_node_spearman": float(np.mean(node_spearmans)) if node_spearmans else float("nan"),
+        "mean_node_r2": float(np.mean(node_r2s)) if node_r2s else float("nan"),
+        "median_node_pearson": float(np.median(node_pearsons)) if node_pearsons else float("nan"),
+        "median_node_spearman": float(np.median(node_spearmans)) if node_spearmans else float("nan"),
+        "median_node_r2": float(np.median(node_r2s)) if node_r2s else float("nan"),
+    }
+
+    # vector metrics for D > 1
+    if yt.shape[1] > 1:
+        yt_norm = np.linalg.norm(yt, axis=1)
+        yp_norm = np.linalg.norm(yp, axis=1)
+        valid = (yt_norm > eps) & (yp_norm > eps)
+
+        if np.any(valid):
+            cos = np.sum(yt[valid] * yp[valid], axis=1) / (yt_norm[valid] * yp_norm[valid])
+            cos = np.clip(cos, -1.0, 1.0)
+            angle_deg = np.degrees(np.arccos(cos))
+
+            out["mean_cosine"] = float(np.mean(cos))
+            out["mean_angle_deg"] = float(np.mean(angle_deg))
+            out["magnitude_rmse"] = float(np.sqrt(np.mean((yp_norm - yt_norm) ** 2)))
+        else:
+            out["mean_cosine"] = float("nan")
+            out["mean_angle_deg"] = float("nan")
+            out["magnitude_rmse"] = float("nan")
+
+    return out
 # -----------------------------
 # example main
 # -----------------------------
@@ -557,29 +725,29 @@ def main():
             )
 
     if trained_model is not None and plot_cfg is not None:
-        times, y_true, y_pred = collect_node_predictions_over_time(
-            trained_model,
-            ds.bins("test"),
-            plot_cfg,
-        )
+        pack = collect_node_predictions_over_time(trained_model, ds.bins("test"), plot_cfg)
+        if len(pack) == 4:
+            times, y_true, y_pred, node_mask = pack
+        else:
+            times, y_true, y_pred = pack
+            node_mask = None
 
     print("Collected shapes:", times.shape, y_true.shape, y_pred.shape)
 
-    plot_spring_mass_quartile_nodes(
-        times,
-        y_true,
-        y_pred,
-        out_dir="/home/akapociu/ift/interactiondynamics/plots",
+    print(f"\n=== Top runs by best validation {base_train_cfg.selection_metric} ===")
+    results_sorted = sorted(
+        results,
+        key=lambda r: r.best_val_metric,
+        reverse=higher_is_better(base_train_cfg.selection_metric),
     )
 
-    print("\n=== Top runs by lowest best_val_mae ===")
-    results_sorted = sorted(results, key=lambda r: r.best_val_mae)
     for r in results_sorted[:10]:
-        best_test_mae = r.best_snapshot.get("test", {}).get("mae", float("nan"))
         print(
             f"{r.name} | seed={r.seed} | "
-            f"best_val_mae={r.best_val_mae:.6f} @epoch {r.best_epoch} | "
-            f"best_test_mae={best_test_mae:.6f}"
+            f"best_val_{r.selection_metric}={r.best_val_metric:.6f} @epoch {r.best_epoch} | "
+            f"test_rmse={r.analysis_test.get('rmse', float('nan')):.6f} | "
+            f"test_r2={r.analysis_test.get('r2', float('nan')):.6f} | "
+            f"test_mean_node_pearson={r.analysis_test.get('mean_node_pearson', float('nan')):.6f}"
         )
 
 if __name__ == "__main__":

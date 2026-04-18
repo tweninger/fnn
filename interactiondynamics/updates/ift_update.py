@@ -7,6 +7,7 @@ from typing import Dict, Optional, Tuple, Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 from core.interfaces import UpdateLaw, ModelState
 
@@ -137,9 +138,9 @@ class IFTDiffusionUpdate(UpdateLaw):
         # makes message injection live in node-state space
         inj = self.msg_proj(messages)
         # clip it injection norm a bit why not.. don't let it get too big
-        inj_max = 1.0  # tune: 0.5–2.0
-        inj_norm = inj.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        inj = inj * (inj_max / inj_norm).clamp(max=1.0)    
+        #inj_max = 3.0  # tune: 0.5–2.0
+        inj = inj.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        #inj = inj * (inj_max / inj_norm).clamp(max=1.0)    
 
         # print("DEBUG inj max", float(inj.abs().max().item()),
         #    "inj std", float(inj.std().item()))
@@ -154,48 +155,79 @@ class IFTDiffusionUpdate(UpdateLaw):
         # ^^ simpler than HNN symplectic update 
 
         #DEBUGGGINGGGG
-        if state.aux is not None:
-            step_idx = state.aux.get("debug_step", 0)
-            if step_idx < 50:
-                with torch.no_grad():
-                    print(
-                        f"[IFT DEBUG] "
-                        f"kappa={float(kappa.item()):.6f} | "
-                        f"||h||={float(h.norm().item()):.6f} | "
-                        f"||messages||={float(messages.norm().item()):.6f} | "
-                        f"||inj||={float(inj.norm().item()):.6f} | "
-                        f"||Lh||={float(Lh.norm().item()):.6f} | "
-                        f"||dh||={float(dh.norm().item()):.6f} | "
-                        f"||h_next||={float(h_next.norm().item()):.6f}"
-                    )
+        # if state.aux is None:
+        #     state.aux = {}
 
-                    print(
-                        f"[IFT DEBUG] "
-                        f"max|h|={float(h.abs().max().item()):.6f} | "
-                        f"max|messages|={float(messages.abs().max().item()):.6f} | "
-                        f"max|inj|={float(inj.abs().max().item()):.6f} | "
-                        f"max|Lh|={float(Lh.abs().max().item()):.6f} | "
-                        f"max|dh|={float(dh.abs().max().item()):.6f} | "
-                        f"max|h_next|={float(h_next.abs().max().item()):.6f}"
-                    )
-                decay_term = -self.gamma * h
-                diff_term = -(kappa * Lh)
-                inj_term = inj
+        # step_idx = int(state.aux.get("debug_step", 0))
+        
+        # # print first few, then every 1000
+        # if step_idx < 5 or step_idx % 1500 == 0:
+        #     inj_raw = self.msg_proj(messages)
+        #     inj_norm_raw = inj_raw.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        #     inj = inj_raw * (inj_max / inj_norm_raw).clamp(max=1.0)
 
-                with torch.no_grad():
-                    print(
-                        f"[IFT TERMS] "
-                        f"||decay||={float(decay_term.norm().item()):.6f} | "
-                        f"||diff||={float(diff_term.norm().item()):.6f} | "
-                        f"||inj||={float(inj_term.norm().item()):.6f}"
-                    )
+        #     row_norms = inj_raw.norm(dim=-1).detach().cpu().numpy()
+        #     print(
+        #         f"p50={np.percentile(row_norms,50):.3f} | "
+        #         f"p90={np.percentile(row_norms,90):.3f} | "
+        #         f"p95={np.percentile(row_norms,95):.3f} | "
+        #         f"p99={np.percentile(row_norms,99):.3f} | "
+        #         f"max={row_norms.max():.3f}"
+        #     )
 
-                state.aux["debug_step"] = step_idx + 1
+        #     with torch.no_grad():
+        #         print(
+        #             f"[INJ CHECK step={step_idx}] "
+        #             f"raw_total={float(inj_raw.norm().item()):.6f} | "
+        #             f"clipped_total={float(inj.norm().item()):.6f} | "
+        #             f"raw_mean_node={float(inj_norm_raw.mean().item()):.6f} | "
+        #             f"frac_clipped={float((inj_norm_raw > inj_max).float().mean().item()):.6f}"
+        #         )
+        #     with torch.no_grad():
+        #         print(
+        #             f"[IFT DEBUG] "
+        #             f"kappa={float(kappa.item()):.6f} | "
+        #             f"||h||={float(h.norm().item()):.6f} | "
+        #             f"||messages||={float(messages.norm().item()):.6f} | "
+        #             f"||inj||={float(inj.norm().item()):.6f} | "
+        #             f"||Lh||={float(Lh.norm().item()):.6f} | "
+        #             f"||dh||={float(dh.norm().item()):.6f} | "
+        #             f"||h_next||={float(h_next.norm().item()):.6f}"
+        #         )
+
+                #     print(
+                #         f"[IFT DEBUG] "
+                #         f"max|h|={float(h.abs().max().item()):.6f} | "
+                #         f"max|messages|={float(messages.abs().max().item()):.6f} | "
+                #         f"max|inj|={float(inj.abs().max().item()):.6f} | "
+                #         f"max|Lh|={float(Lh.abs().max().item()):.6f} | "
+                #         f"max|dh|={float(dh.abs().max().item()):.6f} | "
+                #         f"max|h_next|={float(h_next.abs().max().item()):.6f}"
+                #     )
+                # decay_term = -self.gamma * h
+                # diff_term = -(kappa * Lh)
+                # inj_term = inj
+
+                # with torch.no_grad():
+                #     print(
+                #         f"[IFT TERMS] "
+                #         f"||decay||={float(decay_term.norm().item()):.6f} | "
+                #         f"||diff||={float(diff_term.norm().item()):.6f} | "
+                #         f"||inj||={float(inj_term.norm().item()):.6f}"
+                #     )
+
+                #state.aux["debug_step"] = step_idx + 1
         
         next_state = ModelState( # return next state, new node memory is h_next + aux info, so L and metadata can continue being carried around
             node=h_next,
             aux=dict(state.aux) if state.aux is not None else {}
         )
+
+        # #still part of ^^ inj_message debugging
+        # if next_state.aux is None:
+        #     next_state.aux = {}
+        # next_state.aux["debug_step"] = step_idx + 1
+
 
         def _stat(name, x):
             mx = float(x.abs().max().item())

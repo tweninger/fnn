@@ -1,7 +1,6 @@
-
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
@@ -32,10 +31,6 @@ For this system there are really two separate layers:
    - dense / "all_neighbors": emit every physical neighbor interaction every bin
    - thresholded: emit only neighbor interactions whose salience exceeds a cutoff
 
-This is exactly analogous to the 3-body distinction between:
-- faithful all-pairs physics
-- thresholded sparse eventization
-
 Physics summary
 ---------------
 State at node i:
@@ -44,19 +39,10 @@ State at node i:
 
 Continuous-time first-order dynamics:
     dq_i/dt = v_i
-    dv_i/dt = c^2 * q_xx[i] - damping * v_i
+    dv_i/dt = c^2 q_xx[i] - damping * v_i
 
 Discrete nearest-neighbor form:
     dv_i/dt = c^2 * ((q_{i-1}-q_i) + (q_{i+1}-q_i)) / dx^2 - damping * v_i
-
-So the natural pairwise edge message from sender j -> receiver i is:
-    m_{j->i} = c^2 * (q_j - q_i) / dx^2
-
-This means:
-- neighbor edges carry the coupling
-- the apparent "-2 q_i" center term is just what you get after summing the two
-  pairwise spring-like neighbor contributions
-- we do NOT need an explicit self-event to make the physics interpretable
 """
 
 solve_ivp = scipy.integrate.solve_ivp
@@ -108,7 +94,6 @@ def _smooth_periodic_noise(
 ) -> np.ndarray:
     """
     Build a smooth periodic random field by blending circularly shifted white noise.
-    Kept close in spirit to the LNN notebook's random smooth field construction.
     """
     noise = rng.normal(size=(num_nodes,)).astype(np.float64)
 
@@ -227,41 +212,51 @@ class WaveEquationBinnedConfig:
 
     # GRID / TIME
     num_nodes: int = 32
-    num_bins: int = 128
+    num_bins: int = 256
     domain_length: float = 1.0
     t_span: Tuple[float, float] = (0.0, 20.0)
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
 
     # PHYSICS
-    wave_speed: float = 1.0
-    damping: float = 0.0
+    wave_speed: float = 0.5
+    damping: float = 0.1
 
     # INITIAL CONDITION
-    init_q_scale: float = 0.5
-    init_v_scale: float = 0.25
+    init_q_scale: float = 0.3
+    init_v_scale: float = 0.1
     smooth_num_rolls: Optional[int] = None
     smooth_weight_temperature: float = 10.0
     seed: int = 0
 
-    # OBSERVATION NOISE (added after solving the clean dynamics)
+    # OBSERVATION NOISE
     observation_noise_q: float = 0.0
     observation_noise_v: float = 0.0
 
     # EVENT EMISSION
-    # "all_neighbors" = faithful dense physics graph emission
-    # "thresholded"   = sparse eventization layer on top of the same physics graph
-    event_mode: str = "all_neighbors"
-    interaction_threshold: float = 0.16088
-    threshold_metric: str = "rel_q"   # {"pair_accel","rel_q","rel_v","pair_grad"}
-    threshold_use_absolute: bool = True
+    event_mode: str = "thresholded"  # {"all_neighbors", "thresholded"}
+    interaction_threshold: float = 19.0334
+    threshold_metric: str = "pair_accel"   # {"pair_accel","rel_q","rel_v","pair_grad"}
+    threshold_use_absolute: bool = False
     threshold_keep_one_if_empty: bool = True
 
     # ODE SOLVER
     rtol: float = 1e-9
     atol: float = 1e-9
 
-    # Optional torch device for EventBatch tensors
+    # Optional torch device
     device: Optional[torch.device] = None
+
+    # Node targets
+    standardize_node_targets: bool = True
+    target_horizon: int = 1
+    target_name: str = "delta_v"
+    # choices:
+    #   "delta_v" : v(t+h) - v(t)
+    #   "dv"      : dt * (c^2 q_xx(t+h) - damping * v(t+h))
+    #   "v"       : v(t+h)
+    #   "q"       : q(t+h)
+    #   "delta_q" : q(t+h) - q(t)
+    #   "q_xx"    : q_xx(t+h)
 
 
 # -----------------------------------------------------------------------------
@@ -269,31 +264,13 @@ class WaveEquationBinnedConfig:
 # -----------------------------------------------------------------------------
 
 _EDGE_FEATURE_NAMES: Sequence[str] = (
-    # geometry on the ring
-    #"recv_x",
-    #"send_x",
-
-    # receiver local state
-    #"recv_q",
-    #"recv_v",
-
-    # sender local state
-    #"send_q",
-    #"send_v",
-
-    # pairwise relative state
-    "rel_q",
-    "rel_v",
-
-    # local coupling bookkeeping
-    # "direction",              # -1 for left neighbor, +1 for right neighbor
+    # Uncomment whatever you want to expose as edge features.
+    # "rel_q",
+    # "rel_v",
+    # "direction",
     # "dx",
-    #"pair_grad",              # (q_j - q_i) / dx
-    #"pair_accel_contrib",     # c^2 * (q_j - q_i) / dx^2
-
-    # optional summary features
-    #"recv_local_energy",
-    #"global_energy",
+    # "pair_grad",
+    # "pair_accel_contrib",
 )
 
 
@@ -308,13 +285,6 @@ def _pair_record(
 ) -> dict:
     """
     Build one directed nearest-neighbor interaction record: sender -> receiver.
-
-    Pairwise interpretation:
-        m_{j->i} = c^2 * (q_j - q_i) / dx^2
-
-    Summing the two incoming neighbor contributions to i gives the coupling part of
-    the discrete wave update. Damping remains a local node effect and is *not*
-    emitted as a separate self-event in this version.
     """
     num_nodes = q.shape[0]
     dx = cfg.domain_length / float(cfg.num_nodes)
@@ -340,20 +310,12 @@ def _pair_record(
 
     feats = np.array(
         [
-            # x_positions[receiver],
-            # x_positions[sender],
-            # recv_q,
-            # recv_v,
-            # send_q,
-            # send_v,
-            rel_q,
-            rel_v,
+            # rel_q,
+            # rel_v,
             # direction,
             # dx,
-            #pair_grad,
-            #pair_accel_contrib,
-            # recv_local_e,
-            # global_e,
+            # pair_grad,
+            # pair_accel_contrib,
         ],
         dtype=np.float32,
     )
@@ -372,10 +334,6 @@ def _pair_record(
 def _interaction_strength(record: dict, cfg: WaveEquationBinnedConfig) -> float:
     """
     Scalar used for thresholded event emission.
-
-    This does NOT change the underlying physics graph.
-    It only decides whether a physically valid neighbor coupling is emitted as an
-    observed event in the sparse thresholded variant.
     """
     metric = cfg.threshold_metric
     if metric == "pair_accel":
@@ -415,28 +373,72 @@ def _filter_records(records_all: List[dict], cfg: WaveEquationBinnedConfig) -> L
     return kept
 
 
+def _compute_node_target(
+    *,
+    q: np.ndarray,
+    v: np.ndarray,
+    q_target: np.ndarray,
+    v_target: np.ndarray,
+    cfg: "WaveEquationBinnedConfig",
+) -> tuple[np.ndarray, str]:
+    """
+    Return per-node regression target and its base name.
+    Output shape: [N]
+    """
+    dx = cfg.domain_length / float(cfg.num_nodes)
+    dt = (cfg.t_span[1] - cfg.t_span[0]) / float(cfg.num_bins - 1)
+
+    if cfg.target_name == "delta_v":
+        y = v_target - v
+        name = "delta_v"
+
+    elif cfg.target_name == "dv":
+        q_xx_tgt = periodic_laplacian(q_target, dx=dx)
+        accel_tgt = (cfg.wave_speed ** 2) * q_xx_tgt - cfg.damping * v_target
+        y = dt * accel_tgt
+        name = "dv"
+
+    elif cfg.target_name == "v":
+        y = v_target
+        name = "v"
+
+    elif cfg.target_name == "q":
+        y = q_target
+        name = "q"
+
+    elif cfg.target_name == "delta_q":
+        y = q_target - q
+        name = "delta_q"
+
+    elif cfg.target_name == "q_xx":
+        y = periodic_laplacian(q_target, dx=dx)
+        name = "q_xx"
+
+    else:
+        raise ValueError(
+            f"unknown target_name={cfg.target_name!r}; expected one of "
+            "{'delta_v','dv','v','q','delta_q','q_xx'}"
+        )
+
+    return y.astype(np.float32, copy=False), name
+
+
 def _state_to_event_batch(
     q: np.ndarray,
     v: np.ndarray,
     t_idx: int,
     cfg: WaveEquationBinnedConfig,
+    target_mean: Optional[float] = None,
+    target_std: Optional[float] = None,
+    q_target: Optional[np.ndarray] = None,
+    v_target: Optional[np.ndarray] = None,
 ) -> EventBatch:
     """
     Convert one full field snapshot at time index t_idx into one EventBatch.
-
-    Underlying dense physics graph:
-        each node i has exactly two incoming nearest-neighbor couplings
-            (i-1) -> i
-            (i+1) -> i
-
-    Event emission options:
-        - all_neighbors: emit all 2N directed couplings every bin
-        - thresholded: emit only couplings whose salience exceeds the cutoff
     """
     records_all: List[dict] = []
     num_nodes = q.shape[0]
     dx = cfg.domain_length / float(cfg.num_nodes)
-    dt = (cfg.t_span[1] - cfg.t_span[0]) / float(cfg.num_bins - 1)
 
     x_positions = np.linspace(
         0.0,
@@ -485,13 +487,22 @@ def _state_to_event_batch(
     )
     t = torch.full((src.numel(),), int(t_idx), dtype=torch.long, device=cfg.device)
 
-    # ---- node regression target: dv ----
-    q_xx = periodic_laplacian(q, dx=dx)                          # [N]
-    accel = (cfg.wave_speed ** 2) * q_xx - cfg.damping * v      # [N]
-    dv = dt * accel                                              # [N]
+    q_tgt = q if q_target is None else q_target
+    v_tgt = v if v_target is None else v_target
+
+    target_values, _ = _compute_node_target(
+        q=q,
+        v=v,
+        q_target=q_tgt,
+        v_target=v_tgt,
+        cfg=cfg,
+    )
+
+    if target_mean is not None and target_std is not None:
+        target_values = (target_values - target_mean) / target_std
 
     node_targets = torch.tensor(
-        dv[:, None], #q_xx[:, None], #dv[:, None] shape [N, 1]
+        target_values[:, None],
         dtype=torch.float32,
         device=cfg.device,
     )
@@ -513,6 +524,7 @@ def _state_to_event_batch(
         eb = eb.to(cfg.device)
     return eb
 
+
 # -----------------------------------------------------------------------------
 # PART 4: DATASET OBJECT THAT THE REST OF THE REPO CAN USE
 # -----------------------------------------------------------------------------
@@ -532,6 +544,36 @@ class WaveEquationBinnedDataset(EventStreamDataset):
         q_traj = states[:, : cfg.num_nodes].copy()
         v_traj = states[:, cfg.num_nodes :].copy()
 
+        num_bins = q_traj.shape[0]
+
+        # Keep your original ordering:
+        # standardization stats are computed from the clean trajectory first.
+        n_train = int(cfg.split_fracs[0] * num_bins)
+        train_end = n_train
+
+        self.target_mean = None
+        self.target_std = None
+
+        if cfg.standardize_node_targets:
+            train_targets = []
+            usable_train_bins = max(0, train_end - cfg.target_horizon)
+
+            for t_idx in range(usable_train_bins):
+                tgt_idx = t_idx + cfg.target_horizon
+
+                y, _ = _compute_node_target(
+                    q=q_traj[t_idx],
+                    v=v_traj[t_idx],
+                    q_target=q_traj[tgt_idx],
+                    v_target=v_traj[tgt_idx],
+                    cfg=cfg,
+                )
+                train_targets.append(y.reshape(-1))
+
+            train_targets = np.concatenate(train_targets, axis=0)
+            self.target_mean = float(train_targets.mean())
+            self.target_std = float(max(train_targets.std(), 1e-8))
+
         if cfg.observation_noise_q > 0.0:
             q_traj += self._rng.normal(
                 loc=0.0,
@@ -548,20 +590,38 @@ class WaveEquationBinnedDataset(EventStreamDataset):
         self._q_traj = q_traj
         self._v_traj = v_traj
 
-        self._all_bins: List[EventBatch] = [
-            _state_to_event_batch(q_traj[t_idx], v_traj[t_idx], t_idx=t_idx, cfg=cfg)
-            for t_idx in range(cfg.num_bins)
-        ]
+        target_mean = self.target_mean if cfg.standardize_node_targets else None
+        target_std = self.target_std if cfg.standardize_node_targets else None
+
+        self._all_bins: List[EventBatch] = []
+
+        usable_bins = num_bins - cfg.target_horizon
+        for t_idx in range(usable_bins):
+            tgt_idx = t_idx + cfg.target_horizon
+
+            eb = _state_to_event_batch(
+                q_traj[t_idx],
+                v_traj[t_idx],
+                t_idx=t_idx,
+                cfg=cfg,
+                q_target=q_traj[tgt_idx],
+                v_target=v_traj[tgt_idx],
+                target_mean=target_mean,
+                target_std=target_std,
+            )
+            self._all_bins.append(eb)
 
         f_tr, f_va, f_te = cfg.split_fracs
         assert abs((f_tr + f_va + f_te) - 1.0) < 1e-6, "split_fracs must sum to 1.0"
-        tr_end = int(cfg.num_bins * f_tr)
-        va_end = tr_end + int(cfg.num_bins * f_va)
+
+        num_effective_bins = len(self._all_bins)
+        tr_end = int(num_effective_bins * f_tr)
+        va_end = tr_end + int(num_effective_bins * f_va)
 
         self._split_ranges = {
             "train": (0, max(0, tr_end - 1)),
             "val": (tr_end, max(tr_end, va_end - 1)),
-            "test": (va_end, cfg.num_bins - 1),
+            "test": (va_end, num_effective_bins - 1),
         }
 
     def spec(self) -> DataSpec:
@@ -596,7 +656,13 @@ class WaveEquationBinnedDataset(EventStreamDataset):
                 "observation_noise_q": float(self.cfg.observation_noise_q),
                 "observation_noise_v": float(self.cfg.observation_noise_v),
                 "node_target_dim": 1,
-                "node_target_names": ["dv"],
+                "node_target_names": [
+                    f"{self.cfg.target_name}_std"
+                    if self.cfg.standardize_node_targets
+                    else self.cfg.target_name
+                ],
+                "target_name": self.cfg.target_name,
+                "target_horizon": int(self.cfg.target_horizon),
             },
         )
 
@@ -620,6 +686,89 @@ class _PrecomputedStream(Iterable[EventBatch]):
         for b in range(self.b0, self.b1 + 1):
             yield self.bins_all[b]
 
+def _wave_variant_name(
+    cfg: WaveEquationBinnedConfig,
+) -> str:
+    parts = [
+        cfg.name,
+        f"mode-{cfg.event_mode}",
+        f"target-{cfg.target_name}",
+        f"h-{cfg.target_horizon}",
+        f"std-{cfg.standardize_node_targets}",
+    ]
+
+    if cfg.event_mode == "thresholded":
+        parts.extend([
+            f"metric-{cfg.threshold_metric}",
+            f"thr-{cfg.interaction_threshold}",
+            f"abs-{cfg.threshold_use_absolute}",
+        ])
+
+    return "__".join(parts)
+
+
+def make_wave_variants(
+    base_cfg: WaveEquationBinnedConfig,
+    *,
+    event_modes: Sequence[str] = ("thresholded",),
+    threshold_metrics: Sequence[str] = ("pair_accel",),
+    interaction_thresholds: Sequence[float] = (19.0334,),
+    threshold_use_absolute_options: Sequence[bool] = (False,),
+    standardize_node_targets_options: Sequence[bool] = (True,),
+    target_names: Sequence[str] = ("dv",),
+    target_horizons: Sequence[int] = (1,),
+) -> dict[str, WaveEquationBinnedDataset]:
+    """
+    Build a dict of named WaveEquationBinnedDataset variants.
+
+    Notes
+    -----
+    - For event_mode='all_neighbors', threshold-specific knobs are ignored.
+    - For event_mode='thresholded', we sweep threshold metric / value / abs flag.
+    """
+    datasets: dict[str, WaveEquationBinnedDataset] = {}
+
+    for event_mode in event_modes:
+        for target_name in target_names:
+            for target_horizon in target_horizons:
+                for standardize in standardize_node_targets_options:
+
+                    if event_mode == "all_neighbors":
+                        cfg = replace(
+                            base_cfg,
+                            event_mode="all_neighbors",
+                            target_name=target_name,
+                            target_horizon=target_horizon,
+                            standardize_node_targets=standardize,
+                        )
+                        cfg = replace(cfg, name=_wave_variant_name(cfg))
+                        datasets[cfg.name] = WaveEquationBinnedDataset(cfg)
+                        continue
+
+                    if event_mode != "thresholded":
+                        raise ValueError(
+                            f"unknown wave event_mode={event_mode!r}; expected "
+                            "{'all_neighbors', 'thresholded'}"
+                        )
+
+                    for threshold_metric in threshold_metrics:
+                        for interaction_threshold in interaction_thresholds:
+                            for use_abs in threshold_use_absolute_options:
+                                cfg = replace(
+                                    base_cfg,
+                                    event_mode="thresholded",
+                                    threshold_metric=threshold_metric,
+                                    interaction_threshold=float(interaction_threshold),
+                                    threshold_use_absolute=bool(use_abs),
+                                    target_name=target_name,
+                                    target_horizon=target_horizon,
+                                    standardize_node_targets=standardize,
+                                )
+                                cfg = replace(cfg, name=_wave_variant_name(cfg))
+                                datasets[cfg.name] = WaveEquationBinnedDataset(cfg)
+
+    return datasets
+
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -632,6 +781,7 @@ if __name__ == "__main__":
         wave_speed=1.0,
         damping=0.05,
         event_mode="all_neighbors",
+        target_name="delta_v",
         device=device,
     )
     dense_ds = WaveEquationBinnedDataset(dense_cfg)
@@ -639,7 +789,7 @@ if __name__ == "__main__":
     for i, batch in zip(range(2), dense_ds.bins("train")):
         print(f"dense bin={i} num_events={batch.src.numel()}")
 
-    thr_cfg = WaveEquationBinnedConfig(
+    dv_cfg = WaveEquationBinnedConfig(
         num_nodes=16,
         num_bins=32,
         domain_length=1.0,
@@ -650,9 +800,10 @@ if __name__ == "__main__":
         interaction_threshold=1.0,
         threshold_metric="pair_accel",
         threshold_keep_one_if_empty=True,
+        target_name="dv",
         device=device,
     )
-    thr_ds = WaveEquationBinnedDataset(thr_cfg)
-    print("THRESHOLDED:", thr_ds.spec())
-    for i, batch in zip(range(2), thr_ds.bins("train")):
-        print(f"thresholded bin={i} num_events={batch.src.numel()}")
+    dv_ds = WaveEquationBinnedDataset(dv_cfg)
+    print("DV TARGET:", dv_ds.spec())
+    for i, batch in zip(range(2), dv_ds.bins("train")):
+        print(f"dv bin={i} num_events={batch.src.numel()}")
