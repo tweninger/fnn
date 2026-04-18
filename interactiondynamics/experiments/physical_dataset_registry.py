@@ -12,14 +12,15 @@ from datasets.spring_web_2d import SpringWeb2DConfig, SpringWeb2DDataset, make_s
 def build_physical_datasets(
     device,
     md22_npz_paths=(),
-    include=("nbody", "wave", "spring_ring", "md22", "spring_web_2d"),
+    include=("charged_particles", "wave", "spring_ring", "md22", "spring_web_2d"),
 ):
     datasets = {}
 
-    if "nbody" in include:
+    if "charged_particles" in include:
         cfg = ChargedParticlesBinnedConfig(
-            name="nbody",
+            name="charged_particles",
             device=device,
+            interaction_rule="all_pairs"
         )
         datasets[cfg.name] = ChargedParticlesBinnedDataset(cfg)
 
@@ -27,7 +28,7 @@ def build_physical_datasets(
         base_cfg = WaveEquationBinnedConfig(
             name="wave",
             device=device,
-            event_mode="thresholded",
+            event_mode="all_neighbors",
             interaction_threshold=19.0334,
             threshold_metric="pair_accel",
             threshold_use_absolute=True,
@@ -86,38 +87,38 @@ def build_physical_datasets(
         base_cfg = SpringWeb2DConfig(
             name="springweb",
             device=device,
-            event_mode="thresholded",
+            event_mode="all_neighbors",
             threshold_metric="force_mag",
             interaction_threshold=0.0275852,
             threshold_use_absolute=True,
         )
-        #datasets[cfg.name] = SpringWeb2DDataset(cfg)
-        metric_to_values = {
-            "force_mag": (0.0273215,),
-            "extension": (-0.0112979,),
-            # "distance": (0.96589,),
-           # "rel_speed": (0.0321316,),
-        }
-        spring_web_variants = {}
+        datasets[base_cfg.name] = SpringWeb2DDataset(base_cfg)
+        # metric_to_values = {
+        #     "force_mag": (0.0273215,),
+        #     "extension": (-0.0112979,),
+        #     # "distance": (0.96589,),
+        #    # "rel_speed": (0.0321316,),
+        # }
+        # spring_web_variants = {}
 
-        for metric, values in metric_to_values.items():
-            spring_web_variants.update(
-                make_spring_web_variants(
-                    base_cfg,
-                    topologies=("knn",),
-                    radius_values=("0.05",),
-                    knn_values=(4,),
-                    include_ring_edges_options=(False,),
-                    event_modes=("thresholded",),
-                    threshold_metrics=(metric,),   # one metric at a time
-                    threshold_values=values,       # only that metric's value(s)
-                    target_types=("dv", "accel", "delta_x"),
-                    target_horizons=(1,),
-                    standardize_node_targets_options=(False,),
-                )
-            )
+        # for metric, values in metric_to_values.items():
+        #     spring_web_variants.update(
+        #         make_spring_web_variants(
+        #             base_cfg,
+        #             topologies=("knn",),
+        #             radius_values=("0.05",),
+        #             knn_values=(4,),
+        #             include_ring_edges_options=(False,),
+        #             event_modes=("thresholded",),
+        #             threshold_metrics=(metric,),   # one metric at a time
+        #             threshold_values=values,       # only that metric's value(s)
+        #             target_types=("dv", "accel", "delta_x"),
+        #             target_horizons=(1,),
+        #             standardize_node_targets_options=(False,),
+        #         )
+        #     )
 
-        datasets.update(spring_web_variants)
+        # datasets.update(spring_web_variants)
 
     return datasets
 

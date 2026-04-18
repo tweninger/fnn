@@ -3,7 +3,7 @@ import time
 import torch
 from typing import Any, Callable, Dict, Iterable, Optional# easy to make parameter-holding classes/turns dataclass -> dictionary
 from dataclasses import asdict, dataclass
-
+import copy
 # how event data is stored
 from core.events import EventBatch
 # evaluation logic
@@ -11,10 +11,10 @@ from eval.evaluate import EvalSlices, evaluate_stream_sliced
 # model config object
 from core.config import ModelConfig
 # real temporal datasets
-from datasets.jodie import JODIEBinnedDataset, JODIEConfig # type: ignore
 from eval.ranking import ranking_loss_and_metrics
 from experiments.interaction_prediction_runs import SweepRun 
 from utils.repro import set_seed
+from eval.recovery import evaluate_recovery_splits
 
 
 # dataclasses = containers for settings/results
@@ -215,7 +215,9 @@ def run_one_experiment(
     save_jsonl_path: Optional[str] = None,
     save_summary_path: Optional[str] = None,
     dataset_name: Optional[str] = None,
-) -> RunResult:
+    clean_ds=None,
+    corruption_cfg=None,
+) -> tuple[RunResult, torch.nn.Module, TrainConfig]:
     # choose device and set reproducible seed
     device = torch.device(base_train_cfg.device)
     set_seed(run.seed)
@@ -246,10 +248,11 @@ def run_one_experiment(
     best_val_mrr = float("-inf")
     best_epoch = -1
     best_snapshot: dict = {}
+    best_model_state = None
 
     #start the timer!!
     t0 = time.time()
-
+    recovery = None
     # loop thru 1, 2, x epochs
     for epoch in range(1, epochs + 1):
         # run one training epoch on training bins
@@ -287,6 +290,7 @@ def run_one_experiment(
             best_val_mrr = float(val_stats["mrr"])
             best_epoch = epoch
             best_snapshot = snapshot
+            best_model_state = copy.deepcopy(model.state_dict())
 
         # save to json
         if save_jsonl_path is not None:
@@ -312,10 +316,20 @@ def run_one_experiment(
 
     final_snapshot = snapshot  # last epoch snapshot
 
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
+    if clean_ds is not None and corruption_cfg is not None:
+        recovery = evaluate_recovery_splits(
+            model=model,
+            clean_ds=clean_ds,
+            train_cfg=train_cfg,
+            corruption_cfg=corruption_cfg,
+        )
     # save one final run summary as a JSONL row 
     summary = {
         "dataset": dataset_name,
-        "name": run.name,
+        "run": run.name,
         "seed": run.seed,
         "epochs": epochs,
         "best_val_mrr": best_val_mrr,
@@ -325,12 +339,15 @@ def run_one_experiment(
         "wall_sec": wall,
     }
 
+    if recovery is not None:
+        summary["recovery_val"] = recovery.get("val")
+        summary["recovery_test"] = recovery.get("test")
+
     if save_summary_path is not None:
         with open(save_summary_path, "a") as f:
             f.write(json.dumps(summary) + "\n")
 
-    # return structured result object
-    return RunResult(
+    result = RunResult(
         dataset=dataset_name,
         name=run.name,
         seed=run.seed,
@@ -341,3 +358,5 @@ def run_one_experiment(
         final_snapshot=final_snapshot,
         wall_sec=wall,
     )
+
+    return result, model, train_cfg

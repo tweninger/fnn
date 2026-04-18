@@ -63,11 +63,14 @@ def build_base_interaction_model_cfg(spec) -> ModelConfig:
 
 
 def build_base_interaction_train_cfg(spec, device: torch.device) -> TrainConfig:
+    dataset_name = str(spec.name).lower()
+    log_every = 2000 if "lastfm" in dataset_name else 50
+
     return TrainConfig(
         num_nodes=spec.num_nodes,
         num_neg=20,
         tbptt_steps=1,
-        log_every=50,
+        log_every=log_every,
         device=device,
         weight_decay=1e-3,
         lr=1e-3,

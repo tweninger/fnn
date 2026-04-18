@@ -138,9 +138,9 @@ class IFTDiffusionUpdate(UpdateLaw):
         # makes message injection live in node-state space
         inj = self.msg_proj(messages)
         # clip it injection norm a bit why not.. don't let it get too big
-        #inj_max = 3.0  # tune: 0.5–2.0
-        inj = inj.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        #inj = inj * (inj_max / inj_norm).clamp(max=1.0)    
+        inj_max = 2.0  # tune: 0.5–2.0
+        inj_norm = inj.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        inj = inj * (inj_max / inj_norm).clamp(max=1.0)    
 
         # print("DEBUG inj max", float(inj.abs().max().item()),
         #    "inj std", float(inj.std().item()))

@@ -25,12 +25,23 @@ from experiments.results_summary import (
     format_starting_run_banner,
     format_top_runs_header,
     print_interaction_seed_avg,
+    format_recovery_label,
+    format_recovery_metrics
 )
+from eval.recovery import (
+    evaluate_recovery_splits,
+    print_recovery_summary,
+    append_recovery_summary_row,
+    evaluate_hidden_positive_recovery
+)
+
 from models.tgn_model import build_tgn_model
 from plotting.interaction_prediction import plot_interaction_run_rankings
 from training.interaction_prediction import run_one_experiment
 from utils.io import append_jsonl
 from utils.output_paths import dataset_group_name, experiment_output_paths
+from datasets.jodie import JODIEBinnedDataset, JODIEConfig
+from datasets.corrupted import CorruptedEventStreamDataset
 
 
 
@@ -42,7 +53,7 @@ def main():
 
     RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
     PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-    EXPERIMENT_NAME = "physical_systems_sweep"
+    EXPERIMENT_NAME = "interaction_predictions_clean"
 
     paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
 
@@ -61,16 +72,54 @@ def main():
         "/home/akapociu/ift/interactiondynamics/data/MD_DATA/uracil.npz",
     ]
 
-    datasets = build_physical_datasets(
+    physical_datasets = build_physical_datasets(
         device=device,
         md22_npz_paths=md22_npz_paths,
-        include=("wave",),
-        # include=("spring_ring", "spring_mass"),
+        include=("wave", "spring_web_2d", "charged_particles"),
+    )
+
+    jodie_datasets = {
+        "wikipedia": JODIEBinnedDataset(
+            JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
+        ),
+        "reddit": JODIEBinnedDataset(
+            JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
+        ),
+        "mooc": JODIEBinnedDataset(
+            JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
+        ),
+        "lastfm": JODIEBinnedDataset(
+            JODIEConfig(root="./data/JODIE", name="LastFM", device=device)
+        ),
+    }
+
+    clean_datasets = {
+        **physical_datasets,
+        **jodie_datasets,
+    }
+
+    CORRUPTION = dict(
+        drop_real_prob=0.10,
+        add_fake_ratio=0.0,
+        corrupt_splits=("train",),
+        seed=17,
+        fake_feature_mode="zeros",
+        avoid_self_loops=True,
+        min_keep_per_nonempty_bin=1,
     )
 
     all_results = []
 
-    for dataset_name, ds in datasets.items():
+    # for base_name, clean_ds in clean_datasets.items():
+    #     corruption_tag = (
+    #         f"drop={CORRUPTION['drop_real_prob']:.2f}|"
+    #         f"fake={CORRUPTION['add_fake_ratio']:.2f}|"
+    #         f"splits={'-'.join(CORRUPTION['corrupt_splits'])}"
+    #     )
+    #     dataset_name = f"{base_name}_{corruption_tag}"
+
+    #     ds = CorruptedEventStreamDataset(clean_ds, **CORRUPTION)
+    for dataset_name, ds in clean_datasets.items():
         spec = ds.spec()
         # print("Dataset spec:")
         # print(
@@ -110,8 +159,8 @@ def main():
         )
 
         allowed_pairs = {
-            ("sum", "tgn_gru"),
-            # ("ift", "ift_update"),
+            #("sum", "tgn_gru"),
+            ("ift", "ift_update"),
         }
 
         if allowed_pairs is not None:
@@ -127,7 +176,7 @@ def main():
             print(format_starting_run_banner(dataset_name, run_for_ds.name, run.seed))
 
             try:
-                result = run_one_experiment(
+                result, model, train_cfg = run_one_experiment(
                     ds=ds,
                     spec=spec,
                     base_train_cfg=base_train_cfg,
@@ -138,10 +187,29 @@ def main():
                     save_jsonl_path=results_jsonl,
                     save_summary_path=summary_jsonl,
                     dataset_name=dataset_name,
+                    clean_ds=clean_ds,
+                    corruption_cfg=CORRUPTION,
                 )
                 dataset_results.append(result)
                 all_results.append(result)
 
+                recovery = evaluate_recovery_splits(
+                    model=model,
+                    clean_ds=clean_ds,
+                    train_cfg=train_cfg,
+                    corruption_cfg=CORRUPTION,
+                    splits=("train",)
+                )
+
+                append_recovery_summary_row(
+                    summary_jsonl=summary_jsonl,
+                    dataset_name=dataset_name,
+                    run_name=run_for_ds.name,
+                    seed=run.seed,
+                    recovery=recovery,
+                )
+                if recovery is not None:
+                    print(f"{format_recovery_label()} {format_recovery_metrics(recovery)}")
                 print(f"{format_finished_label()} {describe_interaction_run_result(result)}")
                 print(f"{format_analysis_label()} {format_interaction_metrics(result)}")
 

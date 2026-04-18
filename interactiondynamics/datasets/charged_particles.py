@@ -255,11 +255,11 @@ def simulate_charged_trajectory(
 
 @dataclass
 class ChargedParticlesBinnedConfig:
-    name: str = "charged_particles_binned"
+    name: str = "charged_particles"
 
     # DATASET LENGTH / SPLIT
     num_nodes: int = 32
-    num_bins: int = 512
+    num_bins: int = 256
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
 
     # SIMULATION
@@ -317,12 +317,12 @@ _EDGE_FEATURE_NAMES: Sequence[str] = (
     # "send_py",
     # "send_vx",
     # "send_vy",
-    "rel_px",
-    "rel_py",
+    # "rel_px",
+    # "rel_py",
     #"rel_vx",
     #"rel_vy",
-    "distance",
-    "charge_product",
+    # "distance",
+    # "charge_product",
     # # "force_x",
     # # "force_y",
     # "force_mag",
@@ -371,12 +371,12 @@ def _pair_record(
             # float(send_pos[1]),
             # float(send_vel[0]),
             # float(send_vel[1]),
-            float(rel_pos[0]),
-            float(rel_pos[1]),
+            # float(rel_pos[0]),
+            # float(rel_pos[1]),
             # float(rel_vel[0]),
             # float(rel_vel[1]),
-            distance,
-            charge_product,
+            # distance,
+            # charge_product,
             # # float(force_vec[0]),
             # # float(force_vec[1]),
             # force_mag,

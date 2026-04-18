@@ -23,9 +23,9 @@ class SpringMassConfig:
     name: str = "spring_mass"
 
     # number of masses (aka nodes, entities, whatever)
-    num_nodes: int = 64
+    num_nodes: int = 32
     # number of simulated time steps to run
-    num_bins: int = 1024
+    num_bins: int = 256
 
     # physics-ish params 
     dt: float = 0.05 # integration time step (how big each time step is)

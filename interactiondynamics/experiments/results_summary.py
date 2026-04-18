@@ -177,3 +177,41 @@ def describe_run_result(r) -> str:
         f"{color_text('test_rmse', TermColor.SOFT_PINK)}="
         f"{color_text(f'{test_rmse:.6f}', TermColor.SOFT_PINK)}"
     )
+
+def format_recovery_label() -> str:
+    return color_text("RECOVERY:", TermColor.BOLD, TermColor.GOLD)
+
+
+def format_recovery_metrics(recovery: dict | None) -> str:
+    if not recovery:
+        return color_text("no recovery metrics", TermColor.SOFT_PINK)
+
+    def _fmt_block(split_name: str, stats: dict) -> str:
+        mrr = float(stats.get("mrr", float("nan")))
+        hits10 = float(stats.get("hits@10", float("nan")))
+        removed = int(stats.get("removed_events", 0))
+
+        return (
+            f"{color_text(split_name, TermColor.BOLD, TermColor.SOFT_PINK)} "
+            f"hidden_mrr={color_text(f'{mrr:.4f}', TermColor.HOT_PINK)} | "
+            f"hidden_hits@10={color_text(f'{hits10:.4f}', TermColor.PEACH)} | "
+            f"removed={color_text(str(removed), TermColor.GOLD)}"
+        )
+
+    ordered_splits = ["train", "val", "test"]
+    parts = []
+
+    for split_name in ordered_splits:
+        stats = recovery.get(split_name)
+        if stats:
+            parts.append(_fmt_block(split_name, stats))
+
+    # catch any weird extra split names just in case
+    for split_name, stats in recovery.items():
+        if split_name not in ordered_splits and stats:
+            parts.append(_fmt_block(split_name, stats))
+
+    if not parts:
+        return color_text("no recovery metrics", TermColor.SOFT_PINK)
+
+    return " || ".join(parts)
