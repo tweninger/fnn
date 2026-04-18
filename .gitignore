@@ -23,7 +23,7 @@ Thumbs.db
 #logs and results
 exports_suite/
 results/
-data/JODIE
-data/MD_DATA
+/interactiondynamics/datasets/JODIE
+/interactiondynamics/datasets/MD_DATA
 logs/
 plots/
