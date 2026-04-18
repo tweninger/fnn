@@ -13,16 +13,19 @@ from models.tgn_model import build_tgn_model
 from dataclasses import asdict, replace
 from collections import defaultdict
 import os
+from train_node import NodeTrainConfig, run_one_node_experiment
+from experiments.node_runs import make_node_runs
+from eval.node_regression import collect_node_predictions_over_time
+from plotting.node_regression import plot_node_targets_by_feature
 
-
-from train_node import (
-    NodeTrainConfig,
-    make_node_runs,
-    run_one_node_experiment,
-    collect_node_predictions_over_time,
+from experiments.physical_systems import (
+    build_physical_datasets,
+    build_base_model_cfg,
+    build_base_train_cfg,
 )
-
-from analysis.node_regression_plots import plot_node_targets_by_feature
+from experiments.results_summary import describe_run_result
+from utils.io import append_jsonl, ensure_parent, make_safe_name
+from utils.metric_selection import higher_is_better, is_better_metric
 
 from data.spring_mass import SpringMassDataset, SpringMassConfig
 from data.spring_ring import SpringRing2DDataset, SpringRing2DConfig
@@ -44,21 +47,6 @@ def plot_group_name(dataset_name: str) -> str:
         return "wave"
     return dataset_name
 
-def higher_is_better(metric_name: str) -> bool:
-    return metric_name in {
-        "r2",
-        "pearson",
-        "spearman",
-        "mean_node_pearson",
-        "mean_node_spearman",
-        "mean_node_r2",
-        "mean_cosine",
-    }
-
-
-def is_better_metric(new_value: float, old_value: float, metric_name: str) -> bool:
-    return new_value > old_value if higher_is_better(metric_name) else new_value < old_value
-
 
 def unpack_prediction_pack(pack):
     """
@@ -72,197 +60,6 @@ def unpack_prediction_pack(pack):
         node_mask = None
     return times, y_true, y_pred, node_mask
 
-
-def describe_run_result(r) -> str:
-    selection_metric = getattr(r, "selection_metric", "rmse")
-    best_val_metric = getattr(r, "best_val_metric", float("nan"))
-
-    analysis_test = getattr(r, "analysis_test", {}) or {}
-    test_rmse = analysis_test.get(
-        "rmse",
-        r.best_snapshot.get("test", {}).get("rmse", float("nan"))
-    )
-    test_r2 = analysis_test.get("r2", float("nan"))
-    test_pearson = analysis_test.get("mean_node_pearson", float("nan"))
-
-    return (
-        f"{r.name} | seed={r.seed} | "
-        f"best_val_{selection_metric}={best_val_metric:.6f} @ epoch {r.best_epoch} | "
-        f"test_rmse={test_rmse:.6f} | "
-        f"test_r2={test_r2:.6f} | "
-        f"test_mean_node_pearson={test_pearson:.6f}"
-    )
-
-def append_jsonl(path: str | Path, row: dict) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, default=str) + "\n")
-        
-def ensure_parent(path: str | Path) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-
-def make_safe_name(s: str) -> str:
-    return (
-        s.replace("|", "_")
-         .replace("=", "-")
-         .replace("/", "_")
-         .replace(" ", "_")
-    )
-
-
-# -----------------------------
-# experiment config
-# -----------------------------
-
-def build_physical_datasets(
-    device,
-    md22_npz_paths=(),
-    include=("nbody", "wave", "spring_ring", "md22", "spring_web_2d"),
-):
-    datasets = {}
-
-    if "nbody" in include:
-        cfg = ChargedParticlesBinnedConfig(
-            name="nbody",
-            device=device,
-        )
-        datasets[cfg.name] = ChargedParticlesBinnedDataset(cfg)
-
-    if "wave" in include:
-        base_cfg = WaveEquationBinnedConfig(
-            name="wave",
-            device=device,
-            event_mode="thresholded",
-            interaction_threshold=19.0334,
-            threshold_metric="pair_accel",
-            threshold_use_absolute=True,
-            standardize_node_targets=False,
-            target_name="dv",
-        )
-        datasets[cfg.name] = WaveEquationBinnedDataset(cfg)
-        # wave_variants = make_wave_variants(
-        #     base_cfg,
-        #     event_modes=("thresholded", "all_neighbors"),
-        #     threshold_metrics=("pair_accel", "rel_q", "rel_v", "pair_grad"),
-        #     interaction_thresholds=(11.0496, 19.0334, 27.6114),
-        #     threshold_use_absolute_options=(True, False),
-        #     standardize_node_targets_options=(False, True),
-        #     target_names=("dv", "delta_v", "q_xx"),
-        #     target_horizons=(1,),
-        # )
-
-        # datasets.update(wave_variants)
-
-    if "threebody" in include:
-        cfg = ThreeBodyBinnedConfig(
-            name="threebody",
-            device=device,
-        )
-        datasets[cfg.name] = ThreeBodyBinnedDataset(cfg)
-
-    if "spring_ring" in include:
-        cfg = SpringRing2DConfig(
-            name="spring_ring",
-            device=device,
-            force_threshold=0.0422165, #{50: 0.0275852, 75: 0.0422165, 90: 0.0685315}
-            standardize_node_targets=False,
-        )
-        datasets[cfg.name] = SpringRing2DDataset(cfg)
-
-    if "spring_mass" in include:
-        cfg = SpringMassConfig(
-            name="spring_mass",
-            device=device,
-        )
-        datasets[cfg.name] = SpringMassDataset(cfg)
-
-    if "md22" in include:
-        for npz_path in md22_npz_paths:
-            stem = Path(npz_path).stem
-
-            cfg = MD22BinnedConfig(
-                name=stem,
-                npz_path=str(npz_path),
-                device=device,
-            )
-            datasets[cfg.name] = MD22BinnedDataset(cfg)
-
-    if "spring_web_2d" in include:
-        base_cfg = SpringWeb2DConfig(
-            name="springweb",
-            device=device,
-            event_mode="thresholded",
-            threshold_metric="force_mag",
-            interaction_threshold=0.0275852,
-            threshold_use_absolute=True,
-        )
-        #datasets[cfg.name] = SpringWeb2DDataset(cfg)
-        metric_to_values = {
-            "force_mag": (0.0273215,),
-            "extension": (-0.0112979,),
-            # "distance": (0.96589,),
-           # "rel_speed": (0.0321316,),
-        }
-        spring_web_variants = {}
-
-        for metric, values in metric_to_values.items():
-            spring_web_variants.update(
-                make_spring_web_variants(
-                    base_cfg,
-                    topologies=("knn",),
-                    radius_values=("0.05",),
-                    knn_values=(4,),
-                    include_ring_edges_options=(False,),
-                    event_modes=("thresholded",),
-                    threshold_metrics=(metric,),   # one metric at a time
-                    threshold_values=values,       # only that metric's value(s)
-                    target_types=("dv", "accel", "delta_x"),
-                    target_horizons=(1,),
-                    standardize_node_targets_options=(False,),
-                )
-            )
-
-        datasets.update(spring_web_variants)
-
-    return datasets
-
-
-def build_base_model_cfg(spec) -> ModelConfig:
-    return ModelConfig(
-        node_dim=64,
-        msg_dim=64,
-        event_dim=spec.event_dim,
-
-        # baseline/default choices
-        aggregator="ift",
-        update="ift_update",
-        scorer="mlp",
-
-        # generic widths
-        dropout=0.0,
-        scorer_dropout=0.0,
-        use_time_features=False,
-
-        # task-specific flags
-        task="node_regression",
-        predictor="mlp_node",
-    )
-
-
-def build_base_train_cfg(spec, device: torch.device) -> NodeTrainConfig:
-    return NodeTrainConfig(
-        num_nodes=spec.num_nodes,
-        lr=1e-3,
-        weight_decay=1e-5,
-        grad_clip=1.0,
-        device=device,
-        log_every=20,
-        tbptt_steps=1,
-        debug=False,
-        loss_name="mse", # mse | mae | huber
-        selection_metric="rmse",
-    )
 
 
 def main():

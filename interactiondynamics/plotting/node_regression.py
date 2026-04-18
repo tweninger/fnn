@@ -1,54 +1,11 @@
-import os
+from __future__ import annotations
+
 import math
-import numpy as np
+import os
+
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.lines import Line2D
-
-
-def _default_node_ids(num_nodes: int, max_nodes_large: int = 4):
-    if num_nodes <= max_nodes_large:
-        return list(range(num_nodes))
-
-    return sorted({
-        0,
-        num_nodes // 4,
-        num_nodes // 2,
-        (3 * num_nodes) // 4,
-    })
-
-
-def _compute_robust_ylim(values, robust_percentile=99.0, pad_frac=0.08, symmetric=False):
-    """
-    Compute y-limits from percentiles instead of raw min/max so a few giant
-    outliers do not flatten the whole plot.
-
-    values: 1D array of plotted values
-    """
-    
-    values = np.asarray(values)
-    values = values[np.isfinite(values)]
-
-    if values.size == 0:
-        return (-1.0, 1.0)
-
-    if symmetric:
-        bound = np.percentile(np.abs(values), robust_percentile)
-        if bound <= 0:
-            bound = 1.0
-        pad = pad_frac * bound
-        return (-bound - pad, bound + pad)
-
-    lo = np.percentile(values, 100 - robust_percentile)
-    hi = np.percentile(values, robust_percentile)
-
-    if lo == hi:
-        scale = max(1.0, abs(lo))
-        return (lo - 0.1 * scale, hi + 0.1 * scale)
-
-    span = hi - lo
-    pad = pad_frac * span
-    return (lo - pad, hi + pad)
-
 
 def plot_node_targets_by_feature(
     times,
@@ -242,3 +199,48 @@ def plot_node_targets_by_feature(
         plt.close(fig)
     else:
         plt.show()
+
+def _default_node_ids(num_nodes: int, max_nodes_large: int = 4):
+    if num_nodes <= max_nodes_large:
+        return list(range(num_nodes))
+
+    return sorted({
+        0,
+        num_nodes // 4,
+        num_nodes // 2,
+        (3 * num_nodes) // 4,
+    })
+
+def _compute_robust_ylim(values, robust_percentile=99.0, pad_frac=0.08, symmetric=False):
+    """
+    Compute y-limits from percentiles instead of raw min/max so a few giant
+    outliers do not flatten the whole plot.
+
+    values: 1D array of plotted values
+    """
+    
+    values = np.asarray(values)
+    values = values[np.isfinite(values)]
+
+    if values.size == 0:
+        return (-1.0, 1.0)
+
+    if symmetric:
+        bound = np.percentile(np.abs(values), robust_percentile)
+        if bound <= 0:
+            bound = 1.0
+        pad = pad_frac * bound
+        return (-bound - pad, bound + pad)
+
+    lo = np.percentile(values, 100 - robust_percentile)
+    hi = np.percentile(values, robust_percentile)
+
+    if lo == hi:
+        scale = max(1.0, abs(lo))
+        return (lo - 0.1 * scale, hi + 0.1 * scale)
+
+    span = hi - lo
+    pad = pad_frac * span
+    return (lo - pad, hi + pad)
+
+
