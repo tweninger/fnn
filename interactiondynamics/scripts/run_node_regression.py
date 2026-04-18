@@ -14,14 +14,21 @@ from dataclasses import asdict, replace
 from collections import defaultdict
 import os
 
-from training.node_regression import NodeTrainConfig, run_one_node_experiment, make_node_runs
+from training.node_regression import NodeTrainConfig, run_one_node_experiment
 from eval.node_regression import collect_node_predictions_over_time
 from plotting.node_regression import plot_node_targets_by_feature
 
-from experiments.physical_systems import build_physical_datasets
+from experiments.node_regression_runs import make_node_runs
+from experiments.physical_dataset_registry import build_physical_datasets
 from experiments.defaults import build_base_model_cfg, build_base_train_cfg
-from experiments.results_summary import describe_run_result
-
+from experiments.results_summary import (
+    describe_run_result,
+    format_node_analysis_metrics,
+    format_finished_label,
+    format_analysis_label,
+    format_starting_run_banner,
+    format_top_runs_header,
+)
 from utils.io import append_jsonl, ensure_parent, make_safe_name
 from utils.metric_selection import higher_is_better, is_better_metric
 from utils.output_paths import dataset_group_name, experiment_output_paths, prediction_npz_path, run_plot_path
@@ -163,9 +170,7 @@ def main():
             ]
 
         for run in runs:
-            print("\n" + "🧹" * 60)
-            print(f"STARTING RUN: dataset={dataset_name} | run={run.name} | seed={run.seed}")
-            print("🧹" * 60)
+            print(format_starting_run_banner(dataset_name, run.name, run.seed))
 
             try:
                 result, model, train_cfg = run_one_node_experiment(
@@ -174,7 +179,7 @@ def main():
                     base_train_cfg=base_train_cfg,
                     run=run,
                     build_model_fn=build_tgn_model,
-                    epochs=6,
+                    epochs=3,
                     save_jsonl_path=str(save_jsonl_path),
                     save_summary_path=str(save_summary_path),
                     dataset_name=spec.name,
@@ -182,14 +187,8 @@ def main():
 
                 results.append(result)
                 all_results.append((dataset_name, result))
-                print("FINISHED:", describe_run_result(result))
-                print(
-                    f"ANALYSIS: "
-                    f"rmse={result.analysis_test.get('rmse', float('nan')):.6f} | "
-                    f"r2={result.analysis_test.get('r2', float('nan')):.6f} | "
-                    f"mean_node_pearson={result.analysis_test.get('mean_node_pearson', float('nan')):.6f} | "
-                    f"mean_node_spearman={result.analysis_test.get('mean_node_spearman', float('nan')):.6f}"
-                )
+                print(f"{format_finished_label()} {describe_run_result(result)}")
+                print(f"{format_analysis_label()} {format_node_analysis_metrics(result)}")
 
                 if best_result is None or is_better_metric(
                     result.best_val_metric,
@@ -227,9 +226,7 @@ def main():
         selection_metric = base_train_cfg.selection_metric
         reverse = higher_is_better(selection_metric)
 
-        print("\n" + "-" * 60)
-        print(f"TOP RUNS BY BEST VAL {selection_metric.upper()} — {dataset_name}")
-        print("-" * 60)
+        print(format_top_runs_header(selection_metric, dataset_name))
 
         results_sorted = sorted(results, key=lambda r: r.best_val_metric, reverse=reverse)
         for r in results_sorted[:10]:

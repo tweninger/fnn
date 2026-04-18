@@ -31,7 +31,7 @@ def experiment_output_paths(results_root: Path, plots_root: Path, experiment_nam
 def prediction_npz_path(preds_dir: Path, dataset_name: str, run_name: str, seed: int) -> Path:
     safe_dataset = make_safe_name(dataset_name)
     safe_run = make_safe_name(run_name)
-    return preds_dir / f"{safe_dataset}__{safe_run}__seed-{seed}.npz"
+    return preds_dir / f"{safe_dataset}_{safe_run}_seed-{seed}.npz"
 
 
 def run_plot_path(
@@ -46,5 +46,5 @@ def run_plot_path(
 
     dataset_dir = plots_dir / dataset_group_name(dataset_name)
     if best_epoch is None:
-        return dataset_dir / f"{safe_dataset}__{safe_run}__seed-{seed}.png"
-    return dataset_dir / f"{safe_dataset}__{safe_run}__seed-{seed}__epoch-{best_epoch}.png"
+        return dataset_dir / f"{safe_dataset}_{safe_run}_seed-{seed}.png"
+    return dataset_dir / f"{safe_dataset}_{safe_run}_seed-{seed}_epoch-{best_epoch}.png"

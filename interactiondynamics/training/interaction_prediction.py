@@ -1,33 +1,21 @@
-import os
-# helps make combinations of settings
-import itertools
-# save results to json
 import json
-# randomness/numerical computing
-import random
 import time
-import numpy as np
 import torch
-# type hints for readability??
-from typing import Callable, Dict, Iterable, Optional, Sequence
-# easy to make parameter-holding classes/turns dataclass -> dictionary
+from typing import Any, Callable, Dict, Iterable, Optional# easy to make parameter-holding classes/turns dataclass -> dictionary
 from dataclasses import asdict, dataclass
-
-from traitlets import Any
 
 # how event data is stored
 from core.events import EventBatch
-# toy synthetic data
-from datasets import ToyShiftConfig, ToyShiftDataset
 # evaluation logic
 from eval.evaluate import EvalSlices, evaluate_stream_sliced
 # model config object
 from core.config import ModelConfig
 # real temporal datasets
-from datasets import JODIEBinnedDataset, JODIEConfig # type: ignore
-from models.tgn_model import build_tgn_model
-
+from datasets.jodie import JODIEBinnedDataset, JODIEConfig # type: ignore
 from eval.ranking import ranking_loss_and_metrics
+from experiments.interaction_prediction_runs import SweepRun 
+from utils.repro import set_seed
+
 
 # dataclasses = containers for settings/results
 # automatically make this class behave like a nice clean parameter container instead of whole __init__ situation

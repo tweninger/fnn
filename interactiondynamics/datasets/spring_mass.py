@@ -5,7 +5,7 @@ from typing import Iterable, Iterator, Optional, cast, List, Sequence
 import torch # hi tensors and randomness
 
 from core.events import EventBatch # hi thing trainer.py consumes
-from datasets import DataSpec, EventStreamDataset # hi dataset interface
+from datasets.interfaces import DataSpec, EventStreamDataset # hi dataset interface
 
 """
 It's an EventStreamDataset that outputs one EventBatch per time bin (a temporal sequence of event bins), just like JODIE loader does!!

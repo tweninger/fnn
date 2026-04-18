@@ -1,48 +1,37 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
-import torch
 import os
+import torch
+
 from core.config import ModelConfig
-from training.node_regression import NodeTrainConfig, run_one_node_experiment, make_node_runs
-
-from datasets import MD22BinnedConfig, MD22BinnedDataset
-from datasets import ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset
-from datasets import (
-    WaveEquationBinnedConfig,
-    WaveEquationBinnedDataset,
-    make_wave_variants,
-)
-from datasets import SpringMassConfig, SpringMassDataset
-from datasets import SpringRing2DConfig, SpringRing2DDataset
-from datasets import (
-    SpringWeb2DConfig,
-    SpringWeb2DDataset,
-    make_spring_web_variants,
-)
-from datasets import ThreeBodyBinnedConfig, ThreeBodyBinnedDataset
-from experiments.dataset_stats import (
-    edge_set,
-    summarize_edge_changes,
-    summarize_event_counts,
-    build_dataset_metadata_row,
-)
-from experiments.physical_systems import build_physical_datasets
+from eval.evaluate import EvalSlices
+from experiments.dataset_stats import build_dataset_metadata_row
+from experiments.interaction_prediction_runs import make_runs
+from experiments.physical_dataset_registry import build_physical_datasets
 from experiments.results_summary import print_seed_avg
+from models.tgn_model import build_tgn_model
+from training.interaction_prediction import TrainConfig, run_one_experiment
 from utils.io import append_jsonl
+from utils.output_paths import experiment_output_paths
 
-
-# main
-# --------------------------------------------------
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs("results", exist_ok=True)
 
-    results_jsonl = "results/physics_sweep_results.jsonl"
-    summary_jsonl = "results/physics_sweep_summary.jsonl"
-    metadata_jsonl = "results/physics_sweep_metadata.jsonl"
+    RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
+    PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
+    EXPERIMENT_NAME = "physical_systems_sweep"
+
+    paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
+
+    results_jsonl = str(paths["results_jsonl"])
+    summary_jsonl = str(paths["summary_jsonl"])
+    metadata_jsonl = str(paths["results_dir"] / "metadata.jsonl")
 
     md22_npz_paths = [
         "/home/akapociu/ift/interactiondynamics/data/MD_DATA/naphthalene.npz",
@@ -58,7 +47,7 @@ def main():
     datasets = build_physical_datasets(
         device=device,
         md22_npz_paths=md22_npz_paths,
-        include=("nbody", "wave", "threebody", "spring_ring", "spring_mass", "md22"),
+        include=("wave",),
         #include=("spring_ring", "spring_mass"),
 
     )
@@ -99,7 +88,7 @@ def main():
 
         runs = make_runs(
             base_model_cfg,
-            seeds=(0, 42, 123),   # change back to (0, 42, 123) whenever
+            seeds=(0,),   # change back to (0, 42, 123) whenever
             aggregator=("ift", "hopfield","settransformer", "sum", "deepsets"),
             upd = ("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn",),
             dropout=(0.0,),
@@ -112,11 +101,11 @@ def main():
             ift_kappa_cap=(False,),
             ift_kappa_max=(None,),
         )
-        allowed_pairs = None
-        # allowed_pairs = { # set to None for all pairs
-        #     ("sum", "tgn_gru"),
-        #     ("ift", "ift_update"),
-        # }
+        #allowed_pairs = None
+        allowed_pairs = { # set to None for all pairs
+            ("sum", "tgn_gru"),
+            #("ift", "ift_update"),
+        }
 
         if allowed_pairs is not None:
             runs = [ 

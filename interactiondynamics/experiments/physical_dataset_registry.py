@@ -1,14 +1,12 @@
 from pathlib import Path
 
-from datasets import (
-    ChargedParticlesBinnedConfig, ChargedParticlesBinnedDataset,
-    WaveEquationBinnedConfig, WaveEquationBinnedDataset,
-    ThreeBodyBinnedConfig, ThreeBodyBinnedDataset,
-    SpringRing2DConfig, SpringRing2DDataset,
-    SpringMassConfig, SpringMassDataset,
-    MD22BinnedConfig, MD22BinnedDataset,
-    SpringWeb2DConfig, make_spring_web_variants,
-)
+from datasets.spring_mass import SpringMassDataset, SpringMassConfig
+from datasets.spring_ring_2d import SpringRing2DDataset, SpringRing2DConfig
+from datasets.wave_1d import WaveEquationBinnedDataset, WaveEquationBinnedConfig, make_wave_variants
+from datasets.three_body_binned import ThreeBodyBinnedDataset, ThreeBodyBinnedConfig
+from datasets.charged_particles import ChargedParticlesBinnedDataset, ChargedParticlesBinnedConfig
+from datasets.md22_binned import MD22BinnedDataset, MD22BinnedConfig
+from datasets.spring_web_2d import SpringWeb2DConfig, SpringWeb2DDataset, make_spring_web_variants
 
 
 def build_physical_datasets(

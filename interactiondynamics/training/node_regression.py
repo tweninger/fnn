@@ -232,7 +232,7 @@ def run_one_node_experiment(
             f"test rmse={test_stats['rmse']:.4f}"
         )
 
-        if is_better(cur_val_metric, best_val_metric, selection_metric):
+        if is_better_metric(cur_val_metric, best_val_metric, selection_metric):
             best_val_metric = cur_val_metric
             best_epoch = epoch
             best_snapshot = snapshot

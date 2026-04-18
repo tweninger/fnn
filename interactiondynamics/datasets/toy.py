@@ -6,7 +6,7 @@ from typing import Iterable, Iterator, Optional, cast
 import torch
 
 from core.events import EventBatch
-from datasets import DataSpec, EventStreamDataset
+from datasets.interfaces import DataSpec, EventStreamDataset
 
 
 @dataclass

@@ -79,9 +79,11 @@ def build_candidate_eventbatch(
     else:
         t_rep = None
 
-    if features is not None:
+    #do we need to fix wave to output None for no features instead of empty tensor??
+    if features is not None and features.dim() == 2 and features.size(-1) > 0:
         # If features are per-positive-event (M, d), repeat them per candidate.
-        feat_rep = features.unsqueeze(1).expand(M, K1, features.size(-1)).reshape(-1, features.size(-1))
+        d = features.size(-1)
+        feat_rep = features.unsqueeze(1).expand(M, K1, d).reshape(M * K1, d)
     else:
         feat_rep = None
 

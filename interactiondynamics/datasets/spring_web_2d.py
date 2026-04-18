@@ -8,7 +8,7 @@ import math
 import torch
 
 from core.events import EventBatch
-from datasets import DataSpec, EventStreamDataset
+from datasets.interfaces import DataSpec, EventStreamDataset
 
 """
 2D spring-web benchmark adapted to the repo's EventStreamDataset interface.
