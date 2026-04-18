@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 from collections import defaultdict
+from typing import Any
+
 import numpy as np
 
 
@@ -13,8 +17,32 @@ class TermColor:
     GOLD = "\033[38;5;222m"
 
 
+
 def color_text(text: str, *styles: str) -> str:
     return "".join(styles) + text + TermColor.RESET
+
+
+
+def _field(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+
+def _nested_metric(mapping: dict | None, *keys: str, default: float = float("nan")) -> float:
+    cur: Any = mapping or {}
+    for key in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    if cur is None:
+        return default
+    try:
+        return float(cur)
+    except (TypeError, ValueError):
+        return default
+
 
 
 def format_node_analysis_metrics(result) -> str:
@@ -28,12 +56,38 @@ def format_node_analysis_metrics(result) -> str:
     )
 
 
+
+def format_interaction_metrics(result) -> str:
+    best_snapshot = _field(result, "best_snapshot", {}) or {}
+    final_snapshot = _field(result, "final_snapshot", {}) or {}
+    best_val_mrr = float(_field(result, "best_val_mrr", float("nan")))
+
+    best_train_mrr = _nested_metric(best_snapshot, "train_eval", "mrr")
+    best_test_mrr = _nested_metric(best_snapshot, "test", "mrr")
+    final_test_mrr = _nested_metric(final_snapshot, "test", "mrr")
+
+    return (
+        f"train_mrr={best_train_mrr:.6f} | "
+        f"val_mrr={best_val_mrr:.6f} | "
+        f"best_test_mrr={best_test_mrr:.6f} | "
+        f"final_test_mrr={final_test_mrr:.6f}"
+    )
+
+
+
 def format_finished_label() -> str:
     return color_text("FINISHED:", TermColor.BOLD, TermColor.HOT_PINK)
 
 
+
+def format_failed_label() -> str:
+    return color_text("FAILED:", TermColor.BOLD, TermColor.ORANGE)
+
+
+
 def format_analysis_label() -> str:
     return color_text("ANALYSIS:", TermColor.BOLD, TermColor.SOFT_PINK)
+
 
 
 def format_starting_run_banner(dataset_name: str, run_name: str, seed: int) -> str:
@@ -47,6 +101,7 @@ def format_starting_run_banner(dataset_name: str, run_name: str, seed: int) -> s
     return f"\n{broom}\n\n{line}\n\n{broom}"
 
 
+
 def format_top_runs_header(selection_metric: str, dataset_name: str) -> str:
     title = color_text(
         f"TOP RUNS BY BEST VAL {selection_metric.upper()} — {dataset_name}",
@@ -57,13 +112,34 @@ def format_top_runs_header(selection_metric: str, dataset_name: str) -> str:
     return f"\n{divider}\n{title}\n{divider}"
 
 
-def print_seed_avg(results):
-    grouped = defaultdict(list)
 
-    for r in results:
-        run_name = r["name"]   # includes dataset prefix already
-        best_test = r["best_snapshot"]["test"]["mrr"]
-        grouped[run_name].append((r["best_val_mrr"], best_test))
+def describe_interaction_run_result(result) -> str:
+    best_snapshot = _field(result, "best_snapshot", {}) or {}
+    best_test_mrr = _nested_metric(best_snapshot, "test", "mrr")
+    run_name = _field(result, "name", "<unnamed>")
+    best_val_mrr = float(_field(result, "best_val_mrr", float("nan")))
+    best_epoch = _field(result, "best_epoch", "?")
+    seed = _field(result, "seed", "?")
+
+    return (
+        f"{color_text(str(run_name), TermColor.BOLD)} | "
+        f"seed={seed} | "
+        f"{color_text('best_val_mrr', TermColor.HOT_PINK)}="
+        f"{color_text(f'{best_val_mrr:.6f}', TermColor.HOT_PINK)} "
+        f"@ epoch {best_epoch} | "
+        f"{color_text('best_test_mrr', TermColor.SOFT_PINK)}="
+        f"{color_text(f'{best_test_mrr:.6f}', TermColor.SOFT_PINK)}"
+    )
+
+
+def print_interaction_seed_avg(results) -> None:
+    grouped: dict[str, list[tuple[float, float]]] = defaultdict(list)
+
+    for result in results:
+        run_name = _field(result, "name", _field(result, "run", "UNKNOWN"))
+        best_snapshot = _field(result, "best_snapshot", {}) or {}
+        best_test = _nested_metric(best_snapshot, "test", "mrr")
+        grouped[run_name].append((float(_field(result, "best_val_mrr", np.nan)), best_test))
 
     print("\n=== Mean across seeds ===")
     for run_name, vals in grouped.items():
@@ -78,6 +154,11 @@ def print_seed_avg(results):
         print(f"std best test mrr: {test_mrrs.std(ddof=1) if len(vals) > 1 else 0.0:.4f}")
 
 
+# backward-compatible alias
+print_seed_avg = print_interaction_seed_avg
+
+
+
 def describe_run_result(r) -> str:
     selection_metric = getattr(r, "selection_metric", "rmse")
     best_val_metric = getattr(r, "best_val_metric", float("nan"))
@@ -89,10 +170,10 @@ def describe_run_result(r) -> str:
     )
 
     return (
-    f"{color_text(f'{r.name}', TermColor.BOLD)} | "
-    f"{color_text(f'best_val_{selection_metric}', TermColor.HOT_PINK)}="
-    f"{color_text(f'{best_val_metric:.6f}', TermColor.HOT_PINK)} "
-    f"@ epoch {r.best_epoch} | "
-    f"{color_text('test_rmse', TermColor.SOFT_PINK)}="
-    f"{color_text(f'{test_rmse:.6f}', TermColor.SOFT_PINK)}"
-)
+        f"{color_text(f'{r.name}', TermColor.BOLD)} | "
+        f"{color_text(f'best_val_{selection_metric}', TermColor.HOT_PINK)}="
+        f"{color_text(f'{best_val_metric:.6f}', TermColor.HOT_PINK)} "
+        f"@ epoch {r.best_epoch} | "
+        f"{color_text('test_rmse', TermColor.SOFT_PINK)}="
+        f"{color_text(f'{test_rmse:.6f}', TermColor.SOFT_PINK)}"
+    )

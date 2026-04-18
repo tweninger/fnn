@@ -18,6 +18,7 @@ from training.node_regression import NodeTrainConfig, run_one_node_experiment
 from eval.node_regression import collect_node_predictions_over_time
 from plotting.node_regression import plot_node_targets_by_feature
 
+from experiments.dataset_stats import build_dataset_metadata_row
 from experiments.node_regression_runs import make_node_runs
 from experiments.physical_dataset_registry import build_physical_datasets
 from experiments.defaults import build_base_model_cfg, build_base_train_cfg
@@ -81,6 +82,7 @@ def main():
     pred_dir = paths["preds_dir"]
     save_jsonl_path = paths["results_jsonl"]
     save_summary_path = paths["summary_jsonl"]
+    metadata_jsonl_path = results_dir / "metadata.jsonl"
 
     results_dir.mkdir(parents=True, exist_ok=True)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -118,6 +120,8 @@ def main():
             "num_bins": spec.num_bins,
             "extra": spec.extra,
         }, indent=2, default=str))
+
+        append_jsonl(metadata_jsonl_path, build_dataset_metadata_row(dataset_name, ds))
 
         if spec.extra is None or "node_target_dim" not in spec.extra:
             print(f"Skipping {dataset_name}: missing node_target_dim")
