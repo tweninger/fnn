@@ -25,5 +25,6 @@ exports_suite/
 results/
 /interactiondynamics/datasets/JODIE
 /interactiondynamics/datasets/MD_DATA
+data/
 logs/
 plots/
