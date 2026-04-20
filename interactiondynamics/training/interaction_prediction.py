@@ -319,12 +319,18 @@ def run_one_experiment(
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
-    if clean_ds is not None and corruption_cfg is not None:
+    splits_for_recovery = tuple(
+        s for s in ("val", "test")
+        if s in corruption_cfg.get("corrupt_splits", ())
+    )
+    
+    if clean_ds is not None and corruption_cfg is not None and splits_for_recovery:
         recovery = evaluate_recovery_splits(
             model=model,
             clean_ds=clean_ds,
             train_cfg=train_cfg,
             corruption_cfg=corruption_cfg,
+            splits=splits_for_recovery,
         )
     # save one final run summary as a JSONL row 
     summary = {

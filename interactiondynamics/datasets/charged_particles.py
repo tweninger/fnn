@@ -8,7 +8,9 @@ import torch
 
 from core.events import EventBatch
 from datasets.interfaces import DataSpec, EventStreamDataset
-
+from dataclasses import dataclass, replace
+from dataclasses import replace
+from utils.dataset_names import make_threshold_dataset_name
 """
 Charged-particle N-body benchmark adapted to the repo's EventStreamDataset interface.
 
@@ -652,7 +654,71 @@ class _PrecomputedStream(Iterable[EventBatch]):
     def __iter__(self) -> Iterator[EventBatch]:
         for b in range(self.b0, self.b1 + 1):
             yield self.bins_all[b]
+def _tag(value: object) -> str:
+    return str(value).replace(".", "p").replace("-", "m")
 
+
+def _charged_variant_name(cfg: ChargedParticlesBinnedConfig) -> str:
+    parts = [
+        cfg.name,
+        f"rule-{cfg.interaction_rule}",
+        f"keep-{_tag(cfg.obs_edge_keep_prob)}",
+        f"minedges-{int(cfg.min_edges_per_bin)}",
+    ]
+
+    if cfg.interaction_rule == "distance_threshold":
+        parts.extend([
+            f"dthr-{_tag(cfg.distance_threshold)}",
+            f"djitter-{_tag(cfg.distance_threshold_jitter_std)}",
+        ])
+    elif cfg.interaction_rule == "force_threshold":
+        parts.extend([
+            f"fthr-{_tag(cfg.force_threshold)}",
+            f"fjitter-{_tag(cfg.force_threshold_jitter_std)}",
+        ])
+    elif cfg.interaction_rule == "top_k":
+        parts.append(f"topk-{int(cfg.top_k)}")
+
+    return "__".join(parts)
+
+
+def make_charged_particle_threshold_variants(
+    base_cfg: ChargedParticlesBinnedConfig,
+    *,
+    threshold_metric: str,
+    threshold_values: Sequence[float],
+) -> dict[str, ChargedParticlesBinnedDataset]:
+    out: dict[str, ChargedParticlesBinnedDataset] = {}
+
+    for thr in threshold_values:
+        if threshold_metric == "force_threshold":
+            cfg = replace(
+                base_cfg,
+                interaction_rule="force_threshold",
+                force_threshold=float(thr),
+                name=make_threshold_dataset_name(
+                    base_cfg.name,
+                    threshold_metric,
+                    thr,
+                ),
+            )
+        elif threshold_metric == "distance_threshold":
+            cfg = replace(
+                base_cfg,
+                interaction_rule="distance_threshold",
+                distance_threshold=float(thr),
+                name=make_threshold_dataset_name(
+                    base_cfg.name,
+                    threshold_metric,
+                    thr,
+                ),
+            )
+        else:
+            raise ValueError(f"Unknown threshold_metric: {threshold_metric}")
+
+        out[cfg.name] = ChargedParticlesBinnedDataset(cfg)
+
+    return out
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
