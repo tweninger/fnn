@@ -90,11 +90,11 @@ def format_analysis_label() -> str:
 
 
 
-def format_starting_run_banner(dataset_name: str, run_name: str, seed: int) -> str:
+def format_starting_run_banner(base_dataset_name: str, run_name: str, seed: int) -> str:
     broom = color_text("🧹" * 50, TermColor.PEACH)
     line = (
         f"{color_text('STARTING RUN:', TermColor.BOLD, TermColor.ORANGE)} "
-        f"dataset={color_text(dataset_name, TermColor.BOLD, TermColor.HOT_PINK)} | "
+        f"dataset={color_text(base_dataset_name, TermColor.BOLD, TermColor.HOT_PINK)} | "
         f"run={color_text(run_name, TermColor.SOFT_PINK)} | "
         f"seed={color_text(str(seed), TermColor.GOLD)}"
     )
@@ -102,9 +102,9 @@ def format_starting_run_banner(dataset_name: str, run_name: str, seed: int) -> s
 
 
 
-def format_top_runs_header(selection_metric: str, dataset_name: str) -> str:
+def format_top_runs_header(selection_metric: str, base_dataset_name: str) -> str:
     title = color_text(
-        f"TOP RUNS BY BEST VAL {selection_metric.upper()} — {dataset_name}",
+        f"TOP RUNS BY BEST VAL {selection_metric.upper()} — {base_dataset_name}",
         TermColor.BOLD,
         TermColor.ORANGE,
     )

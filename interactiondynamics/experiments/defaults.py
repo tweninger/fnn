@@ -37,7 +37,7 @@ def build_base_train_cfg(spec, device: torch.device) -> NodeTrainConfig:
         log_every=20,
         tbptt_steps=1,
         debug=False,
-        loss_name="mse", # mse | mae | huber
+        loss_name="mae", # mse | mae | huber
         selection_metric="rmse",
     )
 
@@ -56,8 +56,6 @@ def build_base_interaction_model_cfg(spec) -> ModelConfig:
         dropout=0.0,
         scorer_dropout=0.0,
         encoder_hidden=256,
-        task="ranking",
-        predictor="mlp_node",
     )
 
 
@@ -68,7 +66,7 @@ def build_base_interaction_train_cfg(spec, device: torch.device) -> TrainConfig:
 
     return TrainConfig(
         num_nodes=spec.num_nodes,
-        num_neg=20,
+        num_neg=50,
         tbptt_steps=1,
         log_every=log_every,
         device=device,

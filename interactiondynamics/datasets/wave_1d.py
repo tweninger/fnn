@@ -9,6 +9,12 @@ import torch
 
 from core.events import EventBatch
 from datasets.interfaces import DataSpec, EventStreamDataset
+from utils.split_utils import (
+    normalize_split_names,
+    split_scope_tag,
+    compute_split_ranges,
+    split_for_bin_idx,
+)
 
 """
 LNN-inspired 1D wave equation benchmark adapted to this repo's EventStreamDataset interface.
@@ -211,8 +217,8 @@ class WaveEquationBinnedConfig:
     name: str = "wave_equation_binned"
 
     # GRID / TIME
-    num_nodes: int = 32
-    num_bins: int = 256
+    num_nodes: int = 64
+    num_bins: int = 512
     domain_length: float = 1.0
     t_span: Tuple[float, float] = (0.0, 20.0)
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
@@ -238,6 +244,7 @@ class WaveEquationBinnedConfig:
     threshold_metric: str = "pair_accel"   # {"pair_accel","rel_q","rel_v","pair_grad"}
     threshold_use_absolute: bool = False
     threshold_keep_one_if_empty: bool = True
+    threshold_splits: Tuple[str, ...] = ("train", "val", "test")
 
     # ODE SOLVER
     rtol: float = 1e-9
@@ -352,17 +359,20 @@ def _interaction_strength(record: dict, cfg: WaveEquationBinnedConfig) -> float:
     return abs(val) if cfg.threshold_use_absolute else val
 
 
-def _filter_records(records_all: List[dict], cfg: WaveEquationBinnedConfig) -> List[dict]:
+def _filter_records(
+    records_all: List[dict],
+    cfg: WaveEquationBinnedConfig,
+    *,
+    apply_threshold: bool | None = None,
+) -> List[dict]:
     """
-    Apply the event emission policy on top of the fixed nearest-neighbor physics graph.
+    Apply thresholding only when requested.
     """
-    if cfg.event_mode == "all_neighbors":
-        return records_all
+    if apply_threshold is None:
+        apply_threshold = (cfg.event_mode == "thresholded")
 
-    if cfg.event_mode != "thresholded":
-        raise ValueError(
-            f"unknown event_mode={cfg.event_mode!r}; expected 'all_neighbors' or 'thresholded'"
-        )
+    if not apply_threshold:
+        return records_all
 
     thr = float(cfg.interaction_threshold)
     kept = [r for r in records_all if _interaction_strength(r, cfg) >= thr]
@@ -432,6 +442,7 @@ def _state_to_event_batch(
     target_std: Optional[float] = None,
     q_target: Optional[np.ndarray] = None,
     v_target: Optional[np.ndarray] = None,
+    apply_threshold: bool | None = None,
 ) -> EventBatch:
     """
     Convert one full field snapshot at time index t_idx into one EventBatch.
@@ -476,7 +487,7 @@ def _state_to_event_batch(
             )
         )
 
-    records = _filter_records(records_all, cfg)
+    records = _filter_records(records_all, cfg, apply_threshold=apply_threshold)
 
     src = torch.tensor([r["src"] for r in records], dtype=torch.long, device=cfg.device)
     dst = torch.tensor([r["dst"] for r in records], dtype=torch.long, device=cfg.device)
@@ -596,8 +607,17 @@ class WaveEquationBinnedDataset(EventStreamDataset):
         self._all_bins: List[EventBatch] = []
 
         usable_bins = num_bins - cfg.target_horizon
+        self._threshold_splits = normalize_split_names(cfg.threshold_splits)
+        self._split_ranges = compute_split_ranges(usable_bins, cfg.split_fracs)
+
         for t_idx in range(usable_bins):
             tgt_idx = t_idx + cfg.target_horizon
+            split_name = split_for_bin_idx(t_idx, self._split_ranges)
+
+            apply_threshold = (
+                cfg.event_mode == "thresholded"
+                and split_name in self._threshold_splits
+            )
 
             eb = _state_to_event_batch(
                 q_traj[t_idx],
@@ -608,21 +628,9 @@ class WaveEquationBinnedDataset(EventStreamDataset):
                 v_target=v_traj[tgt_idx],
                 target_mean=target_mean,
                 target_std=target_std,
+                apply_threshold=apply_threshold,
             )
             self._all_bins.append(eb)
-
-        f_tr, f_va, f_te = cfg.split_fracs
-        assert abs((f_tr + f_va + f_te) - 1.0) < 1e-6, "split_fracs must sum to 1.0"
-
-        num_effective_bins = len(self._all_bins)
-        tr_end = int(num_effective_bins * f_tr)
-        va_end = tr_end + int(num_effective_bins * f_va)
-
-        self._split_ranges = {
-            "train": (0, max(0, tr_end - 1)),
-            "val": (tr_end, max(tr_end, va_end - 1)),
-            "test": (va_end, num_effective_bins - 1),
-        }
 
     def spec(self) -> DataSpec:
         dx = self.cfg.domain_length / float(self.cfg.num_nodes)
@@ -653,6 +661,8 @@ class WaveEquationBinnedDataset(EventStreamDataset):
                 "threshold_metric": self.cfg.threshold_metric,
                 "threshold_use_absolute": bool(self.cfg.threshold_use_absolute),
                 "threshold_keep_one_if_empty": bool(self.cfg.threshold_keep_one_if_empty),
+                "threshold_splits": list(normalize_split_names(self.cfg.threshold_splits)),
+                "threshold_scope": split_scope_tag(self.cfg.threshold_splits),
                 "observation_noise_q": float(self.cfg.observation_noise_q),
                 "observation_noise_v": float(self.cfg.observation_noise_v),
                 "node_target_dim": 1,
@@ -702,6 +712,7 @@ def _wave_variant_name(
             f"metric-{cfg.threshold_metric}",
             f"thr-{cfg.interaction_threshold}",
             f"abs-{cfg.threshold_use_absolute}",
+            f"splits-{split_scope_tag(cfg.threshold_splits)}",
         ])
 
     return "__".join(parts)
@@ -714,6 +725,7 @@ def make_wave_variants(
     threshold_metrics: Sequence[str] = ("pair_accel",),
     interaction_thresholds: Sequence[float] = (19.0334,),
     threshold_use_absolute_options: Sequence[bool] = (False,),
+    threshold_splits_options: Sequence[Sequence[str]] = (("train", "val", "test"),),
     standardize_node_targets_options: Sequence[bool] = (True,),
     target_names: Sequence[str] = ("dv",),
     target_horizons: Sequence[int] = (1,),
@@ -754,18 +766,20 @@ def make_wave_variants(
                     for threshold_metric in threshold_metrics:
                         for interaction_threshold in interaction_thresholds:
                             for use_abs in threshold_use_absolute_options:
-                                cfg = replace(
-                                    base_cfg,
-                                    event_mode="thresholded",
-                                    threshold_metric=threshold_metric,
-                                    interaction_threshold=float(interaction_threshold),
-                                    threshold_use_absolute=bool(use_abs),
-                                    target_name=target_name,
-                                    target_horizon=target_horizon,
-                                    standardize_node_targets=standardize,
-                                )
-                                cfg = replace(cfg, name=_wave_variant_name(cfg))
-                                datasets[cfg.name] = WaveEquationBinnedDataset(cfg)
+                                for threshold_splits in threshold_splits_options:
+                                    cfg = replace(
+                                        base_cfg,
+                                        event_mode="thresholded",
+                                        threshold_metric=threshold_metric,
+                                        interaction_threshold=float(interaction_threshold),
+                                        threshold_use_absolute=bool(use_abs),
+                                        threshold_splits=normalize_split_names(threshold_splits),
+                                        target_name=target_name,
+                                        target_horizon=target_horizon,
+                                        standardize_node_targets=standardize,
+                                    )
+                                    cfg = replace(cfg, name=_wave_variant_name(cfg))
+                                    datasets[cfg.name] = WaveEquationBinnedDataset(cfg)
 
     return datasets
 

@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
+
+from utils.split_utils import split_scope_tag
 
 Number = Union[int, float]
 
 
 def _format_threshold_value(value: Number) -> str:
-    """
-    Make numeric threshold values filesystem-friendly but still readable.
-    Example:
-        0.074443 -> 0p074443
-        38.591662 -> 38p591662
-        2 -> 2
-    """
     if isinstance(value, int):
         return str(value)
 
@@ -24,19 +19,14 @@ def make_threshold_dataset_name(
     base_name: str,
     threshold_metric: Optional[str] = None,
     threshold_value: Optional[Number] = None,
+    threshold_splits: Optional[Sequence[str]] = None,
 ) -> str:
-    """
-    Examples:
-        make_threshold_dataset_name("wave")
-            -> "wave"
+    name = base_name
 
-        make_threshold_dataset_name("wave", "pair_accel", 38.591662)
-            -> "wave__pair_accel__38p591662"
+    if threshold_metric is not None and threshold_value is not None:
+        name = f"{name}__{threshold_metric}__{_format_threshold_value(threshold_value)}"
 
-        make_threshold_dataset_name("charged_particles", "force_threshold", 0.074443)
-            -> "charged_particles__force_threshold__0p074443"
-    """
-    if threshold_metric is None or threshold_value is None:
-        return base_name
+    if threshold_splits is not None:
+        name = f"{name}__splits-{split_scope_tag(threshold_splits)}"
 
-    return f"{base_name}__{threshold_metric}__{_format_threshold_value(threshold_value)}"
+    return name

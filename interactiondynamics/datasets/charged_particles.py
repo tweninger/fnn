@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
@@ -8,9 +8,13 @@ import torch
 
 from core.events import EventBatch
 from datasets.interfaces import DataSpec, EventStreamDataset
-from dataclasses import dataclass, replace
-from dataclasses import replace
 from utils.dataset_names import make_threshold_dataset_name
+from utils.split_utils import (
+    normalize_split_names,
+    split_scope_tag,
+    compute_split_ranges,
+    split_for_bin_idx,
+)
 """
 Charged-particle N-body benchmark adapted to the repo's EventStreamDataset interface.
 
@@ -260,8 +264,8 @@ class ChargedParticlesBinnedConfig:
     name: str = "charged_particles"
 
     # DATASET LENGTH / SPLIT
-    num_nodes: int = 32
-    num_bins: int = 256
+    num_nodes: int = 64
+    num_bins: int = 512
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
 
     # SIMULATION
@@ -297,10 +301,26 @@ class ChargedParticlesBinnedConfig:
     force_threshold: float = 0.20
     top_k: int = 64
     min_edges_per_bin: int = 1
+    threshold_splits: Tuple[str, ...] = ("train", "val", "test")
 
     # DEVICE / RNG
     seed: int = 0
     device: Optional[torch.device] = None
+
+
+def _active_cfg_for_split(
+    cfg: ChargedParticlesBinnedConfig,
+    split_name: str,
+) -> ChargedParticlesBinnedConfig:
+    threshold_splits = normalize_split_names(cfg.threshold_splits)
+
+    if cfg.interaction_rule == "all_pairs":
+        return cfg
+
+    if split_name in threshold_splits:
+        return cfg
+
+    return replace(cfg, interaction_rule="all_pairs")
 
 
 # -----------------------------------------------------------------------------
@@ -563,27 +583,23 @@ class ChargedParticlesBinnedDataset(EventStreamDataset):
         self._vel_traj = vel_traj.astype(np.float64, copy=True)
         self._charges = charges.astype(np.float64, copy=True)
 
-        self._all_bins: List[EventBatch] = [
-            _state_to_event_batch(
-                self._loc_traj[t_idx],
-                self._vel_traj[t_idx],
-                self._charges,
-                t_idx=t_idx,
-                cfg=cfg,
+        self._threshold_splits = normalize_split_names(cfg.threshold_splits)
+        self._split_ranges = compute_split_ranges(cfg.num_bins, cfg.split_fracs)
+
+        self._all_bins: List[EventBatch] = []
+        for t_idx in range(cfg.num_bins):
+            split_name = split_for_bin_idx(t_idx, self._split_ranges)
+            active_cfg = _active_cfg_for_split(cfg, split_name)
+
+            self._all_bins.append(
+                _state_to_event_batch(
+                    self._loc_traj[t_idx],
+                    self._vel_traj[t_idx],
+                    self._charges,
+                    t_idx=t_idx,
+                    cfg=active_cfg,
+                )
             )
-            for t_idx in range(cfg.num_bins)
-        ]
-
-        f_tr, f_va, f_te = cfg.split_fracs
-        assert abs((f_tr + f_va + f_te) - 1.0) < 1e-6, "split_fracs must sum to 1.0"
-        tr_end = int(cfg.num_bins * f_tr)
-        va_end = tr_end + int(cfg.num_bins * f_va)
-
-        self._split_ranges = {
-            "train": (0, max(0, tr_end - 1)),
-            "val": (tr_end, max(tr_end, va_end - 1)),
-            "test": (va_end, cfg.num_bins - 1),
-        }
 
     def spec(self) -> DataSpec:
         dt = 0.0
@@ -614,6 +630,8 @@ class ChargedParticlesBinnedDataset(EventStreamDataset):
                 "force_threshold": float(self.cfg.force_threshold),
                 "top_k": int(self.cfg.top_k),
                 "feature_names": list(_EDGE_FEATURE_NAMES),
+                "threshold_splits": list(normalize_split_names(self.cfg.threshold_splits)),
+                "threshold_scope": split_scope_tag(self.cfg.threshold_splits),
                 "observation_noise_loc": float(self.cfg.observation_noise_loc),
                 "observation_noise_vel": float(self.cfg.observation_noise_vel),
                 "node_target_dim": 2,
@@ -679,6 +697,7 @@ def _charged_variant_name(cfg: ChargedParticlesBinnedConfig) -> str:
     elif cfg.interaction_rule == "top_k":
         parts.append(f"topk-{int(cfg.top_k)}")
 
+    parts.append(f"splits-{split_scope_tag(cfg.threshold_splits)}")
     return "__".join(parts)
 
 
@@ -687,36 +706,44 @@ def make_charged_particle_threshold_variants(
     *,
     threshold_metric: str,
     threshold_values: Sequence[float],
+    threshold_splits_options: Sequence[Sequence[str]] = (("train", "val", "test"),),
 ) -> dict[str, ChargedParticlesBinnedDataset]:
     out: dict[str, ChargedParticlesBinnedDataset] = {}
 
     for thr in threshold_values:
-        if threshold_metric == "force_threshold":
-            cfg = replace(
-                base_cfg,
-                interaction_rule="force_threshold",
-                force_threshold=float(thr),
-                name=make_threshold_dataset_name(
-                    base_cfg.name,
-                    threshold_metric,
-                    thr,
-                ),
-            )
-        elif threshold_metric == "distance_threshold":
-            cfg = replace(
-                base_cfg,
-                interaction_rule="distance_threshold",
-                distance_threshold=float(thr),
-                name=make_threshold_dataset_name(
-                    base_cfg.name,
-                    threshold_metric,
-                    thr,
-                ),
-            )
-        else:
-            raise ValueError(f"Unknown threshold_metric: {threshold_metric}")
+        for threshold_splits in threshold_splits_options:
+            norm_splits = normalize_split_names(threshold_splits)
 
-        out[cfg.name] = ChargedParticlesBinnedDataset(cfg)
+            if threshold_metric == "force_threshold":
+                cfg = replace(
+                    base_cfg,
+                    interaction_rule="force_threshold",
+                    force_threshold=float(thr),
+                    threshold_splits=norm_splits,
+                    name=make_threshold_dataset_name(
+                        base_cfg.name,
+                        threshold_metric,
+                        thr,
+                        threshold_splits=norm_splits,
+                    ),
+                )
+            elif threshold_metric == "distance_threshold":
+                cfg = replace(
+                    base_cfg,
+                    interaction_rule="distance_threshold",
+                    distance_threshold=float(thr),
+                    threshold_splits=norm_splits,
+                    name=make_threshold_dataset_name(
+                        base_cfg.name,
+                        threshold_metric,
+                        thr,
+                        threshold_splits=norm_splits,
+                    ),
+                )
+            else:
+                raise ValueError(f"Unknown threshold_metric: {threshold_metric}")
+
+            out[cfg.name] = ChargedParticlesBinnedDataset(cfg)
 
     return out
 

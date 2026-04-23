@@ -28,12 +28,6 @@ from experiments.results_summary import (
     format_recovery_label,
     format_recovery_metrics
 )
-from eval.recovery import (
-    evaluate_recovery_splits,
-    print_recovery_summary,
-    append_recovery_summary_row,
-    evaluate_hidden_positive_recovery
-)
 
 from models.tgn_model import build_tgn_model
 from plotting.interaction_prediction import plot_interaction_run_rankings
@@ -53,7 +47,7 @@ def main():
 
     RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
     PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-    EXPERIMENT_NAME = "interaction_predictions_misfire_.10"
+    EXPERIMENT_NAME = "interaction_predictions_misfire_.70_train_val"
 
     paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
 
@@ -72,36 +66,47 @@ def main():
         "/home/akapociu/ift/interactiondynamics/data/MD_DATA/uracil.npz",
     ]
 
-    physical_datasets = build_physical_datasets(
-        device=device,
-        md22_npz_paths=md22_npz_paths,
-        include=("wave", "spring_web_2d", "charged_particles"),
-    )
+    # physical_datasets = build_physical_datasets(
+    #     device=device,
+    #     md22_npz_paths=md22_npz_paths,
+    #     include=("wave", "spring_web_2d", "charged_particles"),
+    # )
 
     jodie_datasets = {
-        "wikipedia": JODIEBinnedDataset(
-            JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
-        ),
-        "reddit": JODIEBinnedDataset(
-            JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
-        ),
-        "mooc": JODIEBinnedDataset(
-            JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
-        ),
+        # "wikipedia": JODIEBinnedDataset(
+        #     JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
+        # ),
+        # "reddit": JODIEBinnedDataset(
+        #     JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
+        # ),
+        # "mooc": JODIEBinnedDataset(
+        #     JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
+        # ),
         "lastfm": JODIEBinnedDataset(
             JODIEConfig(root="./data/JODIE", name="LastFM", device=device)
         ),
     }
 
+    # physical_datasets = {
+    #     name: ds
+    #     for name, ds in physical_datasets.items()
+    #     if "__clean_ref" not in name
+    # }
+    jodie_datasets = {
+        name: ds
+        for name, ds in jodie_datasets.items()
+        if "__clean_ref" not in name
+    }
+
     clean_datasets = {
-        **physical_datasets,
+        #**physical_datasets,
         **jodie_datasets,
     }
 
     CORRUPTION = dict(
-        drop_real_prob=0.10,
+        drop_real_prob=0.30,
         add_fake_ratio=0.0,
-        corrupt_splits=("train",),
+        corrupt_splits=("train", "val"),
         seed=17,
         fake_feature_mode="zeros",
         avoid_self_loops=True,
@@ -160,6 +165,7 @@ def main():
         allowed_pairs = {
             #("sum", "tgn_gru"),
             ("ift", "ift_update"),
+            #("ift", "hopfield_update"),
         }
 
         if allowed_pairs is not None:
@@ -181,7 +187,7 @@ def main():
                     base_train_cfg=base_train_cfg,
                     run=run_for_ds,
                     build_model_fn=build_tgn_model,
-                    epochs=3,
+                    epochs=1,
                     eval_slices=EvalSlices(early_steps=10),
                     save_jsonl_path=results_jsonl,
                     save_summary_path=summary_jsonl,
@@ -192,24 +198,12 @@ def main():
                 dataset_results.append(result)
                 all_results.append(result)
 
-                recovery = evaluate_recovery_splits(
-                    model=model,
-                    clean_ds=clean_ds,
-                    train_cfg=train_cfg,
-                    corruption_cfg=CORRUPTION,
-                    splits=("train",)
-                )
-
-                append_recovery_summary_row(
-                    summary_jsonl=summary_jsonl,
-                    dataset_name=dataset_name,
-                    run_name=run_for_ds.name,
-                    seed=run.seed,
-                    recovery=recovery,
-                )
-                if recovery is not None:
-                    print(f"{format_recovery_label()} {format_recovery_metrics(recovery)}")
                 print(f"{format_finished_label()} {describe_interaction_run_result(result)}")
+
+                recovery_to_print = result.threshold_recovery or result.recovery
+                if recovery_to_print is not None:
+                    print(f"{format_recovery_label()} {format_recovery_metrics(recovery_to_print)}")
+                    
                 print(f"{format_analysis_label()} {format_interaction_metrics(result)}")
 
             except Exception as e:

@@ -4,7 +4,6 @@ import json
 import shutil
 from pathlib import Path
 from dataclasses import replace
-import traceback
 
 import torch
 
@@ -30,10 +29,8 @@ from experiments.results_summary import (
     format_recovery_metrics
 )
 from eval.recovery import (
-    evaluate_recovery_splits,
-    print_recovery_summary,
+    evaluate_threshold_recovery_splits,
     append_recovery_summary_row,
-    evaluate_hidden_positive_recovery
 )
 
 from models.tgn_model import build_tgn_model
@@ -45,6 +42,14 @@ from datasets.jodie import JODIEBinnedDataset, JODIEConfig
 from datasets.corrupted import CorruptedEventStreamDataset
 
 
+def get_clean_ref_name(dataset_name: str) -> str:
+    if dataset_name.startswith("wave__"):
+        return "wave__clean_ref"
+    if dataset_name.startswith("springweb"):
+        return "springweb__clean_ref"
+    if dataset_name.startswith("charged_particles__") or dataset_name.startswith("charged_particles_"):
+        return "charged_particles__clean_ref"
+    raise ValueError(f"No clean ref mapping for dataset {dataset_name}")
 
 def main():
     cleared_plot_dirs = set()
@@ -54,7 +59,7 @@ def main():
 
     RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
     PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-    EXPERIMENT_NAME = "interaction_predictions_thresholded_all_splits_all_models"
+    EXPERIMENT_NAME = "interaction_predictions_threshold_train_val_max_2"
 
     paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
 
@@ -76,33 +81,19 @@ def main():
     physical_datasets = build_physical_datasets(
         device=device,
         md22_npz_paths=md22_npz_paths,
-        include=("wave", "spring_web", "charged_particles"),
-        
+        include=("wave", "spring_web_2d", "charged_particles"),
+        threshold_splits_options=(("train", "val",),),
+        include_clean_references=True,
     )
 
-    # jodie_datasets = {
-    #     "wikipedia": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
-    #     ),
-    #     "reddit": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
-    #     ),
-    #     "mooc": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
-    #     ),
-    #     "lastfm": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="LastFM", device=device)
-    #     ),
-    # }
+    clean_refs = {name: ds for name, ds in physical_datasets.items() if name.endswith("__clean_ref")}
+    datasets = {name: ds for name, ds in physical_datasets.items() if not name.endswith("__clean_ref")}
 
-    datasets = {
-        **physical_datasets,
-        #**jodie_datasets,
-    }
-
+    
     all_results = []
 
     for dataset_name, ds in datasets.items():
+        base_dataset_name = dataset_name.split("__")[0]
         spec = ds.spec()
         # print("Dataset spec:")
         # print(
@@ -127,7 +118,7 @@ def main():
 
         runs = make_runs(
             base_model_cfg,
-            seeds=(0,),
+            seeds=(0, ),
             aggregator=("ift", "hopfield", "settransformer", "sum", "deepsets"),
             upd=("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
             dropout=(0.0,),
@@ -141,16 +132,16 @@ def main():
             ift_kappa_max=(None,),
         )
 
-        # allowed_pairs = {
-        #     #("sum", "tgn_gru"),
-        #     ("ift", "ift_update"),
-        # }
+        allowed_pairs = {
+            ("ift", "hopfield_update"),
+            ("ift", "ift_update"),
+        }
 
-        # if allowed_pairs is not None:
-        #     runs = [
-        #         run for run in runs
-        #         if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
-        #     ]
+        if allowed_pairs is not None:
+            runs = [
+                run for run in runs
+                if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
+            ]
 
         dataset_results = []
 
@@ -159,23 +150,34 @@ def main():
             print(format_starting_run_banner(dataset_name, run_for_ds.name, run.seed))
 
             try:
-                result, _, _ = run_one_experiment(
+                clean_ref_name = get_clean_ref_name(dataset_name)
+                clean_ds = clean_refs[clean_ref_name]
+
+                result, model, train_cfg = run_one_experiment(
                     ds=ds,
                     spec=spec,
                     base_train_cfg=base_train_cfg,
                     run=run_for_ds,
                     build_model_fn=build_tgn_model,
-                    epochs=6,
+                    epochs=1,
                     eval_slices=EvalSlices(early_steps=10),
                     save_jsonl_path=results_jsonl,
                     save_summary_path=summary_jsonl,
-                    dataset_name=dataset_name,
+                    dataset_name=base_dataset_name,
+                    clean_ds=clean_ds,
+                    corruption_cfg=None,
+                    threshold_recovery_splits=("train", "val"),
                 )
+
                 dataset_results.append(result)
                 all_results.append(result)
 
-                
                 print(f"{format_finished_label()} {describe_interaction_run_result(result)}")
+
+                recovery_to_print = result.threshold_recovery or result.recovery
+                if recovery_to_print is not None:
+                    print(f"{format_recovery_label()} {format_recovery_metrics(recovery_to_print)}")
+                    
                 print(f"{format_analysis_label()} {format_interaction_metrics(result)}")
 
             except Exception as e:
@@ -183,13 +185,12 @@ def main():
                     f"{format_failed_label()} dataset={dataset_name} | run={run.name} | seed={run.seed}"
                 )
                 print(f"Reason: {type(e).__name__}: {e}")
-                traceback.print_exc()
 
                 append_jsonl(
                     results_jsonl,
                     {
-                        "dataset": dataset_name,
-                        "run": run.name,
+                        "dataset": base_dataset_name,
+                        "run": run_for_ds.name,
                         "seed": run.seed,
                         "status": "failed",
                         "error_type": type(e).__name__,

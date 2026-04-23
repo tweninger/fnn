@@ -15,7 +15,7 @@ from eval.ranking import ranking_loss_and_metrics
 from experiments.interaction_prediction_runs import SweepRun 
 from utils.repro import set_seed
 from eval.recovery import evaluate_recovery_splits
-
+from eval.recovery import evaluate_threshold_recovery_splits
 
 # dataclasses = containers for settings/results
 # automatically make this class behave like a nice clean parameter container instead of whole __init__ situation
@@ -32,6 +32,8 @@ class RunResult:
     best_snapshot: dict
     final_snapshot: dict
     wall_sec: float
+    recovery: Optional[dict] = None
+    threshold_recovery: Optional[dict] = None
 
 
 # training settings container
@@ -217,6 +219,7 @@ def run_one_experiment(
     dataset_name: Optional[str] = None,
     clean_ds=None,
     corruption_cfg=None,
+    threshold_recovery_splits=(),
 ) -> tuple[RunResult, torch.nn.Module, TrainConfig]:
     # choose device and set reproducible seed
     device = torch.device(base_train_cfg.device)
@@ -252,7 +255,6 @@ def run_one_experiment(
 
     #start the timer!!
     t0 = time.time()
-    recovery = None
     # loop thru 1, 2, x epochs
     for epoch in range(1, epochs + 1):
         # run one training epoch on training bins
@@ -319,35 +321,56 @@ def run_one_experiment(
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
-    splits_for_recovery = tuple(
-        s for s in ("val", "test")
-        if s in corruption_cfg.get("corrupt_splits", ())
-    )
-    
-    if clean_ds is not None and corruption_cfg is not None and splits_for_recovery:
-        recovery = evaluate_recovery_splits(
-            model=model,
-            clean_ds=clean_ds,
-            train_cfg=train_cfg,
-            corruption_cfg=corruption_cfg,
-            splits=splits_for_recovery,
-        )
-    # save one final run summary as a JSONL row 
-    summary = {
-        "dataset": dataset_name,
-        "run": run.name,
-        "seed": run.seed,
-        "epochs": epochs,
-        "best_val_mrr": best_val_mrr,
-        "best_epoch": best_epoch,
-        "best_snapshot": best_snapshot,
-        "final_snapshot": final_snapshot,
-        "wall_sec": wall,
-    }
+        recovery = None
+        threshold_recovery = None
 
-    if recovery is not None:
-        summary["recovery_val"] = recovery.get("val")
-        summary["recovery_test"] = recovery.get("test")
+        recovery = None
+        threshold_recovery = None
+
+        if clean_ds is not None and corruption_cfg is not None:
+            splits_for_recovery = tuple(
+                s for s in ("train", "val", "test")
+                if s in corruption_cfg.get("corrupt_splits", ())
+            )
+            if splits_for_recovery:
+                recovery = evaluate_recovery_splits(
+                    model=model,
+                    clean_ds=clean_ds,
+                    train_cfg=train_cfg,
+                    corruption_cfg=corruption_cfg,
+                    splits=splits_for_recovery,
+                )
+
+        if clean_ds is not None and threshold_recovery_splits:
+            threshold_recovery = evaluate_threshold_recovery_splits(
+                model=model,
+                clean_ds=clean_ds,
+                thresholded_ds=ds,
+                train_cfg=train_cfg,
+                splits=tuple(threshold_recovery_splits),
+            )
+
+        summary = {
+            "dataset": dataset_name,
+            "run": run.name,
+            "seed": run.seed,
+            "epochs": epochs,
+            "best_val_mrr": best_val_mrr,
+            "best_epoch": best_epoch,
+            "best_snapshot": best_snapshot,
+            "final_snapshot": final_snapshot,
+            "wall_sec": wall,
+        }
+
+        if threshold_recovery is not None:
+            summary["threshold_recovery"] = threshold_recovery
+            for split_name, stats in threshold_recovery.items():
+                summary[f"threshold_recovery_{split_name}"] = stats
+
+        if recovery is not None:
+            summary["recovery"] = recovery
+            for split_name, stats in recovery.items():
+                summary[f"recovery_{split_name}"] = stats
 
     if save_summary_path is not None:
         with open(save_summary_path, "a") as f:
@@ -363,6 +386,8 @@ def run_one_experiment(
         best_snapshot=best_snapshot,
         final_snapshot=final_snapshot,
         wall_sec=wall,
+        recovery=recovery,
+        threshold_recovery=threshold_recovery,
     )
 
     return result, model, train_cfg

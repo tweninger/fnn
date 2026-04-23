@@ -9,6 +9,12 @@ import torch
 
 from core.events import EventBatch
 from datasets.interfaces import DataSpec, EventStreamDataset
+from utils.split_utils import (
+    normalize_split_names,
+    split_scope_tag,
+    compute_split_ranges,
+    split_for_bin_idx,
+)
 
 """
 2D spring-web benchmark adapted to the repo's EventStreamDataset interface.
@@ -55,8 +61,8 @@ class SpringWeb2DConfig:
     name: str = "spring_web_2d"
 
     # size / time
-    num_nodes: int = 32
-    num_bins: int = 256
+    num_nodes: int = 64
+    num_bins: int = 512
 
     # simulation parameters
     dt: float = 0.05
@@ -82,6 +88,7 @@ class SpringWeb2DConfig:
     threshold_metric: str = "force_mag"   # {"force_mag", "extension", "distance", "rel_speed"}
     threshold_use_absolute: bool = True
     threshold_keep_one_if_empty: bool = True
+    threshold_splits: Tuple[str, ...] = ("train", "val", "test")
 
     bidirectional: bool = True
 
@@ -125,7 +132,6 @@ class SpringWeb2DDataset(EventStreamDataset):
         self._event_dim = len(_EDGE_FEATURE_NAMES)
 
         self._build()
-        self._split()
 
     # -------------------------------------------------------------------------
     # helpers: geometry / topology
@@ -237,14 +243,17 @@ class SpringWeb2DDataset(EventStreamDataset):
 
         return abs(val) if self.cfg.threshold_use_absolute else val
 
-    def _filter_records(self, records_all: List[Dict[str, torch.Tensor]]) -> List[Dict[str, torch.Tensor]]:
-        if self.cfg.event_mode == "all_neighbors":
-            return records_all
+    def _filter_records(
+        self,
+        records_all: List[Dict[str, torch.Tensor]],
+        *,
+        apply_threshold: bool | None = None,
+    ) -> List[Dict[str, torch.Tensor]]:
+        if apply_threshold is None:
+            apply_threshold = (self.cfg.event_mode == "thresholded")
 
-        if self.cfg.event_mode != "thresholded":
-            raise ValueError(
-                f"unknown event_mode={self.cfg.event_mode!r}; expected 'all_neighbors' or 'thresholded'"
-            )
+        if not apply_threshold:
+            return records_all
 
         thr = float(self.cfg.interaction_threshold)
         kept = [r for r in records_all if self._interaction_strength(r) >= thr]
@@ -327,6 +336,9 @@ class SpringWeb2DDataset(EventStreamDataset):
 
         n = self.cfg.num_nodes
         T = self.cfg.num_bins
+        threshold_splits = normalize_split_names(self.cfg.threshold_splits)
+        split_ranges = compute_split_ranges(T, self.cfg.split_fracs)
+        raw_bin_to_split: Dict[int, str] = {}
         dt = self.cfg.dt
         k = self.cfg.spring_k
         damping = self.cfg.damping
@@ -389,7 +401,15 @@ class SpringWeb2DDataset(EventStreamDataset):
                     }
                 )
 
-            records = self._filter_records(records_all)
+            split_name = split_for_bin_idx(b, split_ranges)
+            raw_bin_to_split[b] = split_name
+
+            apply_threshold = (
+                self.cfg.event_mode == "thresholded"
+                and split_name in threshold_splits
+            )
+
+            records = self._filter_records(records_all, apply_threshold=apply_threshold)
 
             src_list: List[int] = []
             dst_list: List[int] = []
@@ -446,6 +466,7 @@ class SpringWeb2DDataset(EventStreamDataset):
         self.t_bins: List[torch.Tensor] = []
         self.feat_bins: List[torch.Tensor] = []
         self.node_target_bins: List[torch.Tensor] = []
+        self.split_bins = {"train": [], "val": [], "test": []}
 
         for b in range(T):
             if not raw_has_events[b]:
@@ -455,23 +476,27 @@ class SpringWeb2DDataset(EventStreamDataset):
 
             node_targets = self._compute_target(b, x_hist=x_hist, v_hist=v_hist, a_hist=a_hist)
 
+            stored_idx = len(self.src_bins)
             self.src_bins.append(raw_src_bins[b])
             self.dst_bins.append(raw_dst_bins[b])
             self.t_bins.append(raw_t_bins[b])
             self.feat_bins.append(raw_feat_bins[b])
             self.node_target_bins.append(node_targets)
 
+            split_name = raw_bin_to_split[b]
+            self.split_bins[split_name].append(stored_idx)
+
         self._num_bins = len(self.src_bins)
         self._num_events = sum(int(s.numel()) for s in self.src_bins)
 
         if self.cfg.standardize_node_targets and len(self.node_target_bins) > 0:
-            T_stored = len(self.node_target_bins)
-            f_tr, _, _ = self.cfg.split_fracs
-            n_tr = max(1, int(T_stored * f_tr))
+            train_idxs = self.split_bins["train"]
+            if not train_idxs:
+                raise ValueError("No train bins available for target standardization.")
 
             train_targets = torch.cat(
-                [self.node_target_bins[i] for i in range(n_tr)],
-                dim=0,   # [n_tr * N, d_target]
+                [self.node_target_bins[i] for i in train_idxs],
+                dim=0,
             )
 
             self.target_mean = train_targets.mean(dim=0)
@@ -479,19 +504,6 @@ class SpringWeb2DDataset(EventStreamDataset):
 
             for i in range(len(self.node_target_bins)):
                 self.node_target_bins[i] = (self.node_target_bins[i] - self.target_mean) / self.target_std
-
-    def _split(self):
-        T = self._num_bins
-        f_tr, f_va, _ = self.cfg.split_fracs
-
-        n_tr = int(T * f_tr)
-        n_va = int(T * f_va)
-
-        self.split_bins = {
-            "train": list(range(0, n_tr)),
-            "val": list(range(n_tr, n_tr + n_va)),
-            "test": list(range(n_tr + n_va, T)),
-        }
 
     def spec(self) -> DataSpec:
         return DataSpec(
@@ -511,6 +523,8 @@ class SpringWeb2DDataset(EventStreamDataset):
                 "interaction_threshold": float(self.cfg.interaction_threshold),
                 "threshold_metric": self.cfg.threshold_metric,
                 "threshold_use_absolute": bool(self.cfg.threshold_use_absolute),
+                "threshold_splits": list(normalize_split_names(self.cfg.threshold_splits)),
+                "threshold_scope": split_scope_tag(self.cfg.threshold_splits),
                 "target_type": self.cfg.target_type,
                 "target_horizon": int(self.cfg.target_horizon),
                 "standardize_node_targets": bool(self.cfg.standardize_node_targets),
@@ -653,6 +667,7 @@ def make_spring_web_variants(
     threshold_metrics: Sequence[str] = SPRING_WEB_THRESHOLD_METRICS,
     threshold_use_absolute_options: Sequence[bool] = (True,),
     threshold_values: Sequence[float] = SPRING_WEB_THRESHOLD_VALUES,
+    threshold_splits_options: Sequence[Sequence[str]] = (("train", "val", "test"),),
 
     target_types: Sequence[str] = ("delta_v",),
     target_horizons: Sequence[int] = (1,),
@@ -700,27 +715,32 @@ def make_spring_web_variants(
                             for metric in threshold_metrics:
                                 for use_abs in threshold_use_absolute_options:
                                     for thr in threshold_values:
-                                        cfg = replace(
-                                            topo_cfg,
-                                            name=(
-                                                f"{topo_cfg.name}"
-                                                f"_events-thr"
-                                                f"_metric-{metric}"
-                                                f"_abs{int(use_abs)}"
-                                                f"_thr-{_tag(thr)}"
-                                                f"_target-{target_type}"
-                                                f"_h{int(horizon)}"
-                                                f"_ystd{int(std_targets)}"
-                                            ),
-                                            event_mode="thresholded",
-                                            threshold_metric=str(metric),
-                                            threshold_use_absolute=bool(use_abs),
-                                            interaction_threshold=float(thr),
-                                            target_type=str(target_type),
-                                            target_horizon=int(horizon),
-                                            standardize_node_targets=bool(std_targets),
-                                        )
-                                        out[cfg.name] = SpringWeb2DDataset(cfg)
+                                        for threshold_splits in threshold_splits_options:
+                                            norm_splits = normalize_split_names(threshold_splits)
+
+                                            cfg = replace(
+                                                topo_cfg,
+                                                name=(
+                                                    f"{topo_cfg.name}"
+                                                    f"_events-thr"
+                                                    f"_metric-{metric}"
+                                                    f"_abs{int(use_abs)}"
+                                                    f"_thr-{_tag(thr)}"
+                                                    f"_splits-{split_scope_tag(norm_splits)}"
+                                                    f"_target-{target_type}"
+                                                    f"_h{int(horizon)}"
+                                                    f"_ystd{int(std_targets)}"
+                                                ),
+                                                event_mode="thresholded",
+                                                threshold_metric=str(metric),
+                                                threshold_use_absolute=bool(use_abs),
+                                                interaction_threshold=float(thr),
+                                                threshold_splits=norm_splits,
+                                                target_type=str(target_type),
+                                                target_horizon=int(horizon),
+                                                standardize_node_targets=bool(std_targets),
+                                            )
+                                            out[cfg.name] = SpringWeb2DDataset(cfg)
                         else:
                             raise ValueError(
                                 f"unknown event_mode={event_mode!r}; expected one of "

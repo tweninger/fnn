@@ -126,9 +126,11 @@ def mrr_and_hits(
     Compute rank of the positive (index 0) among K1 candidates for each event.
     """
     logits = scores.view(M, K1)
+    
     # Higher is better. Rank = 1 + number of candidates strictly greater than positive.
-    pos = logits[:, 0:1]
-    rank = 1 + (logits > pos).sum(dim=1)  # (M,)
+    pos = logits[:, :1]
+    #fixed ranking bug -> pessimistic scoring, if negative ties the positive, count it against the positives
+    rank = 1 + (logits[:, 1:] >= pos).sum(dim=1)  # (M,)
 
     mrr = (1.0 / rank.float()).mean().item()
     out = {"mrr": mrr, "mean_rank": rank.float().mean().item()}
