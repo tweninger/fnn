@@ -37,7 +37,14 @@ from utils.output_paths import dataset_group_name, experiment_output_paths
 from datasets.jodie import JODIEBinnedDataset, JODIEConfig
 from datasets.corrupted import CorruptedEventStreamDataset
 
-
+def get_clean_ref_name(dataset_name: str) -> str:
+    if dataset_name.startswith("wave__"):
+        return "wave__clean_ref"
+    if dataset_name.startswith("springweb"):
+        return "springweb__clean_ref"
+    if dataset_name.startswith("charged_particles__") or dataset_name.startswith("charged_particles_"):
+        return "charged_particles__clean_ref"
+    raise ValueError(f"No clean ref mapping for dataset {dataset_name}")
 
 def main():
     cleared_plot_dirs = set()
@@ -47,7 +54,7 @@ def main():
 
     RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
     PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-    EXPERIMENT_NAME = "interaction_predictions_misfire_.70_train_val"
+    EXPERIMENT_NAME = "interaction_predictions_charged_particles_thresholded_train_distance_misfire_.50_sparse"
 
     paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
 
@@ -66,47 +73,47 @@ def main():
         "/home/akapociu/ift/interactiondynamics/data/MD_DATA/uracil.npz",
     ]
 
-    # physical_datasets = build_physical_datasets(
-    #     device=device,
-    #     md22_npz_paths=md22_npz_paths,
-    #     include=("wave", "spring_web_2d", "charged_particles"),
-    # )
+    physical_datasets = build_physical_datasets(
+        device=device,
+        md22_npz_paths=md22_npz_paths,
+        include=("charged_particles",),
+        include_clean_references=True,  
+    )
 
-    jodie_datasets = {
-        # "wikipedia": JODIEBinnedDataset(
-        #     JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
-        # ),
-        # "reddit": JODIEBinnedDataset(
-        #     JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
-        # ),
-        # "mooc": JODIEBinnedDataset(
-        #     JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
-        # ),
-        "lastfm": JODIEBinnedDataset(
-            JODIEConfig(root="./data/JODIE", name="LastFM", device=device)
-        ),
-    }
-
-    # physical_datasets = {
+    # jodie_datasets = {
+    #     # "wikipedia": JODIEBinnedDataset(
+    #     #     JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
+    #     # ),
+    #     # "reddit": JODIEBinnedDataset(
+    #     #     JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
+    #     # ),
+    #     # "mooc": JODIEBinnedDataset(
+    #     #     JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
+    #     # ),
+    #     "lastfm": JODIEBinnedDataset(
+    #         JODIEConfig(root="./data/JODIE", name="LastFM", device=device)
+    #     ),
+    # }
+    clean_refs = {name: ds for name, ds in physical_datasets.items() if name.endswith("__clean_ref")}
+    datasets = {name: ds for name, ds in physical_datasets.items() if not name.endswith("__clean_ref")}
+    
+    # clean_datasets = {
+    #         **physical_datasets,
+    #         #**jodie_datasets,
+    #     }
+    
+    # jodie_datasets = {
     #     name: ds
-    #     for name, ds in physical_datasets.items()
+    #     for name, ds in jodie_datasets.items()
     #     if "__clean_ref" not in name
     # }
-    jodie_datasets = {
-        name: ds
-        for name, ds in jodie_datasets.items()
-        if "__clean_ref" not in name
-    }
 
-    clean_datasets = {
-        #**physical_datasets,
-        **jodie_datasets,
-    }
+    
 
     CORRUPTION = dict(
-        drop_real_prob=0.30,
+        drop_real_prob=0.50,
         add_fake_ratio=0.0,
-        corrupt_splits=("train", "val"),
+        corrupt_splits=("train", ),
         seed=17,
         fake_feature_mode="zeros",
         avoid_self_loops=True,
@@ -115,15 +122,15 @@ def main():
 
     all_results = []
 
-    for base_name, clean_ds in clean_datasets.items():
+    for dataset_name, ds in datasets.items():
         corruption_tag = (
             f"drop={CORRUPTION['drop_real_prob']:.2f}|"
-            f"fake={CORRUPTION['add_fake_ratio']:.2f}|"
+            #f"fake={CORRUPTION['add_fake_ratio']:.2f}|"
             f"splits={'-'.join(CORRUPTION['corrupt_splits'])}"
         )
-        dataset_name = f"{base_name}_{corruption_tag}"
+        dataset_name = f"{dataset_name}_{corruption_tag}"
 
-        ds = CorruptedEventStreamDataset(clean_ds, **CORRUPTION)
+        ds = CorruptedEventStreamDataset(ds, **CORRUPTION)
         spec = ds.spec()
         # print("Dataset spec:")
         # print(
@@ -162,17 +169,17 @@ def main():
             ift_kappa_max=(None,),
         )
 
-        allowed_pairs = {
-            #("sum", "tgn_gru"),
-            ("ift", "ift_update"),
-            #("ift", "hopfield_update"),
-        }
+        # allowed_pairs = {
+        #     #("sum", "tgn_gru"),
+        #     ("ift", "ift_update"),
+        #     #("ift", "hopfield_update"),
+        # }
 
-        if allowed_pairs is not None:
-            runs = [
-                run for run in runs
-                if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
-            ]
+        # if allowed_pairs is not None:
+        #     runs = [
+        #         run for run in runs
+        #         if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
+        #     ]
 
         dataset_results = []
 
@@ -181,13 +188,16 @@ def main():
             print(format_starting_run_banner(dataset_name, run_for_ds.name, run.seed))
 
             try:
+                clean_ref_name = get_clean_ref_name(dataset_name)
+                clean_ds = clean_refs[clean_ref_name]
+
                 result, model, train_cfg = run_one_experiment(
                     ds=ds,
                     spec=spec,
                     base_train_cfg=base_train_cfg,
                     run=run_for_ds,
                     build_model_fn=build_tgn_model,
-                    epochs=1,
+                    epochs=3,
                     eval_slices=EvalSlices(early_steps=10),
                     save_jsonl_path=results_jsonl,
                     save_summary_path=summary_jsonl,
@@ -199,8 +209,7 @@ def main():
                 all_results.append(result)
 
                 print(f"{format_finished_label()} {describe_interaction_run_result(result)}")
-
-                recovery_to_print = result.threshold_recovery or result.recovery
+                recovery_to_print = result.recovery
                 if recovery_to_print is not None:
                     print(f"{format_recovery_label()} {format_recovery_metrics(recovery_to_print)}")
                     

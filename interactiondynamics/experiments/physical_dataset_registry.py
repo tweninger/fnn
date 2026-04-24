@@ -42,24 +42,23 @@ def build_physical_datasets(
             min_edges_per_bin=1,
             threshold_splits=("train", "val", "test"),
         )
-        datasets[base_cfg.name] = ChargedParticlesBinnedDataset(base_cfg)
+        #datasets[base_cfg.name] = ChargedParticlesBinnedDataset(base_cfg)
 
         if include_clean_references:
             clean_cfg = replace(base_cfg, name=f"{base_cfg.name}__clean_ref")
             datasets[clean_cfg.name] = ChargedParticlesBinnedDataset(clean_cfg)
 
-        # charged_variants = make_charged_particle_threshold_variants(
-        #     base_cfg,
-        #     threshold_metric="force_threshold",   # or "distance_threshold"
-        #     threshold_values=(
-        #         0.395001,
-        #         0.024478,
-        #         #0.000000,
-        #     ),
-        #     threshold_splits_options=threshold_splits_options,
-        # )
+        charged_variants = make_charged_particle_threshold_variants(
+            base_cfg,
+            threshold_metric="distance_threshold",   # or "distance_threshold"
+            threshold_values=(
+                0.5, #remove lowest 50 percent
+                0.130677,
+            ),
+            threshold_splits_options=threshold_splits_options,
+        )
 
-        # datasets.update(charged_variants)
+        datasets.update(charged_variants)
 
     if "wave" in include:
         base_cfg = WaveEquationBinnedConfig(

@@ -33,7 +33,9 @@ from eval.recovery import (
     evaluate_recovery_splits,
     print_recovery_summary,
     append_recovery_summary_row,
-    evaluate_hidden_positive_recovery
+    evaluate_hidden_positive_recovery,
+    evaluate_threshold_recovery_splits,
+    append_recovery_summary_row
 )
 
 from models.tgn_model import build_tgn_model
@@ -44,7 +46,14 @@ from utils.output_paths import dataset_group_name, experiment_output_paths
 from datasets.jodie import JODIEBinnedDataset, JODIEConfig
 from datasets.corrupted import CorruptedEventStreamDataset
 
-
+def get_clean_ref_name(dataset_name: str) -> str:
+    if dataset_name.startswith("wave__"):
+        return "wave__clean_ref"
+    if dataset_name.startswith("springweb"):
+        return "springweb__clean_ref"
+    if dataset_name.startswith("charged_particles__") or dataset_name.startswith("charged_particles_"):
+        return "charged_particles__clean_ref"
+    raise ValueError(f"No clean ref mapping for dataset {dataset_name}")
 
 def main():
     cleared_plot_dirs = set()
@@ -77,9 +86,11 @@ def main():
         device=device,
         md22_npz_paths=md22_npz_paths,
         include=("wave", "spring_web", "charged_particles"),
-        
+        threshold_splits_options=(("train",),),
+        include_clean_references=True,
     )
-
+    clean_refs = {name: ds for name, ds in physical_datasets.items() if name.endswith("__clean_ref")}
+    datasets = {name: ds for name, ds in physical_datasets.items() if not name.endswith("__clean_ref")}
     # jodie_datasets = {
     #     "wikipedia": JODIEBinnedDataset(
     #         JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)

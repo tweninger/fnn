@@ -59,7 +59,7 @@ def main():
 
     RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
     PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-    EXPERIMENT_NAME = "interaction_predictions_threshold_train_val_max_2"
+    EXPERIMENT_NAME = "interaction_predictions_charged_particles_thresholded_train_force_misfire_.20"
 
     paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
 
@@ -81,8 +81,8 @@ def main():
     physical_datasets = build_physical_datasets(
         device=device,
         md22_npz_paths=md22_npz_paths,
-        include=("wave", "spring_web_2d", "charged_particles"),
-        threshold_splits_options=(("train", "val",),),
+        include=("charged_particles",),
+        threshold_splits_options=(("train", "val", "test"),),
         include_clean_references=True,
     )
 
@@ -132,16 +132,16 @@ def main():
             ift_kappa_max=(None,),
         )
 
-        allowed_pairs = {
-            ("ift", "hopfield_update"),
-            ("ift", "ift_update"),
-        }
+        # allowed_pairs = {
+        #     ("ift", "hopfield_update"),
+        #     ("ift", "ift_update"),
+        # }
 
-        if allowed_pairs is not None:
-            runs = [
-                run for run in runs
-                if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
-            ]
+        # if allowed_pairs is not None:
+        #     runs = [
+        #         run for run in runs
+        #         if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
+        #     ]
 
         dataset_results = []
 
@@ -159,14 +159,14 @@ def main():
                     base_train_cfg=base_train_cfg,
                     run=run_for_ds,
                     build_model_fn=build_tgn_model,
-                    epochs=1,
+                    epochs=3,
                     eval_slices=EvalSlices(early_steps=10),
                     save_jsonl_path=results_jsonl,
                     save_summary_path=summary_jsonl,
                     dataset_name=base_dataset_name,
                     clean_ds=clean_ds,
                     corruption_cfg=None,
-                    threshold_recovery_splits=("train", "val"),
+                    threshold_recovery_splits=("train",),
                 )
 
                 dataset_results.append(result)
