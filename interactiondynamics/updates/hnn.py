@@ -90,7 +90,7 @@ class HNNUpdate(UpdateLaw):
         qp_raw = state.node
         dt = self.dt
 
-        # HNN needs autograd even during eval (your evaluate_stream_sliced uses torch.no_grad).
+        # HNN needs autograd even during eval (evaluate_stream_sliced uses torch.no_grad).
         # So: locally re-enable grads for the physics part.
         with torch.enable_grad():
             qp = qp_raw.detach().requires_grad_(True) # allow gradients w.r.t them, b/c update is based on derivatives of energy
@@ -163,7 +163,7 @@ class HNNUpdate(UpdateLaw):
 
 
         next_state = state.clone(detach=False)
-        next_state.node = qp_next.detach()
+        next_state.node = qp_next if self.training else qp_next.detach()
 
         aux: Dict[str, torch.Tensor] = {
             "H_tot": H_tot.detach(),

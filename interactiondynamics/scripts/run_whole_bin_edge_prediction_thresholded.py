@@ -36,8 +36,8 @@ from datasets.charged_particles import (
 
 RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
 PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-EXPERIMENT_NAME = "whole_bin_edge_prediction_thresholded"
-
+#EXPERIMENT_NAME = "whole_bin_edge_prediction_thresholded_all_models_.05_cutoff_plus_ift_sweep"
+EXPERIMENT_NAME = "test"
 
 def build_thresholded_whole_bin_datasets(device: torch.device):
     datasets = {}
@@ -56,7 +56,10 @@ def build_thresholded_whole_bin_datasets(device: torch.device):
             charged_base_cfg,
             threshold_metric="distance_threshold",
             threshold_values=(
-                2.23916,   # keep roughly 80% of edges
+                #2.23916,   # keep roughly 80% of edges
+                4.582872,
+                # 6.782091,
+                
             ),
             threshold_splits_options=(("train", "val", "test"),),
         )
@@ -141,7 +144,7 @@ def main() -> None:
             device=device,
             log_every=log_every,
             tbptt_steps=1,
-            decision_threshold=0.05,
+            decision_threshold=0.5,
             upper_triangle_only= True, #upper_triangle_only,
             include_self_loops=False,
             pos_weight=None,
@@ -160,18 +163,17 @@ def main() -> None:
             scorer_dropout=(0.0,),
             use_time_features=(False,),
             ift_kappa_param=("softplus",),
-            ift_dt=(0.05,),
-            ift_gamma=(0.0,),
-            ift_kappa_init=(1.0,),
+            ift_dt=(0.01, 0.05, 0.1, 0.2),
+            ift_gamma=(0.0, 0.01, 0.05, 0.1),
+            ift_kappa_init=(0.1, 0.5, 1.0, 2.0),
             ift_kappa_cap=(False,),
             ift_kappa_max=(None,),
         )
 
         allowed_pairs = {
-            ("ift", "ift_update"),
-            #("ift", "hopfield_update"),
-            # add more if you want:
-            ("sum", "tgn_gru"),
+            #("ift", "ift_update"),
+            ("sum", "lnn"),
+            #("sum", "tgn_gru"),
             # ("deepsets", "tgn_gru"),
         }
         runs = [
@@ -203,7 +205,7 @@ def main() -> None:
                 )
                 dataset_results.append(result)
                 all_results.append(result)
-
+                
                 print(f"{format_finished_label()} {describe_whole_bin_run_result(result)}")
                 print(f"{format_analysis_label()} {format_whole_bin_metrics(result)}")
 

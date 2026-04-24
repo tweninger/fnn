@@ -125,6 +125,9 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             kappa=getattr(c, "ift_kappa", 1.0),
             learn_kappa=getattr(c, "ift_learn_kappa", True),
             kappa_param=getattr(c, "ift_kappa_param", "softplus"),
+            #why were these two not here the whole time im gonna cry
+            kappa_cap=getattr(c, "ift_kappa_cap", False),
+            kappa_max=getattr(c, "ift_kappa_max", None),
         ),
     }
     upd_fn = UPDATE_BUILDERS.get(cfg.update)

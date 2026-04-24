@@ -14,6 +14,19 @@ from eval.whole_bin_edges import whole_bin_edge_loss_and_metrics
 from experiments.interaction_prediction_runs import SweepRun
 from utils.repro import set_seed
 
+def print_grad_block(name, module):
+    total = 0.0
+    none = 0
+    count = 0
+
+    for pname, p in module.named_parameters():
+        count += 1
+        if p.grad is None:
+            none += 1
+        else:
+            total += p.grad.abs().sum().item()
+
+    print(f"{name}: total_grad={total:.6g}, none_params={none}/{count}")
 
 @dataclass
 class WholeBinRunResult:
@@ -133,6 +146,17 @@ def train_one_epoch_whole_bin(
             max_auto_pos_weight=cfg.max_auto_pos_weight,
         )
         loss.backward()
+        
+        if cfg.log_every and (n_steps % cfg.log_every) == 0:
+            print_grad_block("update", model.update)
+            print_grad_block("scorer", model.scorer)
+
+            if hasattr(model, "encoder"):
+                print_grad_block("encoder", model.encoder)
+
+            if hasattr(model, "aggregator"):
+                print_grad_block("aggregator", model.aggregator)
+
         if cfg.grad_clip and cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         optimizer.step()
@@ -152,7 +176,10 @@ def train_one_epoch_whole_bin(
                 f"jaccard={step_metrics['jaccard']:.4f} "
                 f"f1={step_metrics['f1']:.4f} "
                 f"pr_auc={step_metrics['pr_auc']:.4f} "
-                f"roc_auc={step_metrics['roc_auc']:.4f}"
+                f"roc_auc={step_metrics['roc_auc']:.4f} "
+                f"edge_density={metrics['edge_density']:.4f} "
+                f"pred_density={metrics['pred_edge_density']:.4f} "
+                f"pos={metrics['num_positive']:.0f}/{metrics['num_candidates']:.0f}"
             )
 
         prev = curr

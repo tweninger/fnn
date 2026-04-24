@@ -130,7 +130,7 @@ class LNNUpdate(UpdateLaw):
         next_state = state.clone(detach=False)
         next_state.node_prev = q_raw
         next_state.node = q_next.detach()
-
+        #next_state.node = q_next if self.training else q_next.detach()
         aux = {
             "V_tot": V_tot.detach(),
             "qdot_norm": qdot.norm(dim=-1).mean().detach(),
