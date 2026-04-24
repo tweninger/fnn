@@ -124,17 +124,12 @@ def _safe_auc_metrics(labels: torch.Tensor, probs: torch.Tensor) -> tuple[float,
         pr = float("nan")
     return roc, pr
 
-
-@torch.no_grad()
-def binary_edge_metrics_from_logits(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    decision_threshold: float = 0.5,
+def _binary_counts_for_threshold(
+    probs: torch.Tensor,
+    labels_f: torch.Tensor,
+    threshold: float,
 ) -> Dict[str, float]:
-    probs = torch.sigmoid(logits)
-    preds = (probs >= float(decision_threshold)).to(dtype=torch.float32)
-    labels_f = labels.to(dtype=torch.float32)
+    preds = (probs >= float(threshold)).to(dtype=torch.float32)
 
     tp = float(((preds == 1.0) & (labels_f == 1.0)).sum().item())
     fp = float(((preds == 1.0) & (labels_f == 0.0)).sum().item())
@@ -147,7 +142,9 @@ def binary_edge_metrics_from_logits(
     jaccard = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
     accuracy = (tp + tn) / max(tp + tn + fp + fn, 1.0)
 
-    roc_auc, pr_auc = _safe_auc_metrics(labels_f, probs)
+    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    balanced_acc = 0.5 * (tpr + tnr)
 
     return {
         "precision": precision,
@@ -155,14 +152,79 @@ def binary_edge_metrics_from_logits(
         "f1": f1,
         "jaccard": jaccard,
         "accuracy": accuracy,
-        "roc_auc": roc_auc,
-        "pr_auc": pr_auc,
-        "edge_density": float(labels_f.mean().item()),
+        "balanced_acc": balanced_acc,
         "pred_edge_density": float(preds.mean().item()),
-        "num_positive": float(labels_f.sum().item()),
-        "num_candidates": float(labels_f.numel()),
     }
 
+@torch.no_grad()
+def binary_edge_metrics_from_logits(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    decision_threshold: float = 0.5,
+) -> Dict[str, float]:
+    probs = torch.sigmoid(logits)
+    labels_f = labels.to(dtype=torch.float32)
+
+    # Metrics at the configured decision threshold
+    threshold_metrics = _binary_counts_for_threshold(
+        probs=probs,
+        labels_f=labels_f,
+        threshold=decision_threshold,
+    )
+
+    # Threshold-free AUC metrics
+    roc_auc, pr_auc = _safe_auc_metrics(labels_f, probs)
+
+    # PR-AUC baseline is edge density / positive rate
+    edge_density = float(labels_f.mean().item())
+    if edge_density >= 1.0 or pr_auc != pr_auc:  # pr_auc != pr_auc checks NaN
+        norm_pr_auc = float("nan")
+    else:
+        norm_pr_auc = (pr_auc - edge_density) / (1.0 - edge_density)
+
+    # Debug threshold sweep
+    # best_threshold_by_f1 = float("nan")
+    # best_threshold_by_jaccard = float("nan")
+    # best_threshold_by_balanced_acc = float("nan")
+
+    # best_f1_swept = -1.0
+    # best_jaccard_swept = -1.0
+    # best_balanced_acc_swept = -1.0
+
+    # for t in torch.linspace(0.05, 0.95, steps=19, device=probs.device):
+    #     t_float = float(t.item())
+    #     tm = _binary_counts_for_threshold(probs, labels_f, t_float)
+
+    #     if tm["f1"] > best_f1_swept:
+    #         best_f1_swept = tm["f1"]
+    #         best_threshold_by_f1 = t_float
+
+    #     if tm["jaccard"] > best_jaccard_swept:
+    #         best_jaccard_swept = tm["jaccard"]
+    #         best_threshold_by_jaccard = t_float
+
+    #     if tm["balanced_acc"] > best_balanced_acc_swept:
+    #         best_balanced_acc_swept = tm["balanced_acc"]
+    #         best_threshold_by_balanced_acc = t_float
+
+    return {
+        **threshold_metrics,
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        "norm_pr_auc": norm_pr_auc,
+        "edge_density": edge_density,
+        "num_positive": float(labels_f.sum().item()),
+        "num_candidates": float(labels_f.numel()),
+
+        # Debug threshold sweep
+        # "best_threshold_by_f1": best_threshold_by_f1,
+        # "best_threshold_by_jaccard": best_threshold_by_jaccard,
+        # "best_threshold_by_balanced_acc": best_threshold_by_balanced_acc,
+        # "best_f1_swept": best_f1_swept,
+        # "best_jaccard_swept": best_jaccard_swept,
+        # "best_balanced_acc_swept": best_balanced_acc_swept,
+    }
 
 def _resolve_pos_weight(
     labels: torch.Tensor,
@@ -200,6 +262,7 @@ def whole_bin_edge_loss_and_metrics(
     pos_weight: float | None = None,
     auto_pos_weight: bool = True,
     max_auto_pos_weight: float | None = 50.0,
+    debug_scores: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     cand_batch = build_whole_bin_candidate_eventbatch(
         next_events,
@@ -234,6 +297,22 @@ def whole_bin_edge_loss_and_metrics(
 
     if not torch.isfinite(logits).all():
         raise RuntimeError("Non-finite logits from model.score()")
+
+    # DEBUG: inspect score/probability collapse
+    if debug_scores:
+        with torch.no_grad():
+            probs = torch.sigmoid(logits)
+
+            print(
+                f"logits mean={logits.mean().item():.4f} "
+                f"std={logits.std().item():.4f} "
+                f"min={logits.min().item():.4f} "
+                f"max={logits.max().item():.4f} | "
+                f"probs mean={probs.mean().item():.4f} "
+                f"std={probs.std().item():.4f} "
+                f"min={probs.min().item():.4f} "
+                f"max={probs.max().item():.4f}"
+            )
 
     pw = _resolve_pos_weight(
         labels,

@@ -68,12 +68,20 @@ _METRIC_KEYS = (
     "f1",
     "jaccard",
     "accuracy",
+    "balanced_acc",
     "roc_auc",
     "pr_auc",
+    "norm_pr_auc",
     "edge_density",
     "pred_edge_density",
     "num_positive",
     "num_candidates",
+    "best_threshold_by_f1",
+    "best_threshold_by_jaccard",
+    "best_threshold_by_balanced_acc",
+    "best_f1_swept",
+    "best_jaccard_swept",
+    "best_balanced_acc_swept",
 )
 
 
@@ -133,6 +141,9 @@ def train_one_epoch_whole_bin(
                 kappa_n += 1
 
         optimizer.zero_grad(set_to_none=True)
+
+        should_log = bool(cfg.log_every and ((n_steps + 1) % cfg.log_every == 0))
+
         loss, metrics = whole_bin_edge_loss_and_metrics(
             model=model,
             state=state,
@@ -144,18 +155,19 @@ def train_one_epoch_whole_bin(
             pos_weight=cfg.pos_weight,
             auto_pos_weight=cfg.auto_pos_weight,
             max_auto_pos_weight=cfg.max_auto_pos_weight,
+            debug_scores=should_log,
         )
         loss.backward()
         
-        if cfg.log_every and (n_steps % cfg.log_every) == 0:
-            print_grad_block("update", model.update)
-            print_grad_block("scorer", model.scorer)
+        # if cfg.log_every and (n_steps % cfg.log_every) == 0:
+        #     print_grad_block("update", model.update)
+        #     print_grad_block("scorer", model.scorer)
 
-            if hasattr(model, "encoder"):
-                print_grad_block("encoder", model.encoder)
+        #     if hasattr(model, "encoder"):
+        #         print_grad_block("encoder", model.encoder)
 
-            if hasattr(model, "aggregator"):
-                print_grad_block("aggregator", model.aggregator)
+        #     if hasattr(model, "aggregator"):
+        #         print_grad_block("aggregator", model.aggregator)
 
         if cfg.grad_clip and cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -176,10 +188,16 @@ def train_one_epoch_whole_bin(
                 f"jaccard={step_metrics['jaccard']:.4f} "
                 f"f1={step_metrics['f1']:.4f} "
                 f"pr_auc={step_metrics['pr_auc']:.4f} "
+                f"norm_pr_auc={step_metrics['norm_pr_auc']:.4f} "
                 f"roc_auc={step_metrics['roc_auc']:.4f} "
                 f"edge_density={metrics['edge_density']:.4f} "
                 f"pred_density={metrics['pred_edge_density']:.4f} "
                 f"pos={metrics['num_positive']:.0f}/{metrics['num_candidates']:.0f}"
+                # f"best_t_f1={metrics['best_threshold_by_f1']:.2f} "
+                # f"best_f1_swept={metrics['best_f1_swept']:.4f} "
+                # f"best_jacc_swept={metrics['best_jaccard_swept']:.4f} "
+                # f"bal_acc={metrics['balanced_acc']:.4f} "
+                # f"best_bal_acc_swept={metrics['best_balanced_acc_swept']:.4f} "
             )
 
         prev = curr

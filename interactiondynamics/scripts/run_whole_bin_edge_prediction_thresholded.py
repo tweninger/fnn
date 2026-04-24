@@ -36,8 +36,8 @@ from datasets.charged_particles import (
 
 RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
 PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-#EXPERIMENT_NAME = "whole_bin_edge_prediction_thresholded_all_models_.05_cutoff_plus_ift_sweep"
-EXPERIMENT_NAME = "test"
+EXPERIMENT_NAME = "whole_bin_edge_prediction_thresholded_all_models_.6_cutoff"
+#EXPERIMENT_NAME = "test"
 
 def build_thresholded_whole_bin_datasets(device: torch.device):
     datasets = {}
@@ -56,9 +56,9 @@ def build_thresholded_whole_bin_datasets(device: torch.device):
             charged_base_cfg,
             threshold_metric="distance_threshold",
             threshold_values=(
-                #2.23916,   # keep roughly 80% of edges
+                2.23916,   # keep roughly 80% of edges
                 4.582872,
-                # 6.782091,
+                6.782091,
                 
             ),
             threshold_splits_options=(("train", "val", "test"),),
@@ -144,13 +144,13 @@ def main() -> None:
             device=device,
             log_every=log_every,
             tbptt_steps=1,
-            decision_threshold=0.5,
+            decision_threshold=0.6,
             upper_triangle_only= True, #upper_triangle_only,
             include_self_loops=False,
             pos_weight=None,
             auto_pos_weight=True,
             max_auto_pos_weight=50.0,
-            selection_metric="jaccard",
+            selection_metric="roc_auc",
         )
         base_model_cfg = build_base_interaction_model_cfg(spec)
 
@@ -159,27 +159,27 @@ def main() -> None:
             seeds=(0,),
             aggregator=("ift", "hopfield", "settransformer", "sum", "deepsets"),
             upd=("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
-            dropout=(0.0,),
-            scorer_dropout=(0.0,),
+            dropout=(0.0, 0.01),
+            scorer_dropout=(0.0, 0.01),
             use_time_features=(False,),
             ift_kappa_param=("softplus",),
-            ift_dt=(0.01, 0.05, 0.1, 0.2),
-            ift_gamma=(0.0, 0.01, 0.05, 0.1),
-            ift_kappa_init=(0.1, 0.5, 1.0, 2.0),
-            ift_kappa_cap=(False,),
-            ift_kappa_max=(None,),
+            ift_dt=(0.2, 0.25, .3),
+            ift_gamma=(0.0, 0.01, 0.03),
+            ift_kappa_init=(2.0, 2.25, 2.5),
+            ift_kappa_cap=(False, True),
+            ift_kappa_max=(1.0, 2.0, 5.0, None),
         )
 
-        allowed_pairs = {
-            #("ift", "ift_update"),
-            ("sum", "lnn"),
-            #("sum", "tgn_gru"),
-            # ("deepsets", "tgn_gru"),
-        }
-        runs = [
-            run for run in runs
-            if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
-        ]
+        # allowed_pairs = {
+        #     #("ift", "ift_update"),
+        #     # ("sum", "lnn"),
+        #     # ("sum", "hnn"),
+        #     # ("deepsets", "tgn_gru"),
+        # }
+        # runs = [
+        #     run for run in runs
+        #     if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
+        # ]
 
         dataset_results: list[WholeBinRunResult] = []
         for run in runs:

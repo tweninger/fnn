@@ -105,10 +105,16 @@ class LNNUpdate(UpdateLaw):
             # key derivative - compute how the potential changes with respect to q
             # acceleration is the negative gradient of potential
             # aka... if potential energy is high in one direction, move downhill (yay mechanics)
+
+            #debug - fix 
+            create_graph = self.training
+            retain_graph = create_graph
+
             (dV_dq,) = torch.autograd.grad(
-                V_tot, q,
-                create_graph=torch.is_grad_enabled(),   # False in eval's enable_grad? Actually True here.
-                retain_graph=False,
+                V_tot,
+                q,
+                create_graph=create_graph,
+                retain_graph=retain_graph,
                 allow_unused=False,
             )
 
@@ -128,9 +134,10 @@ class LNNUpdate(UpdateLaw):
 
         # Store next state (q_next may carry a graph during training; eval it's fine)
         next_state = state.clone(detach=False)
-        next_state.node_prev = q_raw
-        next_state.node = q_next.detach()
-        #next_state.node = q_next if self.training else q_next.detach()
+        
+        next_state.node_prev = q_raw if self.training else q_raw.detach()
+        next_state.node = q_next if self.training else q_next.detach()
+
         aux = {
             "V_tot": V_tot.detach(),
             "qdot_norm": qdot.norm(dim=-1).mean().detach(),
