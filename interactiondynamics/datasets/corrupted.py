@@ -9,6 +9,13 @@ from core.events import EventBatch
 from datasets.interfaces import DataSpec, EventStreamDataset
 
 
+"""
+for fake pos, add safeties for:
+clean edges
+self loops
+duplicate fake edges
+"""
+
 @dataclass
 class CorruptedBatchInfo:
     clean: EventBatch
@@ -41,6 +48,56 @@ def _empty_like(batch: EventBatch) -> EventBatch:
         node_mask=batch.node_mask,
     )
 
+def _undirected_pair_keep_mask(
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    *,
+    num_nodes: int,
+    drop_real_prob: float,
+    generator: torch.Generator,
+    device: torch.device,
+    min_keep_per_nonempty_bin: int = 1,
+) -> torch.Tensor:
+    """
+    Return an event-level keep_mask, but sample keep/drop decisions
+    at the undirected-pair level.
+
+    So if both (i -> j) and (j -> i) exist, they share the same keep/drop decision.
+    """
+    M = int(src.numel())
+    if M == 0:
+        return torch.zeros((0,), dtype=torch.bool, device=device)
+
+    lo = torch.minimum(src.long(), dst.long())
+    hi = torch.maximum(src.long(), dst.long())
+
+    # one unique key per undirected pair
+    pair_keys = lo * int(num_nodes) + hi
+
+    unique_pairs, inverse = torch.unique(
+        pair_keys,
+        sorted=False,
+        return_inverse=True,
+    )
+
+    P = int(unique_pairs.numel())
+
+    pair_keep = torch.ones((P,), dtype=torch.bool, device=device)
+
+    if drop_real_prob > 0.0:
+        pair_keep = torch.rand(P, generator=generator, device=device) >= drop_real_prob
+
+        # Keep at least some physical pairs if the bin is nonempty.
+        if min_keep_per_nonempty_bin > 0:
+            min_keep = min(int(min_keep_per_nonempty_bin), P)
+            if int(pair_keep.sum().item()) < min_keep:
+                perm = torch.randperm(P, generator=generator, device=device)
+                pair_keep[:] = False
+                pair_keep[perm[:min_keep]] = True
+
+    # Convert pair-level decisions back to event-level decisions.
+    keep_mask = pair_keep[inverse]
+    return keep_mask
 
 def _make_generator(*, split: str, batch_idx: int, seed: int, device: torch.device) -> torch.Generator:
     split_offset = {
@@ -69,6 +126,7 @@ def corrupt_batch_with_metadata(
     fake_feature_mode: str = "zeros",   # "zeros" | "sample"
     avoid_self_loops: bool = True,
     min_keep_per_nonempty_bin: int = 1,
+    corrupt_unit: str = "undirected_pair",  # "directed_event" | "undirected_pair"
 ) -> CorruptedBatchInfo:
     """
     Deterministically corrupt one clean EventBatch and also return the hidden/removed positives.
@@ -84,6 +142,8 @@ def corrupt_batch_with_metadata(
         raise ValueError("add_fake_ratio must be >= 0")
     if fake_feature_mode not in {"zeros", "sample"}:
         raise ValueError("fake_feature_mode must be 'zeros' or 'sample'")
+    if corrupt_unit not in {"directed_event", "undirected_pair"}:
+        raise ValueError("corrupt_unit must be 'directed_event' or 'undirected_pair'")
 
     device = batch.src.device
     gen = _make_generator(split=split, batch_idx=batch_idx, seed=seed, device=device)
@@ -103,22 +163,55 @@ def corrupt_batch_with_metadata(
             fake=empty,
             keep_mask=torch.zeros((0,), dtype=torch.bool, device=device),
         )
-
+    if drop_real_prob == 0.0 and add_fake_ratio == 0.0:
+        empty = _empty_like(batch)
+        return CorruptedBatchInfo(
+            clean=batch,
+            observed=batch,
+            removed=empty,
+            fake=empty,
+            keep_mask=torch.ones((M,), dtype=torch.bool, device=device),
+        )
     # -------------------------
     # 1) choose which true events remain observed
     # -------------------------
-    keep_mask = torch.ones(M, dtype=torch.bool, device=device)
 
-    if drop_real_prob > 0.0:
-        keep_mask = torch.rand(M, generator=gen, device=device) >= drop_real_prob
+    if corrupt_unit == "directed_event":
+        # Old behavior: each raw event row gets its own coin flip.
+        keep_mask = torch.ones(M, dtype=torch.bool, device=device)
 
-        if min_keep_per_nonempty_bin > 0 and keep_mask.sum().item() < min(min_keep_per_nonempty_bin, M):
-            perm = torch.randperm(M, generator=gen, device=device)
-            keep_mask[:] = False
-            keep_mask[perm[: min(min_keep_per_nonempty_bin, M)]] = True
+        if drop_real_prob > 0.0:
+            keep_mask = torch.rand(M, generator=gen, device=device) >= drop_real_prob
+
+            if (
+                min_keep_per_nonempty_bin > 0
+                and keep_mask.sum().item() < min(min_keep_per_nonempty_bin, M)
+            ):
+                perm = torch.randperm(M, generator=gen, device=device)
+                keep_mask[:] = False
+                keep_mask[perm[: min(min_keep_per_nonempty_bin, M)]] = True
+
+    elif corrupt_unit == "undirected_pair":
+        # New behavior: (i -> j) and (j -> i) are kept/dropped together.
+        keep_mask = _undirected_pair_keep_mask(
+            src,
+            dst,
+            num_nodes=num_nodes,
+            drop_real_prob=drop_real_prob,
+            generator=gen,
+            device=device,
+            min_keep_per_nonempty_bin=min_keep_per_nonempty_bin,
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown corrupt_unit={corrupt_unit!r}. "
+            "Expected 'directed_event' or 'undirected_pair'."
+        )
 
     removed_mask = ~keep_mask
 
+    # These are required by the fake-edge and observed-batch code below.
     src_kept = src[keep_mask]
     dst_kept = dst[keep_mask]
     feats_kept = feats[keep_mask] if feats is not None else None
@@ -272,6 +365,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
         avoid_self_loops: bool = True,
         min_keep_per_nonempty_bin: int = 1,
         skip_empty_observed_bins: bool = True,
+        corrupt_unit: str = "undirected_pair", #directed_pair
     ):
         self.base_ds = base_ds
         self.drop_real_prob = float(drop_real_prob)
@@ -282,6 +376,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
         self.avoid_self_loops = bool(avoid_self_loops)
         self.min_keep_per_nonempty_bin = int(min_keep_per_nonempty_bin)
         self.skip_empty_observed_bins = bool(skip_empty_observed_bins)
+        self.corrupt_unit = corrupt_unit
 
         self._base_spec = self.base_ds.spec()
         self._num_nodes = int(self._base_spec.num_nodes)
@@ -297,6 +392,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
             "avoid_self_loops": self.avoid_self_loops,
             "min_keep_per_nonempty_bin": self.min_keep_per_nonempty_bin,
             "skip_empty_observed_bins": self.skip_empty_observed_bins,
+            "corrupt_unit": self.corrupt_unit,
         }
         return DataSpec(
             name=self._base_spec.name,
@@ -320,6 +416,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
             avoid_self_loops=self.avoid_self_loops,
             min_keep_per_nonempty_bin=self.min_keep_per_nonempty_bin,
             skip_empty_observed_bins=self.skip_empty_observed_bins,
+            corrupt_unit=self.corrupt_unit,
         )
 
 
@@ -338,6 +435,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
         avoid_self_loops: bool,
         min_keep_per_nonempty_bin: int,
         skip_empty_observed_bins: bool,
+        corrupt_unit: str,
     ):
         self.base_iterable = base_iterable
         self.split = split
@@ -350,6 +448,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
         self.avoid_self_loops = bool(avoid_self_loops)
         self.min_keep_per_nonempty_bin = int(min_keep_per_nonempty_bin)
         self.skip_empty_observed_bins = bool(skip_empty_observed_bins)
+        self.corrupt_unit = corrupt_unit
 
     def __iter__(self) -> Iterator[EventBatch]:
         for batch_idx, batch in enumerate(self.base_iterable):
@@ -368,6 +467,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
                 fake_feature_mode=self.fake_feature_mode,
                 avoid_self_loops=self.avoid_self_loops,
                 min_keep_per_nonempty_bin=self.min_keep_per_nonempty_bin,
+                corrupt_unit=self.corrupt_unit,
             )
 
             # For normal corrupted-only streams, skipping empty bins is okay.

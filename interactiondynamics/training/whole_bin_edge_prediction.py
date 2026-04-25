@@ -425,9 +425,15 @@ def run_one_whole_bin_experiment(
             f"test pr_auc={test_stats['pr_auc']:.4f}"
         )
 
-        val_metric = float(val_stats.get(selection_metric, float("nan")))
-        if val_metric > best_val_metric:
-            best_val_metric = val_metric
+        #safety check for pr auc / roc auc if curr bin has only positives
+        val_metric_raw = float(val_stats.get(selection_metric, float("nan")))
+        val_metric_for_compare = val_metric_raw
+
+        if val_metric_for_compare != val_metric_for_compare:  # NaN check
+            val_metric_for_compare = float("-inf")
+
+        if best_epoch < 0 or val_metric_for_compare > best_val_metric:
+            best_val_metric = val_metric_for_compare
             best_epoch = epoch
             best_snapshot = snapshot
             best_model_state = copy.deepcopy(model.state_dict())

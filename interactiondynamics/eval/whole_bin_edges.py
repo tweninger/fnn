@@ -241,12 +241,16 @@ def _resolve_pos_weight(
 
     pos = float(labels.sum().item())
     neg = float(labels.numel() - labels.sum().item())
-    if pos <= 0.0:
+
+    # Degenerate bin: all-negative or all-positive.
+    # BCE can still run, but auto pos_weight is not meaningful.
+    if pos <= 0.0 or neg <= 0.0:
         return None
 
     weight = neg / pos
     if max_auto_pos_weight is not None:
         weight = min(weight, float(max_auto_pos_weight))
+
     return torch.tensor(weight, device=labels.device, dtype=torch.float32)
 
 

@@ -41,6 +41,20 @@ RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
 PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
 #EXPERIMENT_NAME = "whole_bin_edge_prediction_thresholded_all_models_.6_cutoff"
 EXPERIMENT_NAME = "test"
+def debug_pair_symmetry(batch, num_nodes):
+    src = batch.src.long()
+    dst = batch.dst.long()
+
+    lo = torch.minimum(src, dst)
+    hi = torch.maximum(src, dst)
+    keys = lo * num_nodes + hi
+
+    unique_keys, counts = torch.unique(keys, return_counts=True)
+
+    vals, freqs = torch.unique(counts, return_counts=True)
+    print("pair row count distribution:")
+    for v, f in zip(vals.tolist(), freqs.tolist()):
+        print(f"  {v} row(s) per pair: {f} pairs")
 
 def build_thresholded_whole_bin_datasets(device: torch.device):
     datasets = {}
@@ -53,21 +67,21 @@ def build_thresholded_whole_bin_datasets(device: torch.device):
         min_edges_per_bin=1,
         threshold_splits=("train", "val", "test"),
     )
-    datasets[charged_base_cfg.name] = ChargedParticlesBinnedDataset(charged_base_cfg)
+    #datasets[charged_base_cfg.name] = ChargedParticlesBinnedDataset(charged_base_cfg)
 
-    # datasets.update(
-    #     make_charged_particle_threshold_variants(
-    #         charged_base_cfg,
-    #         threshold_metric="distance_threshold",
-    #         threshold_values=(
-    #             2.23916,   # keep roughly 80% of edges
-    #             4.582872,
-    #             6.782091,
+    datasets.update(
+        make_charged_particle_threshold_variants(
+            charged_base_cfg,
+            threshold_metric="distance_threshold",
+            threshold_values=(
+                2.23916,   # keep roughly 80% of edges
+                # 4.582872,
+                # 6.782091,
                 
-    #         ),
-    #         threshold_splits_options=(("train", "val", "test"),),
-    #     )
-    #)
+            ),
+            threshold_splits_options=(("train", "val", "test"),),
+        )
+    )
 
     # Example force-threshold sweep if you want it too:
     # datasets.update(
@@ -141,6 +155,8 @@ def main() -> None:
 
         # IMPORTANT for paired clean/corrupted streams
         skip_empty_observed_bins=False,
+        #Corrupt i->j and j-> so entire interaction is removed
+        corrupt_unit="undirected_pair",
     )
     datasets = build_thresholded_whole_bin_datasets(device)
     all_results: list[WholeBinRunResult] = []
@@ -153,6 +169,9 @@ def main() -> None:
             **CORRUPTION,
         )
 
+        b = next(iter(context_ds.bins("train")))
+        debug_pair_symmetry(b, context_ds.spec().num_nodes)
+        
         corruption_tag = (
             f"context_drop={CORRUPTION['drop_real_prob']:.2f}|"
             #f"context_fake={CORRUPTION['add_fake_ratio']:.2f}|"
@@ -211,7 +230,7 @@ def main() -> None:
 
         allowed_pairs = {
             ("ift", "ift_update"),
-            ("sum", "hopfield"),
+            ("sum", "hopfield_update"),
             ("sum", "tgn_gru"),
             # ("deepsets", "tgn_gru"),
         }
