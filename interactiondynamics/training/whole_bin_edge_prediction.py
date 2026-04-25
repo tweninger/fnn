@@ -5,6 +5,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, Iterable, Optional
+from itertools import zip_longest
 
 import torch
 
@@ -13,6 +14,36 @@ from eval.evaluate import EvalSlices
 from eval.whole_bin_edges import whole_bin_edge_loss_and_metrics
 from experiments.interaction_prediction_runs import SweepRun
 from utils.repro import set_seed
+
+_SENTINEL = object()
+
+
+def _aligned_target_context_bins(
+    target_bins: Iterable[EventBatch],
+    context_bins: Optional[Iterable[EventBatch]] = None,
+):
+    """
+    Yields (clean_target_bin, observed_context_bin).
+
+    If context_bins is None, this behaves like the original clean setup:
+    clean target == observed context.
+
+    If context_bins is provided, it must be aligned 1-to-1 with target_bins.
+    """
+    if context_bins is None:
+        for clean in target_bins:
+            yield clean, clean
+        return
+
+    for i, pair in enumerate(zip_longest(target_bins, context_bins, fillvalue=_SENTINEL)):
+        clean, observed = pair
+        if clean is _SENTINEL or observed is _SENTINEL:
+            raise RuntimeError(
+                f"Clean target stream and corrupted context stream have different lengths at bin {i}. "
+                "Do not skip empty observed bins in paired corruption mode."
+            )
+        yield clean, observed
+
 
 def print_grad_block(name, module):
     total = 0.0
@@ -116,6 +147,7 @@ def train_one_epoch_whole_bin(
     bins: Iterable[EventBatch],
     optimizer: torch.optim.Optimizer,
     cfg: WholeBinTrainConfig,
+    context_bins: Optional[Iterable[EventBatch]] = None,
 ) -> Dict[str, float]:
     model.train()
     device = torch.device(cfg.device)
@@ -125,15 +157,21 @@ def train_one_epoch_whole_bin(
     kappa_sum = 0.0
     kappa_n = 0
 
-    prev: Optional[EventBatch] = None
+    prev_context: Optional[EventBatch] = None
     n_steps = 0
-    for curr in bins:
-        curr = curr.to(device)
-        if prev is None:
-            prev = curr
+
+    for curr_clean, curr_context in _aligned_target_context_bins(bins, context_bins):
+        curr_clean = curr_clean.to(device)
+        curr_context = curr_context.to(device)
+
+        if prev_context is None:
+            prev_context = curr_context
             continue
 
-        state, aux = model.step(state, prev)
+        # HI BARBIE!!
+        # update memory using corrupted/observed previous bin
+        state, aux = model.step(state, prev_context)
+
         if aux is not None and "kappa" in aux:
             k = aux["kappa"]
             if torch.is_tensor(k):
@@ -144,10 +182,11 @@ def train_one_epoch_whole_bin(
 
         should_log = bool(cfg.log_every and ((n_steps + 1) % cfg.log_every == 0))
 
+        # BUT train against clean current bin labels
         loss, metrics = whole_bin_edge_loss_and_metrics(
             model=model,
             state=state,
-            next_events=curr,
+            next_events=curr_clean,
             num_nodes=cfg.num_nodes,
             upper_triangle_only=cfg.upper_triangle_only,
             include_self_loops=cfg.include_self_loops,
@@ -157,27 +196,33 @@ def train_one_epoch_whole_bin(
             max_auto_pos_weight=cfg.max_auto_pos_weight,
             debug_scores=should_log,
         )
+
         loss.backward()
-        
         # if cfg.log_every and (n_steps % cfg.log_every) == 0:
-        #     print_grad_block("update", model.update)
-        #     print_grad_block("scorer", model.scorer)
+                #     print_grad_block("update", model.update)
+                #     print_grad_block("scorer", model.scorer)
 
-        #     if hasattr(model, "encoder"):
-        #         print_grad_block("encoder", model.encoder)
+                #     if hasattr(model, "encoder"):
+                #         print_grad_block("encoder", model.encoder)
 
-        #     if hasattr(model, "aggregator"):
-        #         print_grad_block("aggregator", model.aggregator)
+                #     if hasattr(model, "aggregator"):
+                #         print_grad_block("aggregator", model.aggregator)
 
         if cfg.grad_clip and cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+
         optimizer.step()
 
         if cfg.tbptt_steps and ((n_steps + 1) % cfg.tbptt_steps == 0):
             if state is not None:
                 state.detach_()
 
-        step_metrics = {"loss": float(loss.item()), **metrics}
+        step_metrics = {
+            "loss": float(loss.item()),
+            **metrics,
+            "context_prev_events": float(prev_context.num_events),
+            "clean_curr_events": float(curr_clean.num_events),
+        }
         _acc_update(acc, step_metrics)
         n_steps += 1
 
@@ -192,15 +237,13 @@ def train_one_epoch_whole_bin(
                 f"roc_auc={step_metrics['roc_auc']:.4f} "
                 f"edge_density={metrics['edge_density']:.4f} "
                 f"pred_density={metrics['pred_edge_density']:.4f} "
-                f"pos={metrics['num_positive']:.0f}/{metrics['num_candidates']:.0f}"
-                # f"best_t_f1={metrics['best_threshold_by_f1']:.2f} "
-                # f"best_f1_swept={metrics['best_f1_swept']:.4f} "
-                # f"best_jacc_swept={metrics['best_jaccard_swept']:.4f} "
-                # f"bal_acc={metrics['balanced_acc']:.4f} "
-                # f"best_bal_acc_swept={metrics['best_balanced_acc_swept']:.4f} "
+                f"pos={metrics['num_positive']:.0f}/{metrics['num_candidates']:.0f} "
+                f"context_prev_edges={prev_context.num_events} "
+                f"clean_curr_edges={curr_clean.num_events}"
             )
 
-        prev = curr
+        # advance observed stream, not clean stream
+        prev_context = curr_context
 
     out = _acc_finalize(acc)
     if kappa_n > 0:
@@ -214,6 +257,7 @@ def evaluate_whole_bin_stream_sliced(
     cfg: WholeBinTrainConfig,
     *,
     slices: EvalSlices,
+    context_bins: Optional[Iterable[EventBatch]] = None,
 ) -> Dict[str, float]:
     model.eval()
     device = torch.device(cfg.device)
@@ -223,21 +267,26 @@ def evaluate_whole_bin_stream_sliced(
     early = _acc_init()
     late = _acc_init()
 
-    prev: Optional[EventBatch] = None
+    prev_context: Optional[EventBatch] = None
     scored_step = 0
 
     with torch.no_grad():
-        for events in bins:
-            events = events.to(device)
-            if prev is None:
-                prev = events
+        for curr_clean, curr_context in _aligned_target_context_bins(bins, context_bins):
+            curr_clean = curr_clean.to(device)
+            curr_context = curr_context.to(device)
+
+            if prev_context is None:
+                prev_context = curr_context
                 continue
 
-            state, _ = model.step(state, prev)
+            # update memory using corrupted/observed previous bin
+            state, _ = model.step(state, prev_context)
+
+            # score against clean current bin
             loss_t, metrics = whole_bin_edge_loss_and_metrics(
                 model=model,
                 state=state,
-                next_events=events,
+                next_events=curr_clean,
                 num_nodes=cfg.num_nodes,
                 upper_triangle_only=cfg.upper_triangle_only,
                 include_self_loops=cfg.include_self_loops,
@@ -246,18 +295,28 @@ def evaluate_whole_bin_stream_sliced(
                 auto_pos_weight=cfg.auto_pos_weight,
                 max_auto_pos_weight=cfg.max_auto_pos_weight,
             )
+
             if state is not None:
                 state.detach_()
 
-            step_metrics = {"loss": float(loss_t.item()), **metrics}
+            step_metrics = {
+                "loss": float(loss_t.item()),
+                **metrics,
+                "context_prev_events": float(prev_context.num_events),
+                "clean_curr_events": float(curr_clean.num_events),
+            }
+
             _acc_update(overall, step_metrics)
+
             if scored_step < slices.early_steps:
                 _acc_update(early, step_metrics)
             else:
                 _acc_update(late, step_metrics)
 
             scored_step += 1
-            prev = events
+
+            # advance observed stream, not clean stream
+            prev_context = curr_context
 
     o = _acc_finalize(overall)
     e = _acc_finalize(early)
@@ -271,6 +330,7 @@ def evaluate_whole_bin_stream_sliced(
         out[f"{prefix}_pr_auc"] = block["pr_auc"]
         out[f"{prefix}_roc_auc"] = block["roc_auc"]
         out[f"{prefix}_steps"] = block["steps"]
+
     return out
 
 
@@ -285,7 +345,9 @@ def run_one_whole_bin_experiment(
     save_jsonl_path: Optional[str] = None,
     save_summary_path: Optional[str] = None,
     dataset_name: Optional[str] = None,
+    context_ds=None,  
 ) -> tuple[WholeBinRunResult, torch.nn.Module, WholeBinTrainConfig]:
+    
     device = torch.device(base_train_cfg.device)
     set_seed(run.seed)
 
@@ -311,10 +373,37 @@ def run_one_whole_bin_experiment(
 
     t0 = time.time()
     for epoch in range(1, epochs + 1):
-        train_stats_step = train_one_epoch_whole_bin(model, ds.bins("train"), optimizer, train_cfg)
-        train_eval = evaluate_whole_bin_stream_sliced(model, ds.bins("train"), train_cfg, slices=eval_slices)
-        val_stats = evaluate_whole_bin_stream_sliced(model, ds.bins("val"), train_cfg, slices=eval_slices)
-        test_stats = evaluate_whole_bin_stream_sliced(model, ds.bins("test"), train_cfg, slices=eval_slices)
+        train_stats_step = train_one_epoch_whole_bin(
+            model,
+            ds.bins("train"),                       # clean current labels
+            optimizer,
+            train_cfg,
+            context_bins=context_ds.bins("train") if context_ds is not None else None,
+        )
+
+        train_eval = evaluate_whole_bin_stream_sliced(
+            model,
+            ds.bins("train"),                       # clean current labels
+            train_cfg,
+            slices=eval_slices,
+            context_bins=context_ds.bins("train") if context_ds is not None else None,
+        )
+
+        val_stats = evaluate_whole_bin_stream_sliced(
+            model,
+            ds.bins("val"),
+            train_cfg,
+            slices=eval_slices,
+            context_bins=context_ds.bins("val") if context_ds is not None else None,
+        )
+
+        test_stats = evaluate_whole_bin_stream_sliced(
+            model,
+            ds.bins("test"),
+            train_cfg,
+            slices=eval_slices,
+            context_bins=context_ds.bins("test") if context_ds is not None else None,
+        )
 
         snapshot = {
             "epoch": epoch,

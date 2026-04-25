@@ -271,6 +271,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
         fake_feature_mode: str = "zeros",
         avoid_self_loops: bool = True,
         min_keep_per_nonempty_bin: int = 1,
+        skip_empty_observed_bins: bool = True,
     ):
         self.base_ds = base_ds
         self.drop_real_prob = float(drop_real_prob)
@@ -280,6 +281,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
         self.fake_feature_mode = fake_feature_mode
         self.avoid_self_loops = bool(avoid_self_loops)
         self.min_keep_per_nonempty_bin = int(min_keep_per_nonempty_bin)
+        self.skip_empty_observed_bins = bool(skip_empty_observed_bins)
 
         self._base_spec = self.base_ds.spec()
         self._num_nodes = int(self._base_spec.num_nodes)
@@ -294,6 +296,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
             "fake_feature_mode": self.fake_feature_mode,
             "avoid_self_loops": self.avoid_self_loops,
             "min_keep_per_nonempty_bin": self.min_keep_per_nonempty_bin,
+            "skip_empty_observed_bins": self.skip_empty_observed_bins,
         }
         return DataSpec(
             name=self._base_spec.name,
@@ -316,6 +319,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
             fake_feature_mode=self.fake_feature_mode,
             avoid_self_loops=self.avoid_self_loops,
             min_keep_per_nonempty_bin=self.min_keep_per_nonempty_bin,
+            skip_empty_observed_bins=self.skip_empty_observed_bins,
         )
 
 
@@ -333,6 +337,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
         fake_feature_mode: str,
         avoid_self_loops: bool,
         min_keep_per_nonempty_bin: int,
+        skip_empty_observed_bins: bool,
     ):
         self.base_iterable = base_iterable
         self.split = split
@@ -344,6 +349,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
         self.fake_feature_mode = fake_feature_mode
         self.avoid_self_loops = bool(avoid_self_loops)
         self.min_keep_per_nonempty_bin = int(min_keep_per_nonempty_bin)
+        self.skip_empty_observed_bins = bool(skip_empty_observed_bins)
 
     def __iter__(self) -> Iterator[EventBatch]:
         for batch_idx, batch in enumerate(self.base_iterable):
@@ -364,11 +370,12 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
                 min_keep_per_nonempty_bin=self.min_keep_per_nonempty_bin,
             )
 
-            # keep current behavior: skip totally empty observed bins
-            if info.observed.num_events == 0:
+            # For normal corrupted-only streams, skipping empty bins is okay.
+            # For clean-target/corrupted-context streams, skipping breaks time alignment.
+            if self.skip_empty_observed_bins and info.observed.num_events == 0:
                 continue
-            yield info.observed
 
+            yield info.observed
 
 def wrap_dataset_dict_with_corruption(
     datasets: Mapping[str, EventStreamDataset],
