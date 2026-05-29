@@ -19,7 +19,7 @@ from data.jodie import JODIEBinnedDataset, JODIEConfig # type: ignore
 from models.tgn_model import build_tgn_model
 
 from core.events import EventBatch
-from eval.ranking import ranking_loss_and_metrics
+from eval.ranking_metrics import ranking_loss_and_metrics
 
 
 

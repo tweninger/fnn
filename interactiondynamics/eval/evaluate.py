@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple
+import math
+from typing import Dict, Iterable, Optional
 import torch
 
 from core.events import EventBatch
-from eval.ranking import ranking_loss_and_metrics
+from eval.ranking_metrics import ranking_loss_and_metrics
 
 
 @dataclass
@@ -15,21 +16,29 @@ class EvalSlices:
     # late = everything after early_steps
 
 
-def _acc_init() -> Dict[str, float]:
-    return {"loss_sum": 0.0, "mrr_sum": 0.0, "n": 0.0}
+def _acc_init() -> dict:
+    return {"loss_sum": 0.0, "metric_sums": {}, "metric_counts": {}, "n": 0.0}
 
 
-def _acc_update(acc: Dict[str, float], loss: float, mrr: float) -> None:
+def _acc_update(acc: dict, loss: float, metrics: Dict[str, float]) -> None:
     acc["loss_sum"] += float(loss)
-    acc["mrr_sum"] += float(mrr)
+    for key, value in metrics.items():
+        value_f = float(value)
+        if math.isnan(value_f):
+            continue
+        acc["metric_sums"][key] = acc["metric_sums"].get(key, 0.0) + value_f
+        acc["metric_counts"][key] = acc["metric_counts"].get(key, 0.0) + 1.0
     acc["n"] += 1.0
 
 
-def _acc_finalize(acc: Dict[str, float]) -> Dict[str, float]:
+def _acc_finalize(acc: dict) -> Dict[str, float]:
     if acc["n"] <= 0:
-        return {"loss": 0.0, "mrr": 0.0, "steps": 0}
+        return {"loss": 0.0, "steps": 0}
     n = acc["n"]
-    return {"loss": acc["loss_sum"] / n, "mrr": acc["mrr_sum"] / n, "steps": int(n)}
+    out = {"loss": acc["loss_sum"] / n, "steps": int(n)}
+    for key, value in acc["metric_sums"].items():
+        out[key] = value / acc["metric_counts"][key]
+    return out
 
 
 @torch.no_grad()
@@ -82,13 +91,11 @@ def evaluate_stream_sliced(
             state.detach_()
 
         loss_val = float(loss_t.item())
-        mrr_val = float(metrics["mrr"])
-
-        _acc_update(overall, loss_val, mrr_val)
+        _acc_update(overall, loss_val, metrics)
         if scored_step < slices.early_steps:
-            _acc_update(early, loss_val, mrr_val)
+            _acc_update(early, loss_val, metrics)
         else:
-            _acc_update(late, loss_val, mrr_val)
+            _acc_update(late, loss_val, metrics)
 
         scored_step += 1
         prev = events
@@ -98,19 +105,11 @@ def evaluate_stream_sliced(
     e = _acc_finalize(early)
     l = _acc_finalize(late)
 
-    # overall
-    out["loss"] = o["loss"]
-    out["mrr"] = o["mrr"]
-    out["steps"] = float(o["steps"])
+    for key, value in o.items():
+        out[key] = float(value)
 
-    # early
-    out["early_loss"] = e["loss"]
-    out["early_mrr"] = e["mrr"]
-    out["early_steps"] = float(e["steps"])
-
-    # late
-    out["late_loss"] = l["loss"]
-    out["late_mrr"] = l["mrr"]
-    out["late_steps"] = float(l["steps"])
+    for prefix, block in (("early", e), ("late", l)):
+        for key, value in block.items():
+            out[f"{prefix}_{key}"] = float(value)
 
     return out

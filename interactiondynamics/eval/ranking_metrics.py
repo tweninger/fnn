@@ -1,5 +1,4 @@
 from __future__ import annotations
-from asyncio import events
 from dataclasses import dataclass
 from typing import Dict, Tuple, cast
 
@@ -7,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from core.events import EventBatch
+from eval.prediction_metrics import binary_metrics_from_logits
 
 
 @dataclass
@@ -103,32 +103,97 @@ def softmax_ranking_loss(scores: torch.Tensor, M: int, K1: int) -> torch.Tensor:
     labels = torch.zeros((M,), device=scores.device, dtype=torch.long)  # pos at index 0
     return F.cross_entropy(logits, labels, reduction="mean")
 
+
 @torch.no_grad()
-def mrr_and_hits(
+def ranking_metrics(
     scores: torch.Tensor,
     M: int,
     K1: int,
     hits_ks=(1, 3, 10),
 ) -> Dict[str, float]:
     """
-    Compute rank of the positive (index 0) among K1 candidates for each event.
+    Compute sampled ranking diagnostics.
+
+    Candidate 0 is the observed positive; candidates 1: are sampled negatives.
+    The default rank keeps the historical strict tie behavior. Pessimistic rank
+    counts ties against the positive, which is useful for catching collapsed
+    scorers that assign identical values to many candidates.
     """
     logits = scores.view(M, K1)
-    # Higher is better. Rank = 1 + number of candidates strictly greater than positive.
+    labels = torch.zeros((M, K1), device=scores.device)
+    labels[:, 0] = 1.0
+
     pos = logits[:, 0:1]
+    neg = logits[:, 1:]
+
+    # Higher is better. Historical rank ignores ties with the positive.
     rank = 1 + (logits > pos).sum(dim=1)  # (M,)
+    rank_pessimistic = 1 + (neg >= pos).sum(dim=1)  # (M,)
 
     mrr = (1.0 / rank.float()).mean().item()
-    out = {"mrr": mrr, "mean_rank": rank.float().mean().item()}
+    mrr_pessimistic = (1.0 / rank_pessimistic.float()).mean().item()
 
-    # S = scores.view(M, K1)
-    # how many times is argmax at column 0?
-    # top0 = (S.argmax(dim=1) == 0).float().mean().item()
-    # print("DEBUG top0 frac:", top0, "scores[0]:", S[0].detach().cpu().tolist()[:min(10, K1)])
+    max_neg = neg.max(dim=1).values if neg.numel() > 0 else torch.full_like(pos.squeeze(1), float("-inf"))
+    margin = pos.squeeze(1) - max_neg
+    probs = torch.softmax(logits, dim=1)
+    pos_prob = probs[:, 0]
+    top_prob = probs.max(dim=1).values
+
+    pairwise_gt = (pos > neg).float() if neg.numel() > 0 else torch.ones((M, 0), device=scores.device)
+    pairwise_eq = (pos == neg).float() if neg.numel() > 0 else torch.zeros((M, 0), device=scores.device)
+    if neg.numel() > 0:
+        pairwise_acc = pairwise_gt.mean().item()
+        pairwise_auc_tie_half = (pairwise_gt + 0.5 * pairwise_eq).mean().item()
+        tie_rate = pairwise_eq.mean().item()
+        neg_mean = neg.mean().item()
+        neg_std = neg.std(unbiased=False).item()
+    else:
+        pairwise_acc = 1.0
+        pairwise_auc_tie_half = 1.0
+        tie_rate = 0.0
+        neg_mean = float("nan")
+        neg_std = float("nan")
+
+    out = {
+        "mrr": mrr,
+        "mrr_pessimistic": mrr_pessimistic,
+        "mean_rank": rank.float().mean().item(),
+        "mean_rank_pessimistic": rank_pessimistic.float().mean().item(),
+        "median_rank": rank.float().median().item(),
+        "top1_acc": (rank == 1).float().mean().item(),
+        "pairwise_acc": pairwise_acc,
+        "pairwise_auc_tie_half": pairwise_auc_tie_half,
+        "tie_rate": tie_rate,
+        "margin_mean": margin.mean().item(),
+        "margin_median": margin.median().item(),
+        "pos_score_mean": pos.mean().item(),
+        "pos_score_std": pos.std(unbiased=False).item(),
+        "neg_score_mean": neg_mean,
+        "neg_score_std": neg_std,
+        "pos_prob_mean": pos_prob.mean().item(),
+        "top_prob_mean": top_prob.mean().item(),
+        "bce_loss": F.binary_cross_entropy_with_logits(logits, labels).item(),
+        "softmax_loss": F.cross_entropy(
+            logits,
+            torch.zeros((M,), device=scores.device, dtype=torch.long),
+            reduction="mean",
+        ).item(),
+        **binary_metrics_from_logits(logits=logits, labels=labels),
+    }
 
     for k in hits_ks:
         out[f"hits@{k}"] = (rank <= k).float().mean().item()
+        out[f"hits_pessimistic@{k}"] = (rank_pessimistic <= k).float().mean().item()
     return out
+
+
+def mrr_and_hits(
+    scores: torch.Tensor,
+    M: int,
+    K1: int,
+    hits_ks=(1, 3, 10),
+) -> Dict[str, float]:
+    return ranking_metrics(scores=scores, M=M, K1=K1, hits_ks=hits_ks)
 
 
 def ranking_loss_and_metrics(
@@ -204,5 +269,5 @@ def ranking_loss_and_metrics(
     #loss = bce_ranking_loss(scores, M=M, K1=K1)  
     loss = softmax_ranking_loss(scores, M=M, K1=K1)
 
-    metrics = mrr_and_hits(scores.detach(), M=M, K1=K1)
+    metrics = ranking_metrics(scores.detach(), M=M, K1=K1)
     return loss, metrics
