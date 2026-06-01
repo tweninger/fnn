@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Callable, Dict, List, Tuple, Optional, Literal, Sequence, Iterable
+from typing import Any, Callable, Dict, List, Tuple, Optional, Literal, Sequence, Iterable, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -11,6 +11,7 @@ __all__ = [
     "run_simulator",
     "SIMULATORS",
     "simulate_wave",
+    "simulate_dripping_wave_on_graph",
     "simulate_field_dynamics",
     "simulate_sis",
     "simulate_threshold",
@@ -41,7 +42,7 @@ def _graph_laplacian_from_csr(A: csr_matrix) -> csr_matrix:
     A.eliminate_zeros()
     deg = np.asarray(A.sum(axis=1)).ravel().astype(np.float32)
     D = diags(deg, format="csr")
-    return (D - A).tocsr()
+    return cast(csr_matrix, (D - A).tocsr())
 
 def _bfs_hops_csr(adj: csr_matrix, src: int) -> np.ndarray:
     """Hop distances (0,1,2,...) from src on an unweighted CSR graph."""
@@ -346,6 +347,8 @@ def simulate_wave(
     return bins, H_out, meta_list
 
 SIMULATORS["wave"] = simulate_wave
+simulate_dripping_wave_on_graph = simulate_wave
+SIMULATORS["dripping_wave"] = simulate_dripping_wave_on_graph
 
 ForcingKind = Literal["none", "impulse", "ricker_train", "sin", "chirp", "multi_sin", "moving_ricker"]
 ReactionKind = Literal["none", "allen_cahn", "fisher_kpp"]

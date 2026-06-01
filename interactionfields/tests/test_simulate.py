@@ -35,9 +35,11 @@ def test_dripping_wave_bins_and_states_shapes():
         return_states=True,
         edge_threshold=0.0,
     )
+    assert A.shape is not None
+    n_nodes = A.shape[0]
     assert isinstance(bins, list) and len(bins) == T
     assert isinstance(meta_list, list) and len(meta_list) == T
-    assert isinstance(H, np.ndarray) and H.shape == (T, A.shape[0])
+    assert isinstance(H, np.ndarray) and H.shape == (T, n_nodes)
     for B in bins:
         assert isinstance(B, sp.csr_matrix)
         assert B.dtype == np.uint8

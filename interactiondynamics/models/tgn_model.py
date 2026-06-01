@@ -1,19 +1,19 @@
 # models/tgn_model.py
-from core.interfaces import ComposedInteractionModel
-from encoders.event_encoder import TGNEventEncoder
-from aggregators.deepsets import DeepSetsAggregator
-from aggregators.sum import SumAggregator
-from aggregators.settransformers import SetTransformerAggregator
-from aggregators.hopfield import HopfieldAggregator
-from aggregators.ift import IFTLaplacianAggregator
-from updates.ift_update import IFTDiffusionUpdate
-from updates.hopfield_update import HopfieldUpdate
-from updates.hnn import HNNUpdate
-from updates.lnn import LNNUpdate
-from updates.tgn_gru import TGNGRUUpdate
-from scorers.event_scorer import DotProductScorer, MLPEdgeScorer
-from core.config import ModelConfig
-from data.interfaces import DataSpec
+from interactiondynamics.aggregators.deepsets import DeepSetsAggregator
+from interactiondynamics.aggregators.hopfield import HopfieldAggregator
+from interactiondynamics.aggregators.ift import IFTLaplacianAggregator
+from interactiondynamics.aggregators.settransformers import SetTransformerAggregator
+from interactiondynamics.aggregators.sum import SumAggregator
+from interactiondynamics.core.config import ModelConfig
+from interactiondynamics.core.interfaces import ComposedInteractionModel
+from interactiondynamics.data.interfaces import DataSpec
+from interactiondynamics.encoders.event_encoder import TGNEventEncoder
+from interactiondynamics.scorers.event_scorer import DotProductScorer, MLPEdgeScorer
+from interactiondynamics.updates.hnn import HNNUpdate
+from interactiondynamics.updates.hopfield_update import HopfieldUpdate
+from interactiondynamics.updates.ift_update import IFTDiffusionUpdate
+from interactiondynamics.updates.lnn import LNNUpdate
+from interactiondynamics.updates.tgn_gru import TGNGRUUpdate
 
 def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
     num_nodes = spec.num_nodes

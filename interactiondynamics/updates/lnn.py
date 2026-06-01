@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core.interfaces import ModelState, UpdateLaw
+from interactiondynamics.core.interfaces import ModelState, UpdateLaw
 
 
 def _mlp(in_dim: int, hidden: int, layers: int, out_dim: int, dropout: float = 0.0) -> nn.Sequential:
@@ -126,4 +126,3 @@ class LNNUpdate(UpdateLaw):
             "qddot_norm": qddot.norm(dim=-1).mean().detach(),
         }
         return next_state, aux
-

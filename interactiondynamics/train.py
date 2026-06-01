@@ -6,20 +6,16 @@ import random
 import time
 import numpy as np
 import torch
-from typing import Callable, Dict, Iterable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence
 from dataclasses import asdict, dataclass
 
-from traitlets import Any
-
-from core.events import EventBatch
-from data.toy import ToyShiftConfig, ToyShiftDataset
-from eval.evaluate import EvalSlices, evaluate_stream_sliced
-from core.config import ModelConfig
-from data.jodie import JODIEBinnedDataset, JODIEConfig # type: ignore
-from models.tgn_model import build_tgn_model
-
-from core.events import EventBatch
-from eval.ranking_metrics import ranking_loss_and_metrics
+from interactiondynamics.core.config import ModelConfig
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.data.jodie import JODIEBinnedDataset, JODIEConfig # type: ignore
+from interactiondynamics.data.toy import ToyShiftConfig, ToyShiftDataset
+from interactiondynamics.eval.evaluate import EvalSlices, evaluate_stream_sliced
+from interactiondynamics.eval.ranking_metrics import ranking_loss_and_metrics
+from interactiondynamics.models.tgn_model import build_tgn_model
 
 
 

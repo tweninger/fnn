@@ -6,8 +6,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from core.interfaces import Aggregator, ModelState
-from core.events import EventBatch
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.core.interfaces import Aggregator, ModelState
 
 
 class MAB(nn.Module):

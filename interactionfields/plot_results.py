@@ -1076,7 +1076,7 @@ def animate_3d(
     else:
         t_end_int = int(t_end)
     t_start = max(0, int(t_start))
-    t_end = min(T, t_end_int)
+    t_end_frame = min(T, t_end_int)
 
     # ── choose the z-field provider ───────────────────────────────────────────
     if z_field_mode == "data":
@@ -1264,7 +1264,7 @@ def animate_3d(
         title.set_text(f"Grid wave — frame t={tt}")
         return (tuple(x for x in (sc, lc, title) if x is not None))
 
-    return FuncAnimation(fig, update, frames=range(t_start, t_end), interval=interval_ms, blit=False)
+    return FuncAnimation(fig, update, frames=range(t_start, t_end_frame), interval=interval_ms, blit=False)
 
 # =============================================================================
 #                           EDGES-ONLY RENDERING MODES

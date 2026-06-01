@@ -5,8 +5,8 @@ from typing import Dict, Tuple, cast
 import torch
 import torch.nn.functional as F
 
-from core.events import EventBatch
-from eval.prediction_metrics import binary_metrics_from_logits
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.eval.prediction_metrics import binary_metrics_from_logits
 
 
 @dataclass

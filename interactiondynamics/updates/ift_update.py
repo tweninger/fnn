@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core.interfaces import UpdateLaw, ModelState
+from interactiondynamics.core.interfaces import ModelState, UpdateLaw
 
 KappaParam = Literal["exp", "softplus"]
 class IFTDiffusionUpdate(UpdateLaw):

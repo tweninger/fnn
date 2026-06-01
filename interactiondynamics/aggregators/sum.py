@@ -1,6 +1,6 @@
 import torch
-from core.interfaces import Aggregator, ModelState
-from core.events import EventBatch
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.core.interfaces import Aggregator, ModelState
 
 class SumAggregator(Aggregator):
     """

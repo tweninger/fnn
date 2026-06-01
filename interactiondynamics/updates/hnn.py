@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from core.interfaces import ModelState, UpdateLaw
+from interactiondynamics.core.interfaces import ModelState, UpdateLaw
 
 
 def _mlp(in_dim: int, hidden: int, layers: int, out_dim: int, dropout: float = 0.0) -> nn.Sequential:

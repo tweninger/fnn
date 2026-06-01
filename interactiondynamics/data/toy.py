@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, cast
 import torch
 
-from core.events import EventBatch
-from data.interfaces import DataSpec, EventStreamDataset
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.data.interfaces import DataSpec, EventStreamDataset
 
 
 @dataclass

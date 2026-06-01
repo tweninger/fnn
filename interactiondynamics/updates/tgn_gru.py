@@ -2,7 +2,7 @@ from typing import Dict, Tuple, Optional
 import torch
 import torch.nn as nn
 
-from core.interfaces import UpdateLaw, ModelState
+from interactiondynamics.core.interfaces import ModelState, UpdateLaw
 
 
 class TGNGRUUpdate(UpdateLaw):

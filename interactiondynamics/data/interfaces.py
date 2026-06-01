@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
 import torch
 
-from core.events import EventBatch
+from interactiondynamics.core.events import EventBatch
 
 
 @dataclass(frozen=True)

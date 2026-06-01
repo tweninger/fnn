@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ift"
+version = "0.1.0"
+description = "Interaction field and interaction dynamics experiments."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "matplotlib>=3.8",
+  "networkx>=3.2",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pillow>=10.0",
+  "scikit-learn>=1.4",
+  "scipy>=1.12",
+  "torch>=2.0",
+  "torch-geometric>=2.5",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pyright>=1.1.380",
+  "ruff>=0.6.0",
+]
+notebook = [
+  "ipykernel>=6.29",
+  "jupyterlab>=4.0",
+]
+
+[tool.setuptools]
+packages = [
+  "interactiondynamics",
+  "interactiondynamics.aggregators",
+  "interactiondynamics.core",
+  "interactiondynamics.data",
+  "interactiondynamics.encoders",
+  "interactiondynamics.eval",
+  "interactiondynamics.models",
+  "interactiondynamics.scorers",
+  "interactiondynamics.updates",
+  "interactionfields",
+  "interactionfields.scripts",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["interactionfields/tests"]
+pythonpath = [
+  ".",
+]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+  ".git",
+  ".venv",
+  "venv",
+  "data",
+  "notebooks",
+]
+
+[tool.ruff.lint]
+select = [
+  "F821",
+  "F822",
+  "F823",
+]
+
+[tool.pyright]
+include = [
+  "interactiondynamics",
+  "interactionfields",
+]
+exclude = [
+  "**/__pycache__",
+  "venv",
+  "data",
+  "notebooks",
+]
+venvPath = "."
+venv = "venv"
+extraPaths = [
+  ".",
+]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportPrivateImportUsage = false

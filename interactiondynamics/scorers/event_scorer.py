@@ -2,8 +2,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from core.interfaces import ModelState, ScoringHead
-from core.events import EventBatch
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.core.interfaces import ModelState, ScoringHead
 
 
 class DotProductScorer(ScoringHead):
