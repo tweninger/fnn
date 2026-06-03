@@ -9,6 +9,7 @@ from interactiondynamics.core.interfaces import ComposedInteractionModel
 from interactiondynamics.data.interfaces import DataSpec
 from interactiondynamics.encoders.event_encoder import TGNEventEncoder
 from interactiondynamics.scorers.event_scorer import DotProductScorer, MLPEdgeScorer
+from interactiondynamics.scorers.node_scorer import MLPNodeScorer
 from interactiondynamics.updates.hnn import HNNUpdate
 from interactiondynamics.updates.hopfield_update import HopfieldUpdate
 from interactiondynamics.updates.ift_update import IFTDiffusionUpdate
@@ -137,6 +138,13 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
     if sc_fn is None:
         raise NotImplementedError(f"scorer={cfg.scorer} not supported")
     scorer = sc_fn(cfg)
+    node_scorer = None
+    if getattr(cfg, "use_node_scorer", False):
+        node_scorer = MLPNodeScorer(
+            node_dim=cfg.node_dim,
+            hidden_dim=getattr(cfg, "node_scorer_hidden", 128),
+            dropout=cfg.scorer_dropout,
+        )
 
     return ComposedInteractionModel(
         encoder=encoder,
@@ -144,4 +152,5 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
         update=update,
         scorer=scorer,
         num_nodes=num_nodes,
+        node_scorer=node_scorer,
     )

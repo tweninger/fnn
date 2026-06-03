@@ -25,9 +25,11 @@ class ModelConfig:
     # MLP sizes
     encoder_hidden: int = 256
     scorer_hidden: int = 256
+    node_scorer_hidden: int = 128
     aggregator_hidden: int = 256  # used only for deepsets for now
     dropout: float = 0.1
     scorer_dropout: float = 0.1 
+    use_node_scorer: bool = False
 
     # Time features (binned for now)
     use_time_features: bool = False

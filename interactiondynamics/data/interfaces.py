@@ -24,6 +24,12 @@ class DataSpec:
     extra: Optional[Dict[str, Any]] = None
 
 
+@dataclass(frozen=True)
+class EdgeTargetBatch:
+    events: EventBatch
+    targets: torch.Tensor
+
+
 class EventStreamDataset(ABC):
     """
     Base class for datasets that yield binned event streams.
@@ -44,3 +50,17 @@ class EventStreamDataset(ABC):
         Must be re-iterable (safe to loop multiple epochs).
         """
         pass
+
+    def node_targets(self, split: str = "train") -> Optional[Iterable[torch.Tensor]]:
+        """
+        Optional per-bin node-level supervision aligned with `bins(split)`.
+        Returns tensors of shape [num_nodes] or [num_nodes, d].
+        """
+        return None
+
+    def edge_targets(self, split: str = "train") -> Optional[Iterable[EdgeTargetBatch]]:
+        """
+        Optional per-bin edge-level supervision aligned with `bins(split)`.
+        Each batch provides candidate edges plus scalar targets for those edges.
+        """
+        return None

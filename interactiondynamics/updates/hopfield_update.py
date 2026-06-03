@@ -89,7 +89,7 @@ class HopfieldUpdate(UpdateLaw):
         num_nodes: int,
         device: torch.device,
     ) -> Optional[ModelState]:
-        node = torch.zeros((num_nodes, self.node_dim), device=device)
+        node = torch.randn((num_nodes, self.node_dim), device=device) * 0.02
         return ModelState(node=node)
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:

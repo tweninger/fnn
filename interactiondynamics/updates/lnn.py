@@ -70,9 +70,8 @@ class LNNUpdate(UpdateLaw):
         num_nodes: int,
         device: torch.device,
     ) -> Optional[ModelState]:
-        # Your training loop uses batch_size=1; keep shape (N, d) for simplicity.
-        q = torch.zeros(num_nodes, self.node_dim, device=device)
-        q_prev = torch.zeros_like(q)
+        q = torch.randn(num_nodes, self.node_dim, device=device) * 0.02
+        q_prev = q.clone()
         return ModelState(node=q, node_prev=q_prev, aux={})
 
     def forward(self, state, messages, drive=None):

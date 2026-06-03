@@ -79,7 +79,7 @@ class IFTDiffusionUpdate(UpdateLaw):
 
 
     def init_state(self, batch_size: int, num_nodes: int, device: torch.device) -> Optional[ModelState]:
-        h = torch.zeros((num_nodes, self.node_dim), device=device)
+        h = torch.randn((num_nodes, self.node_dim), device=device) * 0.02
         return ModelState(node=h, aux={})
 
     def forward(

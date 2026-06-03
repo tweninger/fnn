@@ -115,9 +115,8 @@ def ranking_metrics(
     Compute sampled ranking diagnostics.
 
     Candidate 0 is the observed positive; candidates 1: are sampled negatives.
-    The default rank keeps the historical strict tie behavior. Pessimistic rank
-    counts ties against the positive, which is useful for catching collapsed
-    scorers that assign identical values to many candidates.
+    Default ranking is pessimistic with respect to ties so tied positives do not
+    receive artificially inflated MRR / Hits@K.
     """
     logits = scores.view(M, K1)
     labels = torch.zeros((M, K1), device=scores.device)
@@ -126,12 +125,11 @@ def ranking_metrics(
     pos = logits[:, 0:1]
     neg = logits[:, 1:]
 
-    # Higher is better. Historical rank ignores ties with the positive.
-    rank = 1 + (logits > pos).sum(dim=1)  # (M,)
-    rank_pessimistic = 1 + (neg >= pos).sum(dim=1)  # (M,)
+    rank_optimistic = 1 + (logits > pos).sum(dim=1)  # (M,)
+    rank = 1 + (neg >= pos).sum(dim=1)  # pessimistic: ties count against positive
 
     mrr = (1.0 / rank.float()).mean().item()
-    mrr_pessimistic = (1.0 / rank_pessimistic.float()).mean().item()
+    mrr_optimistic = (1.0 / rank_optimistic.float()).mean().item()
 
     max_neg = neg.max(dim=1).values if neg.numel() > 0 else torch.full_like(pos.squeeze(1), float("-inf"))
     margin = pos.squeeze(1) - max_neg
@@ -156,11 +154,12 @@ def ranking_metrics(
 
     out = {
         "mrr": mrr,
-        "mrr_pessimistic": mrr_pessimistic,
+        "mrr_optimistic": mrr_optimistic,
         "mean_rank": rank.float().mean().item(),
-        "mean_rank_pessimistic": rank_pessimistic.float().mean().item(),
+        "mean_rank_optimistic": rank_optimistic.float().mean().item(),
         "median_rank": rank.float().median().item(),
         "top1_acc": (rank == 1).float().mean().item(),
+        "top1_acc_optimistic": (rank_optimistic == 1).float().mean().item(),
         "pairwise_acc": pairwise_acc,
         "pairwise_auc_tie_half": pairwise_auc_tie_half,
         "tie_rate": tie_rate,
@@ -183,7 +182,7 @@ def ranking_metrics(
 
     for k in hits_ks:
         out[f"hits@{k}"] = (rank <= k).float().mean().item()
-        out[f"hits_pessimistic@{k}"] = (rank_pessimistic <= k).float().mean().item()
+        out[f"hits_optimistic@{k}"] = (rank_optimistic <= k).float().mean().item()
     return out
 
 

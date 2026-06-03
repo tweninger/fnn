@@ -24,4 +24,4 @@ Thumbs.db
 #logs and results
 exports_suite/
 results/
-data/
+/data/

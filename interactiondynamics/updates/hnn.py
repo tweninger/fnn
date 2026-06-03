@@ -70,8 +70,9 @@ class HNNUpdate(UpdateLaw):
         num_nodes: int,
         device: torch.device,
     ) -> Optional[ModelState]:
-        # state.node holds [q,p]
-        qp = torch.zeros(num_nodes, 2 * self.d, device=device)
+        q = torch.randn(num_nodes, self.d, device=device) * 0.02
+        p = torch.zeros(num_nodes, self.d, device=device)
+        qp = torch.cat([q, p], dim=-1)
         return ModelState(node=qp, node_prev=None, aux={})
 
     def forward(

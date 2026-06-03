@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "pylint>=3.3",
   "pytest>=8.0",
   "pyright>=1.1.380",
   "ruff>=0.6.0",
@@ -71,6 +72,24 @@ select = [
   "F822",
   "F823",
 ]
+
+[tool.pylint.main]
+py-version = "3.11"
+ignore-paths = [
+  "^venv/.*$",
+  "^data/.*$",
+  "^notebooks/.*$",
+]
+
+[tool.pylint.messages_control]
+disable = [
+  "missing-module-docstring",
+  "missing-class-docstring",
+  "missing-function-docstring",
+]
+
+[tool.pylint.format]
+max-line-length = 100
 
 [tool.pyright]
 include = [

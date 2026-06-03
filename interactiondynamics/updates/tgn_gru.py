@@ -26,8 +26,7 @@ class TGNGRUUpdate(UpdateLaw):
         num_nodes: int,
         device: torch.device,
     ) -> Optional[ModelState]:
-        # batch_size unused in this minimal version (single global node memory)
-        node = torch.zeros((num_nodes, self.node_dim), device=device)
+        node = torch.randn((num_nodes, self.node_dim), device=device) * 0.02
         return ModelState(node=node)
 
     def forward(

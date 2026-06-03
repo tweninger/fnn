@@ -198,6 +198,19 @@ class ScoringHead(nn.Module, ABC):
     ) -> torch.Tensor:
         pass
 
+
+class NodeScoringHead(nn.Module, ABC):
+    """
+    Maps state to per-node scores.
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        state: Optional[ModelState],
+    ) -> torch.Tensor:
+        pass
+
 class ComposedInteractionModel(InteractionModel):
     """
     Canonical composition:
@@ -211,12 +224,14 @@ class ComposedInteractionModel(InteractionModel):
         update: UpdateLaw,
         scorer: ScoringHead,
         num_nodes: int,
+        node_scorer: Optional[NodeScoringHead] = None,
     ):
         super().__init__()
         self.encoder = encoder
         self.aggregator = aggregator
         self.update = update
         self.scorer = scorer
+        self.node_scorer = node_scorer
         self.num_nodes = num_nodes
 
     def init_state(self, batch_size, num_nodes, device):
@@ -232,3 +247,8 @@ class ComposedInteractionModel(InteractionModel):
 
     def score(self, state, candidate_events):
         return self.scorer(state, candidate_events)
+
+    def score_nodes(self, state):
+        if self.node_scorer is None:
+            raise RuntimeError("Model was built without a node_scorer")
+        return self.node_scorer(state)
