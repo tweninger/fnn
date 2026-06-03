@@ -90,7 +90,9 @@ class HNNUpdate(UpdateLaw):
         # HNN needs autograd even during eval (your evaluate_stream_sliced uses torch.no_grad).
         # So: locally re-enable grads for the physics part.
         with torch.enable_grad():
-            qp = qp_raw.detach().requires_grad_(True)
+            qp = qp_raw
+            if not qp.requires_grad:
+                qp = qp.requires_grad_(True)
             q, p = qp[:, : self.d], qp[:, self.d :]
 
             if drive is not None:
@@ -127,7 +129,9 @@ class HNNUpdate(UpdateLaw):
             p_next = p + dt * dpdt
 
             # 2) drift: recompute dq/dt at (q_t, p_{t+1})
-            qp2 = torch.cat([q, p_next], dim=-1).detach().requires_grad_(True)
+            qp2 = torch.cat([q, p_next], dim=-1)
+            if not qp2.requires_grad:
+                qp2 = qp2.requires_grad_(True)
 
             q2, p2 = qp2[:, : self.d], qp2[:, self.d :]
 
@@ -157,7 +161,7 @@ class HNNUpdate(UpdateLaw):
 
 
         next_state = state.clone(detach=False)
-        next_state.node = qp_next.detach()
+        next_state.node = qp_next if self.training else qp_next.detach()
 
         aux: Dict[str, torch.Tensor] = {
             "H_tot": H_tot.detach(),

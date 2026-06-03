@@ -84,8 +84,9 @@ class LNNUpdate(UpdateLaw):
 
         # Always compute the physics with grads enabled (even inside torch.no_grad eval)
         with torch.enable_grad():
-            # Make q a leaf requiring grad
-            q = q_raw.detach().requires_grad_(True)
+            q = q_raw
+            if not q.requires_grad:
+                q = q.requires_grad_(True)
 
             qdot = (q - q_prev) / dt
 
@@ -97,11 +98,12 @@ class LNNUpdate(UpdateLaw):
 
             V_per = self.V(inp).squeeze(-1)
             V_tot = V_per.sum()
+            create_graph = self.training
 
             (dV_dq,) = torch.autograd.grad(
                 V_tot, q,
-                create_graph=torch.is_grad_enabled(),   # False in eval's enable_grad? Actually True here.
-                retain_graph=False,
+                create_graph=create_graph,
+                retain_graph=create_graph,
                 allow_unused=False,
             )
 
@@ -116,8 +118,8 @@ class LNNUpdate(UpdateLaw):
 
         # Store next state (q_next may carry a graph during training; eval it's fine)
         next_state = state.clone(detach=False)
-        next_state.node_prev = q_raw
-        next_state.node = q_next.detach()
+        next_state.node_prev = q_raw if self.training else q_raw.detach()
+        next_state.node = q_next if self.training else q_next.detach()
 
         aux = {
             "V_tot": V_tot.detach(),

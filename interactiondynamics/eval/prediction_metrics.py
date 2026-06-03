@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict
 
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 def _safe_div(num: float, den: float) -> float:
@@ -25,6 +26,7 @@ def binary_metrics_from_logits(
     logits = logits.view(-1)
     labels = labels.to(device=logits.device, dtype=torch.float32).view(-1)
     pred = (logits >= float(threshold)).to(dtype=torch.float32)
+    probs = torch.sigmoid(logits)
 
     tp = float(((pred == 1.0) & (labels == 1.0)).sum().item())
     fp = float(((pred == 1.0) & (labels == 0.0)).sum().item())
@@ -37,6 +39,18 @@ def binary_metrics_from_logits(
     f1 = _safe_div(2.0 * precision * recall, precision + recall)
     accuracy = _safe_div(tp + tn, tp + fp + fn + tn)
     balanced_acc = 0.5 * (recall + specificity)
+    label_sum = float(labels.sum().item())
+    n_total = float(labels.numel())
+    n_neg = n_total - label_sum
+
+    if label_sum > 0.0 and n_neg > 0.0:
+        probs_np = probs.detach().cpu().numpy()
+        labels_np = labels.detach().cpu().numpy()
+        auroc = float(roc_auc_score(labels_np, probs_np))
+        auprc = float(average_precision_score(labels_np, probs_np))
+    else:
+        auroc = float("nan")
+        auprc = float("nan")
 
     return {
         "accuracy": accuracy,
@@ -44,6 +58,8 @@ def binary_metrics_from_logits(
         "recall": recall,
         "specificity": specificity,
         "f1": f1,
+        "auroc": auroc,
+        "auprc": auprc,
         "balanced_acc": balanced_acc,
         "false_positive_rate": _safe_div(fp, fp + tn),
         "pred_positive_rate": pred.mean().item(),

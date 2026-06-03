@@ -24,4 +24,5 @@ Thumbs.db
 #logs and results
 exports_suite/
 results/
+sweep_results.jsonl
 /data/

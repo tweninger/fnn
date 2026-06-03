@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from interactiondynamics.core.events import EventBatch
+from interactiondynamics.eval.prediction_metrics import binary_metrics_from_logits
 
 
 def node_labels_from_events(
@@ -31,9 +32,11 @@ def regression_metrics(
     mae = F.l1_loss(preds, targets).item()
     rmse = mse ** 0.5
     pred_mean = preds.mean().item()
+    pred_std = preds.std(unbiased=False).item() if preds.numel() > 0 else 0.0
     target_mean = targets.mean().item()
     target_std = targets.std(unbiased=False).item() if targets.numel() > 0 else 0.0
     nrmse = rmse / max(target_std, 1e-12)
+    zmse = mse / max(target_std * target_std, 1e-12)
     sse = ((preds - targets) ** 2).sum().item()
     sst = ((targets - targets.mean()) ** 2).sum().item()
     r2 = 1.0 - (sse / sst) if sst > 1e-12 else 0.0
@@ -49,9 +52,11 @@ def regression_metrics(
         f"{prefix}_mae": mae,
         f"{prefix}_rmse": rmse,
         f"{prefix}_nrmse": nrmse,
+        f"{prefix}_zmse": zmse,
         f"{prefix}_r2": r2,
         f"{prefix}_corr": corr,
         f"{prefix}_pred_mean": pred_mean,
+        f"{prefix}_pred_std": pred_std,
         f"{prefix}_target_mean": target_mean,
         f"{prefix}_target_std": target_std,
     }
@@ -62,25 +67,44 @@ def node_prediction_metrics(
     logits: torch.Tensor,
     labels: torch.Tensor,
 ) -> Dict[str, float]:
-    probs = torch.sigmoid(logits)
-    preds = (probs >= 0.5).to(labels.dtype)
-    pos_rate = labels.mean().item()
-    pred_rate = preds.mean().item()
-    acc = (preds == labels).float().mean().item()
-
-    tp = ((preds == 1) & (labels == 1)).float().sum().item()
-    fp = ((preds == 1) & (labels == 0)).float().sum().item()
-    fn = ((preds == 0) & (labels == 1)).float().sum().item()
-    precision = tp / max(1.0, tp + fp)
-    recall = tp / max(1.0, tp + fn)
+    binary = binary_metrics_from_logits(logits, labels)
 
     return {
         "node_bce": F.binary_cross_entropy_with_logits(logits, labels).item(),
-        "node_acc": acc,
-        "node_pos_rate": pos_rate,
-        "node_pred_rate": pred_rate,
-        "node_precision": precision,
-        "node_recall": recall,
+        "node_acc": binary["accuracy"],
+        "node_precision": binary["precision"],
+        "node_recall": binary["recall"],
+        "node_specificity": binary["specificity"],
+        "node_f1": binary["f1"],
+        "node_auroc": binary["auroc"],
+        "node_auprc": binary["auprc"],
+        "node_balanced_acc": binary["balanced_acc"],
+        "node_fpr": binary["false_positive_rate"],
+        "node_pred_rate": binary["pred_positive_rate"],
+        "node_pos_rate": binary["true_positive_rate"],
+    }
+
+
+@torch.no_grad()
+def edge_prediction_metrics(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+) -> Dict[str, float]:
+    binary = binary_metrics_from_logits(logits, labels)
+
+    return {
+        "edge_bce": F.binary_cross_entropy_with_logits(logits, labels).item(),
+        "edge_acc": binary["accuracy"],
+        "edge_precision": binary["precision"],
+        "edge_recall": binary["recall"],
+        "edge_specificity": binary["specificity"],
+        "edge_f1": binary["f1"],
+        "edge_auroc": binary["auroc"],
+        "edge_auprc": binary["auprc"],
+        "edge_balanced_acc": binary["balanced_acc"],
+        "edge_fpr": binary["false_positive_rate"],
+        "edge_pred_rate": binary["pred_positive_rate"],
+        "edge_pos_rate": binary["true_positive_rate"],
     }
 
 
