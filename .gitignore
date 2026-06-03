@@ -21,8 +21,22 @@ env/
 Thumbs.db
 *.DS_Store
 
-#logs and results
+# Logs and results
 exports_suite/
 results/
 sweep_results.jsonl
 /data/
+
+# Tool caches
+.ruff_cache/
+
+# Generated plots and local experiment outputs (interactiondynamics)
+interactiondynamics/plots/
+interactiondynamics/analysis/plots/
+interactiondynamics/results/
+interactiondynamics/experiments/
+
+# Downloaded / processed datasets (keep interactiondynamics/data/*.py source)
+interactiondynamics/data/JODIE/
+interactiondynamics/datasets/
+
