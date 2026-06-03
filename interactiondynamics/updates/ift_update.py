@@ -1,13 +1,9 @@
 # updates/ift_update.py
 from __future__ import annotations
-import math
-from pyexpat.errors import messages
-from pyexpat.errors import messages
 from typing import Dict, Optional, Tuple, Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 from core.interfaces import UpdateLaw, ModelState
 
@@ -29,6 +25,8 @@ class IFTDiffusionUpdate(UpdateLaw):
         kappa_param: KappaParam = "softplus",
         kappa_cap: bool = False,
         kappa_max: float | None = None,
+        h_init_seed: int = 0,
+        h_init_scale: float = 0.01,
     ):
         super().__init__()
         self.node_dim = int(node_dim)
@@ -39,6 +37,8 @@ class IFTDiffusionUpdate(UpdateLaw):
         self.kappa_param: KappaParam = kappa_param
         self.kappa_cap = bool(kappa_cap)
         self.kappa_max = kappa_max
+        self.h_init_seed = int(h_init_seed)
+        self.h_init_scale = float(h_init_scale)
 
         # messages come in as msg_dim, but node states live in node_dim, so this maps messages into state space
         self.msg_proj = nn.Linear(self.msg_dim, self.node_dim)
@@ -84,9 +84,15 @@ class IFTDiffusionUpdate(UpdateLaw):
 
         return k.to(device=h.device, dtype=h.dtype).reshape(())
 
-    # again the initial node state is zeros... like hopfield!
     def init_state(self, batch_size: int, num_nodes: int, device: torch.device) -> Optional[ModelState]:
-        h = torch.zeros((num_nodes, self.node_dim), device=device)
+        gen = torch.Generator(device=device)
+        gen.manual_seed(self.h_init_seed)
+        h = torch.randn(
+            num_nodes,
+            self.node_dim,
+            generator=gen,
+            device=device,
+        ) * self.h_init_scale
         return ModelState(node=h, aux={})
 
 
@@ -135,37 +141,34 @@ class IFTDiffusionUpdate(UpdateLaw):
         #         "dtype", vals.dtype)            
 
 
-        # makes message injection live in node-state space
-        inj = self.msg_proj(messages)
         # clip it injection norm a bit why not.. don't let it get too big
         inj_max = 2.0  # tune: 0.5–2.0
-        inj_norm = inj.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        inj = inj * (inj_max / inj_norm).clamp(max=1.0)    
 
-        # print("DEBUG inj max", float(inj.abs().max().item()),
-        #    "inj std", float(inj.std().item()))
+        # makes message injection live in node-state space
+        inj_raw = self.msg_proj(messages)
+        inj_norm_raw = inj_raw.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        inj = inj_raw * (inj_max / inj_norm_raw).clamp(max=1.0)
+
+        decay_term = -self.gamma * h
+        diff_term = -(kappa * Lh)
 
         # compute derivative like update... big point of the updater
         # gamme part - decay/damping/forgetting 
         # kappa part - diffusion/interaction across the graph operator
         # inj part - new information entering from current messages
         # aka change in hidden state = decay + graph interaciton + incoming signal
-        dh = (-self.gamma * h) - (kappa * Lh) + inj 
+        dh = decay_term + diff_term + inj 
         h_next = h + self.dt * dh    # euler step... simple discrete time update: take curr state and add a timestep sized change
         # ^^ simpler than HNN symplectic update 
 
         #DEBUGGGINGGGG
-        # if state.aux is None:
-        #     state.aux = {}
+        if state.aux is None:
+            state.aux = {}
 
-        # step_idx = int(state.aux.get("debug_step", 0))
+        step_idx = int(state.aux.get("debug_step", 0))
         
-        # # print first few, then every 1000
-        # if step_idx < 5 or step_idx % 1500 == 0:
-        #     inj_raw = self.msg_proj(messages)
-        #     inj_norm_raw = inj_raw.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        #     inj = inj_raw * (inj_max / inj_norm_raw).clamp(max=1.0)
-
+        # print first few, then every 1000
+        # if step_idx % 50 == 0:
         #     row_norms = inj_raw.norm(dim=-1).detach().cpu().numpy()
         #     print(
         #         f"p50={np.percentile(row_norms,50):.3f} | "
@@ -183,6 +186,7 @@ class IFTDiffusionUpdate(UpdateLaw):
         #             f"raw_mean_node={float(inj_norm_raw.mean().item()):.6f} | "
         #             f"frac_clipped={float((inj_norm_raw > inj_max).float().mean().item()):.6f}"
         #         )
+
         #     with torch.no_grad():
         #         print(
         #             f"[IFT DEBUG] "
@@ -195,28 +199,15 @@ class IFTDiffusionUpdate(UpdateLaw):
         #             f"||h_next||={float(h_next.norm().item()):.6f}"
         #         )
 
-                #     print(
-                #         f"[IFT DEBUG] "
-                #         f"max|h|={float(h.abs().max().item()):.6f} | "
-                #         f"max|messages|={float(messages.abs().max().item()):.6f} | "
-                #         f"max|inj|={float(inj.abs().max().item()):.6f} | "
-                #         f"max|Lh|={float(Lh.abs().max().item()):.6f} | "
-                #         f"max|dh|={float(dh.abs().max().item()):.6f} | "
-                #         f"max|h_next|={float(h_next.abs().max().item()):.6f}"
-                #     )
-                # decay_term = -self.gamma * h
-                # diff_term = -(kappa * Lh)
-                # inj_term = inj
+        #         with torch.no_grad():
+        #             print(
+        #                 f"[IFT TERMS] "
+        #                 f"||decay||={float(decay_term.norm().item()):.6f} | "
+        #                 f"||diff||={float(diff_term.norm().item()):.6f} | "
+        #                 f"||inj||={float(inj.norm().item()):.6f}"
+        #             )
 
-                # with torch.no_grad():
-                #     print(
-                #         f"[IFT TERMS] "
-                #         f"||decay||={float(decay_term.norm().item()):.6f} | "
-                #         f"||diff||={float(diff_term.norm().item()):.6f} | "
-                #         f"||inj||={float(inj_term.norm().item()):.6f}"
-                #     )
-
-                #state.aux["debug_step"] = step_idx + 1
+        #         state.aux["debug_step"] = step_idx + 1
         
         next_state = ModelState( # return next state, new node memory is h_next + aux info, so L and metadata can continue being carried around
             node=h_next,
@@ -254,10 +245,18 @@ class IFTDiffusionUpdate(UpdateLaw):
         # stores useful diagnostics like..
         # diffusion strength, state size, message inejction size, graph-diffusion term size
         # for debugging and sweep analysis 
-        aux = {
-            "kappa": kappa.detach(),
-            "h_norm": h_next.norm(dim=-1).mean().detach(),
-            "inj_norm": inj.norm(dim=-1).mean().detach(),
-            "Lh_norm": Lh.norm(dim=-1).mean().detach(),
-        }
+        with torch.no_grad():
+            aux = {
+                "kappa": float(kappa.detach().item()),
+                "h_norm": float(h_next.norm(dim=-1).mean().item()),
+                "inj_norm": float(inj.norm(dim=-1).mean().item()),
+                "Lh_norm": float(Lh.norm(dim=-1).mean().item()),
+                "dh_norm": float(dh.norm(dim=-1).mean().item()),
+                "decay_term": float(decay_term.norm(dim=-1).mean().item()),
+                "diff_term": float(diff_term.norm(dim=-1).mean().item()),
+                "inj_raw_mean_node": float(inj_norm_raw.mean().item()),
+                "inj_frac_clipped": float((inj_norm_raw > inj_max).float().mean().item()),
+                "inj_max": float(inj_max)
+            }
+
         return next_state, aux

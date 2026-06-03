@@ -61,8 +61,8 @@ class SpringWeb2DConfig:
     name: str = "spring_web_2d"
 
     # size / time
-    num_nodes: int = 64
-    num_bins: int = 512
+    num_nodes: int = 16
+    num_bins: int = 256
 
     # simulation parameters
     dt: float = 0.05
@@ -83,7 +83,7 @@ class SpringWeb2DConfig:
     init_vel_noise: float = 0.05
 
     # event emission
-    event_mode: str = "thresholded"       # {"all_neighbors", "thresholded"}
+    event_mode: str = "all_neighbors"       # {"all_neighbors", "thresholded"}
     interaction_threshold: float = 0.015
     threshold_metric: str = "force_mag"   # {"force_mag", "extension", "distance", "rel_speed"}
     threshold_use_absolute: bool = True
@@ -93,8 +93,8 @@ class SpringWeb2DConfig:
     bidirectional: bool = True
 
     # node target configuration
-    target_type: str = "delta_v"          # {"delta_v","dv","accel","delta_x","v_future","x_future"}
-    target_horizon: int = 1
+    target_type: str = "dv"          # {"delta_v","dv","accel","delta_x","v_future","x_future"}
+    target_horizon: int = 10
     standardize_node_targets: bool = True
 
     # split by time
@@ -107,14 +107,14 @@ class SpringWeb2DConfig:
 
 # Keep whichever features you want uncommented.
 _EDGE_FEATURE_NAMES: Sequence[str] = (
-    # "dx",
-    # "dy",
-    # "dvx",
-    # "dvy",
-    # "dist",
-    #"extension",
-    #  "fx",
-    #  "fy",
+    "dx",
+    "dy",
+    "dvx",
+    "dvy",
+    "dist",
+    "extension",
+     "fx",
+     "fy",
 )
 
 

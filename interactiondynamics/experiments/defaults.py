@@ -38,7 +38,7 @@ def build_base_train_cfg(spec, device: torch.device) -> NodeTrainConfig:
         tbptt_steps=1,
         debug=False,
         loss_name="mae", # mse | mae | huber
-        selection_metric="rmse",
+        selection_metric="median_node_pearson",
     )
 
 
@@ -67,9 +67,10 @@ def build_base_interaction_train_cfg(spec, device: torch.device) -> TrainConfig:
     return TrainConfig(
         num_nodes=spec.num_nodes,
         num_neg=50,
+        hard_neg=False,
         tbptt_steps=1,
         log_every=log_every,
         device=device,
         weight_decay=1e-3,
-        lr=1e-3,
+        lr=1e-3, # changed from 1e-3 (0.001) for jodie, or 3e-4 (0.0003)
     )

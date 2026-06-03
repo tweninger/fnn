@@ -2,7 +2,7 @@ import itertools
 import json
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Callable, Dict, Iterable, Optional, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,12 +18,14 @@ from eval.node_regression import (
     node_regression_loss_and_metrics,
     collect_node_predictions_over_time,
     compute_prediction_analysis,
+    _iter_context_target_bins,
 )
 from models.tgn_model import build_tgn_model
 from plotting.node_regression import plot_node_targets_by_feature
 from utils.metric_selection import higher_is_better, is_better_metric
 from utils.repro import set_seed
 from experiments.node_regression_runs import NodeSweepRun
+from training.ift_aux import accumulate_ift_aux, finalize_ift_aux
 
 @dataclass
 class NodeRunResult:
@@ -52,7 +54,7 @@ class NodeTrainConfig:
     tbptt_steps: int = 1
     debug: bool = False
     loss_name: str = "mse"   # "mse" | "mae" | "huber"
-    selection_metric: str = "rmse"    # start with "rmse"
+    selection_metric: str = "median_node_pearson"    # higher is better; robust per-node correlation
 
 
 # -----------------------------
@@ -64,6 +66,7 @@ def train_one_epoch_node(
     bins: Iterable[EventBatch],
     optimizer: torch.optim.Optimizer,
     cfg: NodeTrainConfig,
+    target_bins: Optional[Iterable[EventBatch]] = None,
 ) -> Dict[str, float]:
     """
     One-step-ahead node regression:
@@ -84,26 +87,23 @@ def train_one_epoch_node(
     total_rmse = 0.0
     n_steps = 0
 
-    # optional diagnostics for IFT
-    kappa_sum = 0.0
-    kappa_n = 0
+    ift_sums: Dict[str, float] = {}
+    ift_n = 0
 
-    prev: Optional[EventBatch] = None
-    for curr in bins:
-        curr = curr.to(device)
+    prev_obs: Optional[EventBatch] = None
+    for curr_obs, curr_target in _iter_context_target_bins(bins, target_bins):
+        curr_obs = curr_obs.to(device)
+        curr_target = curr_target.to(device)
 
-        if prev is None:
-            prev = curr
+        if prev_obs is None:
+            prev_obs = curr_obs
             continue
 
         # update state with previous bin
-        state, aux = model.step(state, prev)
+        state, _aux = model.step(state, prev_obs)
 
-        if aux is not None and "kappa" in aux:
-            k = aux["kappa"]
-            if torch.is_tensor(k):
-                kappa_sum += float(k.detach().item())
-                kappa_n += 1
+        if accumulate_ift_aux(_aux, ift_sums):
+            ift_n += 1
 
         if cfg.debug and state is not None and state.node is not None:
             print(
@@ -121,7 +121,7 @@ def train_one_epoch_node(
         loss, metrics = node_regression_loss_and_metrics(
             model=model,
             state=state,
-            next_events=curr,
+            next_events=curr_target,
             loss_name=cfg.loss_name,
         )
 
@@ -149,7 +149,7 @@ def train_one_epoch_node(
                 f"rmse={metrics['rmse']:.4f}"
             )
 
-        prev = curr
+        prev_obs = curr_obs
 
     if n_steps == 0:
         return {"loss": 0.0, "mae": 0.0, "rmse": 0.0}
@@ -159,8 +159,7 @@ def train_one_epoch_node(
         "mae": total_mae / n_steps,
         "rmse": total_rmse / n_steps,
     }
-    if kappa_n > 0:
-        out["kappa_mean"] = kappa_sum / kappa_n
+    out.update(finalize_ift_aux(ift_sums, ift_n))
     return out
 
 
@@ -178,6 +177,8 @@ def run_one_node_experiment(
     save_jsonl_path: Optional[str] = None,
     save_summary_path: Optional[str] = None,
     dataset_name: Optional[str] = None,
+    clean_ds=None,
+    corruption_cfg: Optional[dict] = None,
 ) -> tuple[NodeRunResult, torch.nn.Module, NodeTrainConfig]:
     device = torch.device(base_train_cfg.device)
     set_seed(run.seed)
@@ -190,7 +191,7 @@ def run_one_node_experiment(
     if run.tbptt_steps is not None:
         train_cfg.tbptt_steps = run.tbptt_steps
 
-    model = build_model_fn(spec, run.model_cfg).to(device)
+    model = build_model_fn(spec, replace(run.model_cfg, ift_h_init_seed=run.seed)).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=train_cfg.lr,
@@ -202,14 +203,40 @@ def run_one_node_experiment(
     best_epoch = -1
     best_snapshot: dict = {}
     best_model_state = None
+
+    use_clean_targets = clean_ds is not None and clean_ds is not ds
     
     t0 = time.time()
     for epoch in range(1, epochs + 1):
-        train_stats_step = train_one_epoch_node(model, ds.bins("train"), optimizer, train_cfg)
+        train_stats_step = train_one_epoch_node(
+            model,
+            ds.bins("train"),
+            optimizer,
+            train_cfg,
+            target_bins=clean_ds.bins("train") if use_clean_targets else None,
+        )
 
-        train_eval = evaluate_node_stream_sliced(model, ds.bins("train"), train_cfg, slices=NodeEvalSlices(early_steps=10))
-        val_stats  = evaluate_node_stream_sliced(model, ds.bins("val"),   train_cfg, slices=NodeEvalSlices(early_steps=10))
-        test_stats = evaluate_node_stream_sliced(model, ds.bins("test"),  train_cfg, slices=NodeEvalSlices(early_steps=10))
+        train_eval = evaluate_node_stream_sliced(
+            model,
+            ds.bins("train"),
+            train_cfg,
+            slices=NodeEvalSlices(early_steps=10),
+            target_bins=clean_ds.bins("train") if use_clean_targets else None,
+        )
+        val_stats  = evaluate_node_stream_sliced(
+            model,
+            ds.bins("val"),
+            train_cfg,
+            slices=NodeEvalSlices(early_steps=10),
+            target_bins=clean_ds.bins("val") if use_clean_targets else None,
+        )
+        test_stats = evaluate_node_stream_sliced(
+            model,
+            ds.bins("test"),
+            train_cfg,
+            slices=NodeEvalSlices(early_steps=10),
+            target_bins=clean_ds.bins("test") if use_clean_targets else None,
+        )
 
         snapshot = {
             "epoch": epoch,
@@ -219,20 +246,25 @@ def run_one_node_experiment(
             "test": test_stats,
         }
 
-        cur_val_metric = float(val_stats[selection_metric])
+        cur_val_metric = float(val_stats.get(selection_metric, float("nan")))
 
         km = train_stats_step.get("kappa_mean", None)
-        kappa_str = f"{km:.4f}" if km is not None else ""
+        kappa_part = f" kappa={km:.4f}" if km is not None else ""
+        corr_part = ""
+        if selection_metric in val_stats:
+            corr_part = f" val {selection_metric}={float(val_stats[selection_metric]):.4f}"
         print(
             f"[{run.name} | seed={run.seed} | epoch {epoch:03d}] "
             f"train(step) loss={train_stats_step['loss']:.4f} "
-            f"rmse={train_stats_step['rmse']:.4f} "
-            f"kappa={kappa_str} | "
-            f"val {selection_metric}={cur_val_metric:.4f} "
+            f"rmse={train_stats_step['rmse']:.4f}{kappa_part} |"
+            f"{corr_part} "
+            f"val rmse={val_stats['rmse']:.4f} "
             f"test rmse={test_stats['rmse']:.4f}"
         )
 
-        if is_better_metric(cur_val_metric, best_val_metric, selection_metric):
+        cur_val_metric = float(val_stats.get(selection_metric, float("nan")))
+
+        if np.isfinite(cur_val_metric) and is_better_metric(cur_val_metric, best_val_metric, selection_metric):
             best_val_metric = cur_val_metric
             best_epoch = epoch
             best_snapshot = snapshot
@@ -252,9 +284,11 @@ def run_one_node_experiment(
                         "lr": run.lr,
                         "weight_decay": run.weight_decay,
                         "tbptt_steps": run.tbptt_steps,
+                        "selection_metric": selection_metric,
                     }.items()
                     if v is not None
                 },
+                "corruption_cfg": corruption_cfg,
                 **snapshot,
             }
             with open(save_jsonl_path, "a", encoding="utf-8") as f:
@@ -268,8 +302,14 @@ def run_one_node_experiment(
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-        val_pack = collect_node_predictions_over_time(model, ds.bins("val"), train_cfg)
-        test_pack = collect_node_predictions_over_time(model, ds.bins("test"), train_cfg)
+        val_target_bins = clean_ds.bins("val") if use_clean_targets else None
+        test_target_bins = clean_ds.bins("test") if use_clean_targets else None
+        val_pack = collect_node_predictions_over_time(
+            model, ds.bins("val"), train_cfg, target_bins=val_target_bins
+        )
+        test_pack = collect_node_predictions_over_time(
+            model, ds.bins("test"), train_cfg, target_bins=test_target_bins
+        )
 
         if len(val_pack) == 4:
             _, y_true_val, y_pred_val, node_mask_val = val_pack

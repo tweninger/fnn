@@ -38,34 +38,34 @@ def build_physical_datasets(
             name="charged_particles",
             device=device,
             interaction_rule="all_pairs",
-            obs_edge_keep_prob=1.0,
             min_edges_per_bin=1,
-            threshold_splits=("train", "val", "test"),
+            #distance_threshold=2.23916,
+            #threshold_splits=("train", ),
         )
-        #datasets[base_cfg.name] = ChargedParticlesBinnedDataset(base_cfg)
+        datasets[base_cfg.name] = ChargedParticlesBinnedDataset(base_cfg)
 
-        if include_clean_references:
-            clean_cfg = replace(base_cfg, name=f"{base_cfg.name}__clean_ref")
-            datasets[clean_cfg.name] = ChargedParticlesBinnedDataset(clean_cfg)
+        # if include_clean_references:
+        #     clean_cfg = replace(base_cfg, name=f"{base_cfg.name}__clean_ref")
+        #     datasets[clean_cfg.name] = ChargedParticlesBinnedDataset(clean_cfg)
 
-        charged_variants = make_charged_particle_threshold_variants(
-            base_cfg,
-            threshold_metric="distance_threshold",   # or "distance_threshold"
-            threshold_values=(
-                0.5, #remove lowest 50 percent
-                0.130677,
-            ),
-            threshold_splits_options=threshold_splits_options,
-        )
+        # charged_variants = make_charged_particle_threshold_variants(
+        #     base_cfg,
+        #     threshold_metric="k",   # or "distance_threshold"
+        #     threshold_values=(
+        #         0.5, #remove lowest 50 percent
+        #         0.130677,
+        #     ),
+        #     threshold_splits_options=threshold_splits_options,
+        # )
 
-        datasets.update(charged_variants)
+        # datasets.update(charged_variants)
 
     if "wave" in include:
         base_cfg = WaveEquationBinnedConfig(
             name="wave",
             device=device,
-            event_mode="all_neighbors",
-            interaction_threshold=19.0334,
+            event_mode="thresholded",
+            interaction_threshold=11.05,
             threshold_metric="pair_accel",
             threshold_use_absolute=True,
             threshold_splits=("train", "val", "test"),
@@ -75,9 +75,9 @@ def build_physical_datasets(
         )
         datasets[base_cfg.name] = WaveEquationBinnedDataset(base_cfg)
 
-        if include_clean_references:
-            clean_cfg = replace(base_cfg, name=f"{base_cfg.name}__clean_ref")
-            datasets[clean_cfg.name] = WaveEquationBinnedDataset(clean_cfg)
+        # if include_clean_references:
+        #     clean_cfg = replace(base_cfg, name=f"{base_cfg.name}__clean_ref")
+        #     datasets[clean_cfg.name] = WaveEquationBinnedDataset(clean_cfg)
 
         # wave_variants = make_wave_variants(
         #     base_cfg,
@@ -135,42 +135,39 @@ def build_physical_datasets(
             name="springweb",
             device=device,
             event_mode="all_neighbors",
-            threshold_metric="force_mag",
-            interaction_threshold=0.0275852,
-            threshold_use_absolute=True,
-            threshold_splits=("train", "val", "test"),
-            target_type="dv",
-            target_horizon=1,
+            target_type="delta_v",
+            target_horizon=10,
             standardize_node_targets=False,
         )
         datasets[base_cfg.name] = SpringWeb2DDataset(base_cfg)
 
-        if include_clean_references:
-            clean_cfg = replace(base_cfg, name=f"{base_cfg.name}__clean_ref")
-            datasets[clean_cfg.name] = SpringWeb2DDataset(clean_cfg)
-
-        # spring_web_variants = {}
-
-        # spring_web_variants.update(
-        #     make_spring_web_variants(
-        #         base_cfg,
-        #         topologies=("knn",),
-        #         radius_values=(0.05,),
-        #         knn_values=(4,),
-        #         include_ring_edges_options=(False,),
-        #         event_modes=("thresholded",),
-        #         threshold_metrics=("force_mag",),
-        #         threshold_values=(
-        #             0.074443,
-        #             0.029201,
-        #         ),
-        #         threshold_splits_options=threshold_splits_options,
-        #         target_types=("dv",),
-        #         target_horizons=(1,),
-        #         standardize_node_targets_options=(False,),
-        #     )
-        # )
-
-        # datasets.update(spring_web_variants)
-
     return datasets
+
+
+def build_spring_web_target_horizon_datasets(
+    device,
+    *,
+    base_cfg: SpringWeb2DConfig | None = None,
+    target_types=("delta_v", "dv", "delta_x"),
+    target_horizons=(1, 10),
+    standardize_node_targets=False,
+) -> dict:
+    """Minimal springweb sweep over node target type and prediction horizon."""
+    if base_cfg is None:
+        base_cfg = SpringWeb2DConfig(
+            name="springweb",
+            device=device,
+            event_mode="all_neighbors",
+            standardize_node_targets=standardize_node_targets,
+        )
+
+    return make_spring_web_variants(
+        base_cfg,
+        topologies=("knn",),
+        knn_values=(base_cfg.topology_k if base_cfg.topology == "knn" else 4,),
+        include_ring_edges_options=(base_cfg.include_ring_edges,),
+        event_modes=("all_neighbors",),
+        target_types=tuple(target_types),
+        target_horizons=tuple(target_horizons),
+        standardize_node_targets_options=(standardize_node_targets,),
+    )

@@ -99,6 +99,92 @@ def _undirected_pair_keep_mask(
     keep_mask = pair_keep[inverse]
     return keep_mask
 
+
+def _active_nodes_in_batch(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+    """Unique node ids that appear as src or dst in this bin."""
+    return torch.unique(torch.cat([src.long(), dst.long()], dim=0))
+
+
+def _node_block_keep_mask(
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    *,
+    drop_real_prob: float,
+    block_node_select: str,
+    generator: torch.Generator,
+    device: torch.device,
+    min_keep_per_nonempty_bin: int = 1,
+) -> torch.Tensor:
+    """
+    Drop every event incident to a chosen set of nodes (node block).
+
+    drop_real_prob is the fraction of *active nodes in this bin* to block
+    (not per-edge probability). An event is removed if src or dst is blocked.
+
+    block_node_select:
+      - "random": uniform random active nodes
+      - "high_degree": active nodes with largest incident edge count in the bin
+    """
+    M = int(src.numel())
+    if M == 0:
+        return torch.zeros((0,), dtype=torch.bool, device=device)
+
+    keep_mask = torch.ones(M, dtype=torch.bool, device=device)
+    if drop_real_prob <= 0.0:
+        return keep_mask
+
+    if block_node_select not in {"random", "high_degree"}:
+        raise ValueError(
+            f"block_node_select must be 'random' or 'high_degree', got {block_node_select!r}"
+        )
+
+    src_l = src.long()
+    dst_l = dst.long()
+    active = _active_nodes_in_batch(src_l, dst_l)
+    n_active = int(active.numel())
+    if n_active == 0:
+        return keep_mask
+
+    # Block this many nodes; leave at least one active node unblocked when possible.
+    n_block = int(round(float(drop_real_prob) * n_active))
+    n_block = max(0, min(n_block, max(0, n_active - 1)))
+
+    if n_block > 0:
+        if block_node_select == "random":
+            perm = torch.randperm(n_active, generator=generator, device=device)
+            blocked = active[perm[:n_block]]
+        else:
+            # Incident edge count per active node (as src or dst).
+            deg = torch.zeros((n_active,), dtype=torch.long, device=device)
+            for i, node in enumerate(active):
+                deg[i] = int((src_l == node).sum().item() + (dst_l == node).sum().item())
+            # Highest degree first; tie_key breaks ties deterministically per bin.
+            tie_key = torch.rand(n_active, generator=generator, device=device)
+            scores = deg.float() + tie_key * 1e-4
+            order = torch.argsort(scores, descending=True)
+            blocked = active[order[:n_block]]
+
+        blocked_set = blocked
+        is_blocked_src = torch.isin(src_l, blocked_set)
+        is_blocked_dst = torch.isin(dst_l, blocked_set)
+        keep_mask = ~(is_blocked_src | is_blocked_dst)
+
+    if min_keep_per_nonempty_bin > 0:
+        min_keep = min(int(min_keep_per_nonempty_bin), M)
+        if int(keep_mask.sum().item()) < min_keep:
+            # Restore random dropped events until the bin keeps enough observations.
+            dropped_idx = torch.nonzero(~keep_mask, as_tuple=False).view(-1)
+            need = min_keep - int(keep_mask.sum().item())
+            perm = torch.randperm(
+                int(dropped_idx.numel()),
+                generator=generator,
+                device=device,
+            )
+            keep_mask[dropped_idx[perm[:need]]] = True
+
+    return keep_mask
+
+
 def _make_generator(*, split: str, batch_idx: int, seed: int, device: torch.device) -> torch.Generator:
     split_offset = {
         "train": 1_000_003,
@@ -126,7 +212,8 @@ def corrupt_batch_with_metadata(
     fake_feature_mode: str = "zeros",   # "zeros" | "sample"
     avoid_self_loops: bool = True,
     min_keep_per_nonempty_bin: int = 1,
-    corrupt_unit: str = "undirected_pair",  # "directed_event" | "undirected_pair"
+    corrupt_unit: str = "undirected_pair",  # directed_event | undirected_pair | node_block
+    block_node_select: str = "random",  # random | high_degree (node_block only)
 ) -> CorruptedBatchInfo:
     """
     Deterministically corrupt one clean EventBatch and also return the hidden/removed positives.
@@ -142,8 +229,11 @@ def corrupt_batch_with_metadata(
         raise ValueError("add_fake_ratio must be >= 0")
     if fake_feature_mode not in {"zeros", "sample"}:
         raise ValueError("fake_feature_mode must be 'zeros' or 'sample'")
-    if corrupt_unit not in {"directed_event", "undirected_pair"}:
-        raise ValueError("corrupt_unit must be 'directed_event' or 'undirected_pair'")
+    _valid_units = {"directed_event", "undirected_pair", "node_block"}
+    if corrupt_unit not in _valid_units:
+        raise ValueError(
+            f"corrupt_unit must be one of {sorted(_valid_units)}, got {corrupt_unit!r}"
+        )
 
     device = batch.src.device
     gen = _make_generator(split=split, batch_idx=batch_idx, seed=seed, device=device)
@@ -192,7 +282,7 @@ def corrupt_batch_with_metadata(
                 keep_mask[perm[: min(min_keep_per_nonempty_bin, M)]] = True
 
     elif corrupt_unit == "undirected_pair":
-        # New behavior: (i -> j) and (j -> i) are kept/dropped together.
+        # (i -> j) and (j -> i) are kept/dropped together.
         keep_mask = _undirected_pair_keep_mask(
             src,
             dst,
@@ -203,11 +293,19 @@ def corrupt_batch_with_metadata(
             min_keep_per_nonempty_bin=min_keep_per_nonempty_bin,
         )
 
-    else:
-        raise ValueError(
-            f"Unknown corrupt_unit={corrupt_unit!r}. "
-            "Expected 'directed_event' or 'undirected_pair'."
+    elif corrupt_unit == "node_block":
+        keep_mask = _node_block_keep_mask(
+            src,
+            dst,
+            drop_real_prob=drop_real_prob,
+            block_node_select=block_node_select,
+            generator=gen,
+            device=device,
+            min_keep_per_nonempty_bin=min_keep_per_nonempty_bin,
         )
+
+    else:
+        raise ValueError(f"Unknown corrupt_unit={corrupt_unit!r}")
 
     removed_mask = ~keep_mask
 
@@ -366,6 +464,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
         min_keep_per_nonempty_bin: int = 1,
         skip_empty_observed_bins: bool = True,
         corrupt_unit: str = "undirected_pair", #directed_pair
+        block_node_select: str = "random",
     ):
         self.base_ds = base_ds
         self.drop_real_prob = float(drop_real_prob)
@@ -377,6 +476,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
         self.min_keep_per_nonempty_bin = int(min_keep_per_nonempty_bin)
         self.skip_empty_observed_bins = bool(skip_empty_observed_bins)
         self.corrupt_unit = corrupt_unit
+        self.block_node_select = block_node_select
 
         self._base_spec = self.base_ds.spec()
         self._num_nodes = int(self._base_spec.num_nodes)
@@ -393,6 +493,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
             "min_keep_per_nonempty_bin": self.min_keep_per_nonempty_bin,
             "skip_empty_observed_bins": self.skip_empty_observed_bins,
             "corrupt_unit": self.corrupt_unit,
+            "block_node_select": self.block_node_select,
         }
         return DataSpec(
             name=self._base_spec.name,
@@ -417,6 +518,7 @@ class CorruptedEventStreamDataset(EventStreamDataset):
             min_keep_per_nonempty_bin=self.min_keep_per_nonempty_bin,
             skip_empty_observed_bins=self.skip_empty_observed_bins,
             corrupt_unit=self.corrupt_unit,
+            block_node_select=self.block_node_select,
         )
 
 
@@ -436,6 +538,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
         min_keep_per_nonempty_bin: int,
         skip_empty_observed_bins: bool,
         corrupt_unit: str,
+        block_node_select: str = "random",
     ):
         self.base_iterable = base_iterable
         self.split = split
@@ -449,6 +552,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
         self.min_keep_per_nonempty_bin = int(min_keep_per_nonempty_bin)
         self.skip_empty_observed_bins = bool(skip_empty_observed_bins)
         self.corrupt_unit = corrupt_unit
+        self.block_node_select = block_node_select
 
     def __iter__(self) -> Iterator[EventBatch]:
         for batch_idx, batch in enumerate(self.base_iterable):
@@ -468,6 +572,7 @@ class _CorruptedBinnedStream(Iterable[EventBatch]):
                 avoid_self_loops=self.avoid_self_loops,
                 min_keep_per_nonempty_bin=self.min_keep_per_nonempty_bin,
                 corrupt_unit=self.corrupt_unit,
+                block_node_select=self.block_node_select,
             )
 
             # For normal corrupted-only streams, skipping empty bins is okay.

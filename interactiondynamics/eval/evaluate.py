@@ -39,6 +39,8 @@ def evaluate_stream_sliced(
     cfg,
     *,
     slices: EvalSlices = EvalSlices(),
+    target_bins: Optional[Iterable[EventBatch]] = None,
+
 ) -> Dict[str, float]:
     """
     Evaluate ranking metrics over a binned stream, returning:
@@ -57,26 +59,32 @@ def evaluate_stream_sliced(
     early = _acc_init()
     late = _acc_init()
 
-    prev: Optional[EventBatch] = None
-    scored_step = 0  # counts only steps where we actually compute loss (prev exists)
+    stream = zip(bins, target_bins) if target_bins is not None else ((b, b) for b in bins)
 
-    for events in bins:
-        events = events.to(device)
+    prev_obs: Optional[EventBatch] = None
+    scored_step = 0
 
-        if prev is None:
-            prev = events
+    for events_obs, events_target in stream:
+        events_obs = events_obs.to(device)        # corrupted context
+        events_target = events_target.to(device)  # clean scoring target
+
+        if prev_obs is None:
+            prev_obs = events_obs
             continue
 
-        # predict current from state(after consuming prev)
-        state, _ = model.step(state, prev)
+        state, _ = model.step(state, prev_obs)
 
-        # this file just calls the ranking evaluater 
-        loss_t, metrics = ranking_loss_and_metrics( 
+        rank_kw = {}
+        if target_bins is not None:
+            rank_kw["forbidden_events"] = events_target
+        rank_kw["hard_neg"] = cfg.hard_neg
+        loss_t, metrics = ranking_loss_and_metrics(
             model=model,
             state=state,
-            next_events=events,
+            next_events=events_target,   # CLEAN FULL BIN
             num_nodes=cfg.num_nodes,
             num_neg=cfg.num_neg,
+            **rank_kw,
         )
 
         if state is not None:
@@ -92,7 +100,8 @@ def evaluate_stream_sliced(
             _acc_update(late, loss_val, mrr_val)
 
         scored_step += 1
-        prev = events
+
+        prev_obs = events_obs
 
     out: Dict[str, float] = {}
     o = _acc_finalize(overall)

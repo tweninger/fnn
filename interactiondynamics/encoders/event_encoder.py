@@ -4,8 +4,7 @@ import torch
 import torch.nn as nn
 
 from core.interfaces import EventEncoder, ModelState
-from core.events import EventBatch # container holding a bunch of events at once
-# ^^ like if one event is A talking to B for 45 minutes, event batch is a lot of those staked together and processed together
+from core.events import EventBatch 
 
 class TGNEventEncoder(EventEncoder):
     """
@@ -60,8 +59,9 @@ class TGNEventEncoder(EventEncoder):
         if self.event_dim > 0:
             assert events.features is not None, "event_dim>0 but events.features is None"
             assert events.features.size(-1) == self.event_dim, \
-                f"events.features dim {events.features.size(-1)} != event_dim {self.event_dim}" # events are already feature vector, like age gender yk
-            pieces.append(events.features) # hi barbie
+                f"events.features dim {events.features.size(-1)} != event_dim {self.event_dim}" 
+            pieces.append(events.features) # append event features to input
+
         #turn timestamp into vector and include it too
         if self.use_time_features:
             assert events.t is not None
@@ -78,5 +78,4 @@ class TGNEventEncoder(EventEncoder):
         # ^^ hi barbie
         # feed that long vector into a NN!
         # with linear layer, ReLU, dropout, linear layer -> message vector of size msg_dim which goes to aggre!
-        # learned function that mixes those inputs togeher w those
-        # like multiply by weight matrix, add bias, apply nonlinearity, repeat, final linear layer
+      

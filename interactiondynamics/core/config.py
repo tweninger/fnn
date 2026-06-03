@@ -6,7 +6,7 @@ from typing import Literal, Optional
 AggregatorType = Literal["ift", "sum", "deepsets", "settransformer", "hopfield"]
 ScorerType = Literal["dot", "mlp"]
 PredictorType = Literal["mlp_node", "linear_node"]
-TaskType = Literal["ranking,", "node_regression"]
+TaskType = Literal["ranking", "node_regression"]
 UpdateType = Literal["ift_update", "tgn_gru", "lnn", "hnn", "hopfield_update"]
 KappaParam = Literal["exp", "softplus"]
 
@@ -77,4 +77,6 @@ class ModelConfig:
     ift_learn_kappa: bool = True
     ift_kappa_param: KappaParam = "softplus"
     ift_kappa_max: float | None = None   # None => no clamp cap
-    ift_kappa_cap: bool = False          # if True, clamp to [0, ift_kappa_max]    
+    ift_kappa_cap: bool = False          # if True, clamp to [0, ift_kappa_max]
+    ift_h_init_seed: int = 0
+    ift_h_init_scale: float = 0.01

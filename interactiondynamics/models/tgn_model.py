@@ -85,7 +85,12 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
     # same but w updaters
     # --- Update registry ---
     UPDATE_BUILDERS = {
-        "tgn_gru": lambda c: TGNGRUUpdate(c.node_dim, c.msg_dim), 
+        "tgn_gru": lambda c: TGNGRUUpdate(
+            c.node_dim,
+            c.msg_dim,
+            h_init_seed=getattr(c, "ift_h_init_seed", 0),
+            h_init_scale=getattr(c, "ift_h_init_scale", 0.01),
+        ), 
         "lnn": lambda c: LNNUpdate(
             node_dim=c.node_dim,
             msg_dim=c.msg_dim,
@@ -128,6 +133,8 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             #why were these two not here the whole time im gonna cry
             kappa_cap=getattr(c, "ift_kappa_cap", False),
             kappa_max=getattr(c, "ift_kappa_max", None),
+            h_init_seed=getattr(c, "ift_h_init_seed", 0),
+            h_init_scale=getattr(c, "ift_h_init_scale", 0.01),
         ),
     }
     upd_fn = UPDATE_BUILDERS.get(cfg.update)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
 from typing import Dict, Tuple, cast
 
 import torch
@@ -13,14 +13,6 @@ try:
 except Exception:  # pragma: no cover
     average_precision_score = None
     roc_auc_score = None
-
-
-@dataclass
-class WholeBinEdgeBatch:
-    src: torch.Tensor
-    dst: torch.Tensor
-    labels: torch.Tensor
-    t: torch.Tensor | None = None
 
 
 def _build_candidate_pairs(
@@ -101,130 +93,8 @@ def build_whole_bin_labels(
         return torch.zeros(cand_keys.numel(), device=cand_keys.device, dtype=torch.float32)
 
     pos_keys = torch.unique(pos_keys)
-    labels = torch.isin(cand_keys, pos_keys).to(dtype=torch.float32)
-    return labels
+    return torch.isin(cand_keys, pos_keys).to(dtype=torch.float32)
 
-
-def _safe_auc_metrics(labels: torch.Tensor, probs: torch.Tensor) -> tuple[float, float]:
-    y_true = labels.detach().cpu().numpy()
-    y_score = probs.detach().cpu().numpy()
-
-    if len(set(y_true.tolist())) < 2:
-        return float("nan"), float("nan")
-    if roc_auc_score is None or average_precision_score is None:
-        return float("nan"), float("nan")
-
-    try:
-        roc = float(roc_auc_score(y_true, y_score))
-    except Exception:
-        roc = float("nan")
-    try:
-        pr = float(average_precision_score(y_true, y_score))
-    except Exception:
-        pr = float("nan")
-    return roc, pr
-
-def _binary_counts_for_threshold(
-    probs: torch.Tensor,
-    labels_f: torch.Tensor,
-    threshold: float,
-) -> Dict[str, float]:
-    preds = (probs >= float(threshold)).to(dtype=torch.float32)
-
-    tp = float(((preds == 1.0) & (labels_f == 1.0)).sum().item())
-    fp = float(((preds == 1.0) & (labels_f == 0.0)).sum().item())
-    fn = float(((preds == 0.0) & (labels_f == 1.0)).sum().item())
-    tn = float(((preds == 0.0) & (labels_f == 0.0)).sum().item())
-
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-    jaccard = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
-    accuracy = (tp + tn) / max(tp + tn + fp + fn, 1.0)
-
-    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-    balanced_acc = 0.5 * (tpr + tnr)
-
-    return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "jaccard": jaccard,
-        "accuracy": accuracy,
-        "balanced_acc": balanced_acc,
-        "pred_edge_density": float(preds.mean().item()),
-    }
-
-@torch.no_grad()
-def binary_edge_metrics_from_logits(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    decision_threshold: float = 0.5,
-) -> Dict[str, float]:
-    probs = torch.sigmoid(logits)
-    labels_f = labels.to(dtype=torch.float32)
-
-    # Metrics at the configured decision threshold
-    threshold_metrics = _binary_counts_for_threshold(
-        probs=probs,
-        labels_f=labels_f,
-        threshold=decision_threshold,
-    )
-
-    # Threshold-free AUC metrics
-    roc_auc, pr_auc = _safe_auc_metrics(labels_f, probs)
-
-    # PR-AUC baseline is edge density / positive rate
-    edge_density = float(labels_f.mean().item())
-    if edge_density >= 1.0 or pr_auc != pr_auc:  # pr_auc != pr_auc checks NaN
-        norm_pr_auc = float("nan")
-    else:
-        norm_pr_auc = (pr_auc - edge_density) / (1.0 - edge_density)
-
-    # Debug threshold sweep
-    # best_threshold_by_f1 = float("nan")
-    # best_threshold_by_jaccard = float("nan")
-    # best_threshold_by_balanced_acc = float("nan")
-
-    # best_f1_swept = -1.0
-    # best_jaccard_swept = -1.0
-    # best_balanced_acc_swept = -1.0
-
-    # for t in torch.linspace(0.05, 0.95, steps=19, device=probs.device):
-    #     t_float = float(t.item())
-    #     tm = _binary_counts_for_threshold(probs, labels_f, t_float)
-
-    #     if tm["f1"] > best_f1_swept:
-    #         best_f1_swept = tm["f1"]
-    #         best_threshold_by_f1 = t_float
-
-    #     if tm["jaccard"] > best_jaccard_swept:
-    #         best_jaccard_swept = tm["jaccard"]
-    #         best_threshold_by_jaccard = t_float
-
-    #     if tm["balanced_acc"] > best_balanced_acc_swept:
-    #         best_balanced_acc_swept = tm["balanced_acc"]
-    #         best_threshold_by_balanced_acc = t_float
-
-    return {
-        **threshold_metrics,
-        "roc_auc": roc_auc,
-        "pr_auc": pr_auc,
-        "norm_pr_auc": norm_pr_auc,
-        "edge_density": edge_density,
-        "num_positive": float(labels_f.sum().item()),
-        "num_candidates": float(labels_f.numel()),
-
-        # Debug threshold sweep
-        # "best_threshold_by_f1": best_threshold_by_f1,
-        # "best_threshold_by_jaccard": best_threshold_by_jaccard,
-        # "best_threshold_by_balanced_acc": best_threshold_by_balanced_acc,
-        # "best_f1_swept": best_f1_swept,
-        # "best_jaccard_swept": best_jaccard_swept,
-        # "best_balanced_acc_swept": best_balanced_acc_swept,
-    }
 
 def _resolve_pos_weight(
     labels: torch.Tensor,
@@ -235,23 +105,107 @@ def _resolve_pos_weight(
 ) -> torch.Tensor | None:
     if pos_weight is not None:
         return torch.tensor(float(pos_weight), device=labels.device, dtype=torch.float32)
-
     if not auto_pos_weight:
         return None
 
     pos = float(labels.sum().item())
     neg = float(labels.numel() - labels.sum().item())
-
-    # Degenerate bin: all-negative or all-positive.
-    # BCE can still run, but auto pos_weight is not meaningful.
     if pos <= 0.0 or neg <= 0.0:
         return None
 
     weight = neg / pos
     if max_auto_pos_weight is not None:
         weight = min(weight, float(max_auto_pos_weight))
-
     return torch.tensor(weight, device=labels.device, dtype=torch.float32)
+
+
+@torch.no_grad()
+def binary_edge_metrics_from_logits(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    decision_threshold: float = 0.5,
+) -> Dict[str, float]:
+    probs = torch.sigmoid(logits.detach()).view(-1)
+    labels_f = labels.detach().float().view(-1)
+
+    preds = (probs >= float(decision_threshold)).float()
+    tp = float(((preds == 1.0) & (labels_f == 1.0)).sum().item())
+    fp = float(((preds == 1.0) & (labels_f == 0.0)).sum().item())
+    fn = float(((preds == 0.0) & (labels_f == 1.0)).sum().item())
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    jaccard = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
+
+    roc_auc, pr_auc = float("nan"), float("nan")
+    if labels_f.numel() > 0 and len(set(labels_f.cpu().tolist())) >= 2:
+        if roc_auc_score is not None and average_precision_score is not None:
+            y_true = labels_f.cpu().numpy()
+            y_score = probs.cpu().numpy()
+            try:
+                roc_auc = float(roc_auc_score(y_true, y_score))
+            except Exception:
+                pass
+            try:
+                pr_auc = float(average_precision_score(y_true, y_score))
+            except Exception:
+                pass
+
+    return {
+        "jaccard": jaccard,
+        "f1": f1,
+        "pr_auc": pr_auc,
+        "roc_auc": roc_auc,
+    }
+
+
+def select_decision_threshold(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    metric: str = "f1",
+) -> float:
+    """Pick a probability threshold on pooled val scores (same idea as dummy baselines)."""
+    if labels.numel() == 0:
+        return 0.5
+    best_t, best_v = 0.5, float("-inf")
+    for t in torch.linspace(0.0, 1.0, 201).tolist():
+        v = binary_edge_metrics_from_logits(logits, labels, decision_threshold=float(t)).get(
+            metric, float("nan")
+        )
+        if math.isfinite(v) and v > best_v:
+            best_t, best_v = float(t), float(v)
+    return best_t
+
+
+@torch.no_grad()
+def whole_bin_logits_and_labels(
+    model,
+    state,
+    next_events: EventBatch,
+    num_nodes: int,
+    *,
+    upper_triangle_only: bool = False,
+    include_self_loops: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    cand_batch = build_whole_bin_candidate_eventbatch(
+        next_events,
+        num_nodes,
+        upper_triangle_only=upper_triangle_only,
+        include_self_loops=include_self_loops,
+    )
+    labels = build_whole_bin_labels(
+        next_events,
+        cand_batch,
+        num_nodes,
+        upper_triangle_only=upper_triangle_only,
+        include_self_loops=include_self_loops,
+    )
+    state_eval = state.clone(detach=True) if state is not None else state
+    logits = model.score(state_eval, cand_batch).view(-1)
+    return logits, labels
 
 
 def whole_bin_edge_loss_and_metrics(
@@ -266,7 +220,6 @@ def whole_bin_edge_loss_and_metrics(
     pos_weight: float | None = None,
     auto_pos_weight: bool = True,
     max_auto_pos_weight: float | None = 50.0,
-    debug_scores: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     cand_batch = build_whole_bin_candidate_eventbatch(
         next_events,
@@ -274,7 +227,6 @@ def whole_bin_edge_loss_and_metrics(
         upper_triangle_only=upper_triangle_only,
         include_self_loops=include_self_loops,
     )
-
     labels = build_whole_bin_labels(
         next_events,
         cand_batch,
@@ -283,40 +235,20 @@ def whole_bin_edge_loss_and_metrics(
         include_self_loops=include_self_loops,
     )
 
-    before = None
     if state is not None and getattr(state, "node", None) is not None:
         before = state.node.detach().clone()
-        detach_for_score = not torch.is_grad_enabled()
-        state_eval = state.clone(detach=detach_for_score)
+        state_eval = state.clone(detach=not torch.is_grad_enabled())
     else:
+        before = None
         state_eval = state
 
     logits = model.score(state_eval, cand_batch).view(-1)
-    assert logits.shape == labels.shape, (
-        f"logits shape {tuple(logits.shape)} != labels shape {tuple(labels.shape)}"
-    )
+    assert logits.shape == labels.shape
 
     if before is not None:
         assert torch.equal(before, state.node.detach()), "score() mutated state.node"
-
     if not torch.isfinite(logits).all():
         raise RuntimeError("Non-finite logits from model.score()")
-
-    # DEBUG: inspect score/probability collapse
-    if debug_scores:
-        with torch.no_grad():
-            probs = torch.sigmoid(logits)
-
-            print(
-                f"logits mean={logits.mean().item():.4f} "
-                f"std={logits.std().item():.4f} "
-                f"min={logits.min().item():.4f} "
-                f"max={logits.max().item():.4f} | "
-                f"probs mean={probs.mean().item():.4f} "
-                f"std={probs.std().item():.4f} "
-                f"min={probs.min().item():.4f} "
-                f"max={probs.max().item():.4f}"
-            )
 
     pw = _resolve_pos_weight(
         labels,
@@ -327,11 +259,8 @@ def whole_bin_edge_loss_and_metrics(
     loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pw)
 
     metrics = binary_edge_metrics_from_logits(
-        logits.detach(),
-        labels.detach(),
+        logits,
+        labels,
         decision_threshold=decision_threshold,
     )
-    if pw is not None:
-        metrics["effective_pos_weight"] = float(pw.item())
-
     return loss, metrics

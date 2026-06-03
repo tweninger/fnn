@@ -11,7 +11,7 @@ def _format_threshold_value(value: Number) -> str:
     if isinstance(value, int):
         return str(value)
 
-    s = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    s = f"{float(value):.3f}".rstrip("0").rstrip(".")
     return s.replace(".", "p").replace("-", "m")
 
 
@@ -24,9 +24,6 @@ def make_threshold_dataset_name(
     name = base_name
 
     if threshold_metric is not None and threshold_value is not None:
-        name = f"{name}__{threshold_metric}__{_format_threshold_value(threshold_value)}"
-
-    if threshold_splits is not None:
-        name = f"{name}__splits-{split_scope_tag(threshold_splits)}"
+        name = f"{name}_{threshold_metric}_{_format_threshold_value(threshold_value)}"
 
     return name

@@ -8,6 +8,9 @@ def higher_is_better(metric_name: str) -> bool:
         "mean_node_pearson",
         "mean_node_spearman",
         "mean_node_r2",
+        "median_node_pearson",
+        "median_node_spearman",
+        "median_node_r2",
         "mean_cosine",
     }
 

@@ -70,6 +70,8 @@ def evaluate_hidden_positive_recovery(
     fake_feature_mode: str = "zeros",
     avoid_self_loops: bool = True,
     min_keep_per_nonempty_bin: int = 1,
+    corrupt_unit: str = "undirected_pair",
+    block_node_select: str = "random",
 ) -> Dict[str, float]:
     """
     Recovery eval:
@@ -111,6 +113,8 @@ def evaluate_hidden_positive_recovery(
             fake_feature_mode=fake_feature_mode,
             avoid_self_loops=avoid_self_loops,
             min_keep_per_nonempty_bin=min_keep_per_nonempty_bin,
+            corrupt_unit=corrupt_unit,
+            block_node_select=block_node_select,
         )
         observed_curr = info.observed.to(device)
         removed_curr = info.removed.to(device)
@@ -130,6 +134,8 @@ def evaluate_hidden_positive_recovery(
                 next_events=removed_curr,
                 num_nodes=cfg.num_nodes,
                 num_neg=cfg.num_neg,
+                forbidden_events=clean_curr,
+                hard_neg=getattr(cfg, "hard_neg", False),
             )
             _acc_update(
                 acc,
@@ -167,6 +173,8 @@ def evaluate_recovery_splits(
             fake_feature_mode=corruption_cfg["fake_feature_mode"],
             avoid_self_loops=corruption_cfg["avoid_self_loops"],
             min_keep_per_nonempty_bin=corruption_cfg["min_keep_per_nonempty_bin"],
+            corrupt_unit=corruption_cfg.get("corrupt_unit", "undirected_pair"),
+            block_node_select=corruption_cfg.get("block_node_select", "random"),
         )
 
     return recovery
@@ -292,6 +300,8 @@ def evaluate_threshold_hidden_positive_recovery(
                 next_events=removed_curr,
                 num_nodes=cfg.num_nodes,
                 num_neg=cfg.num_neg,
+                forbidden_events=clean_curr,
+                hard_neg=getattr(cfg, "hard_neg", False),
             )
             _acc_update(
                 acc,
@@ -325,5 +335,4 @@ def evaluate_threshold_recovery_splits(
             cfg=train_cfg,
             split=split,
         )
-
     return recovery

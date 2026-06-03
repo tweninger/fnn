@@ -1,5 +1,4 @@
 from __future__ import annotations
-from asyncio import events
 from dataclasses import dataclass
 from typing import Dict, Tuple, cast
 
@@ -8,7 +7,6 @@ import torch.nn.functional as F
 
 from core.events import EventBatch
 
-# containerrrr 
 @dataclass
 class RankingBatch:
     """
@@ -21,41 +19,59 @@ class RankingBatch:
     t: torch.Tensor | None = None
     features: torch.Tensor | None = None
 
-# samples random negative destination nodes
 
+# samples random negative destination nodes
 def sample_negative_dsts(
     num_nodes: int,
     pos_dst: torch.Tensor,
     num_neg: int,
     device: torch.device,
-    avoid: torch.Tensor | None = None,   # (M,) optional (e.g., src)
+    avoid: torch.Tensor | None = None,
+    src: torch.Tensor | None = None,   # for avoiding false negatives
+    true_edge_keys: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    Uniform negative sampling over node ids, avoiding collisions with pos_dst (and optionally avoid).
-    Returns (M, num_neg) LongTensor on `device`.
+    Uniform negative sampling over node ids.
+
+    Avoids:
+      1. the row's positive dst
+      2. optionally avoid, e.g. src for no self-loops
+      3. if src is given, any dst that is a true positive for that same src
     """
 
-    # randomly pick num_neg node IDs, avoid picking true dest, also maybe avoid source node if you want
     M = pos_dst.numel()
+
     if num_nodes <= 1:
         return torch.zeros((M, num_neg), device=device, dtype=torch.long)
 
+    pos_dst = pos_dst.to(device)
     neg = torch.randint(0, num_nodes, (M, num_neg), device=device, dtype=torch.long)
 
-    # Fix collisions with pos_dst (one pass is usually fine)
-    collide = neg.eq(pos_dst.view(-1, 1))
-    if collide.any():
-        neg[collide] = (neg[collide] + 1) % num_nodes
+    if src is not None:
+        src = src.to(device)
+    if true_edge_keys is None and src is not None:
+        true_edge_keys = (src * num_nodes + pos_dst).unique()
+    elif true_edge_keys is not None:
+        true_edge_keys = true_edge_keys.to(device)
 
-    # Optional: avoid another id (e.g., src for no self-loop negatives)
-    if avoid is not None:
-        collide2 = neg.eq(avoid.view(-1, 1))
-        if collide2.any():
-            neg[collide2] = (neg[collide2] + 1) % num_nodes
-            # might re-collide with pos_dst in rare cases; acceptable for now
+    for _ in range(num_nodes):
+        bad = neg.eq(pos_dst.view(-1, 1))
+        if avoid is not None:
+            bad = bad | neg.eq(avoid.to(device).view(-1, 1))
+        if true_edge_keys is not None:
+            sampled_edge_keys = src.view(-1, 1) * num_nodes + neg
+            bad = bad | torch.isin(sampled_edge_keys, true_edge_keys)
+        if not bad.any():
+            break
+        neg[bad] = (neg[bad] + 1) % num_nodes
+
+    if bad.any():
+        raise RuntimeError(
+            f"Could not sample valid negatives: {int(bad.sum())} bad slots remain. "
+            "Check num_nodes vs edges-per-src or pass avoid=src."
+        )
 
     return neg
-
 
 # shape-handling helper: m pos events each with k+1 candidate destinations...
 # this function flatters that into one big EventBatch of size m*(k+1) so model can score them all at once
@@ -108,10 +124,18 @@ def bce_ranking_loss(
 #then cross entropy with label 0 so candidate at index 0 is the true destination
 # aka... for each row, make column 0 score the highest
 # out of this set of possible dest nodes, put the real one on top
-def softmax_ranking_loss(scores: torch.Tensor, M: int, K1: int) -> torch.Tensor:
+def softmax_ranking_loss(
+    scores: torch.Tensor,
+    M: int,
+    K1: int,
+    *,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """CE on candidate scores. temperature < 1 sharpens softmax (train-only knob)."""
     logits = scores.view(M, K1)
     labels = torch.zeros((M,), device=scores.device, dtype=torch.long)  # pos at index 0
-    return F.cross_entropy(logits, labels, reduction="mean")
+    t = max(float(temperature), 1e-8)
+    return F.cross_entropy(logits / t, labels, reduction="mean")
 
 # mean reciprocal rank
 # higher MRR = better ranking for when pos is ranked
@@ -151,6 +175,9 @@ def ranking_loss_and_metrics(
     next_events: EventBatch,
     num_nodes: int,
     num_neg: int,
+    forbidden_events: EventBatch | None = None,
+    hard_neg: bool = False,
+    temperature: float = 1.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Given current state, evaluate next_events as positives with negatives.
@@ -160,7 +187,43 @@ def ranking_loss_and_metrics(
     K1 = num_neg + 1 # number of candidates per event
 
     # first column = true destination, rest = negatives 
-    neg_dst = sample_negative_dsts(num_nodes, next_events.dst, num_neg, device=device)
+    # neg_dst = sample_negative_dsts(num_nodes, next_events.dst, num_neg, device=device)
+
+    forbidden_keys = None
+    if forbidden_events is not None and forbidden_events.num_events > 0:
+        forbidden_keys = (
+            forbidden_events.src.to(device) * num_nodes
+            + forbidden_events.dst.to(device)
+        ).unique()
+
+    sample_kw = dict(
+        num_nodes=num_nodes,
+        pos_dst=next_events.dst,
+        device=device,
+        src=next_events.src,
+        avoid=next_events.src,
+        true_edge_keys=forbidden_keys,
+    )
+
+    before = state.node.detach().clone()
+    detach_for_score = not torch.is_grad_enabled()
+    state_eval = state.clone(detach=detach_for_score)
+
+    if num_neg > 0 and hard_neg:
+        num_pool = max(num_neg * 4, 20)
+        pool = sample_negative_dsts(**sample_kw, num_neg=num_pool)
+        with torch.no_grad():
+            pool_batch = build_candidate_eventbatch(
+                src=next_events.src,
+                candidates_dst=pool,
+                t=next_events.t,
+                features=next_events.features,
+            )
+            pool_scores = model.score(state_eval, pool_batch).view(M, num_pool)
+        neg_dst = pool.gather(1, pool_scores.topk(num_neg, dim=1).indices)
+    else:
+        neg_dst = sample_negative_dsts(**sample_kw, num_neg=num_neg)
+
     candidates_dst = cast(torch.LongTensor, torch.cat([next_events.dst.view(M, 1), neg_dst], dim=1))  # (M, K1)
 
     # flatten candidate structure into one big EventBatch for scoring
@@ -194,11 +257,8 @@ def ranking_loss_and_metrics(
     # uniq_per_row = float(uniq_counts_t.mean().item())
     # print("DEBUG mean unique candidates (first 50 rows):", uniq_per_row)    
 
-    # clone state before scoring so score can't accidentally mutate the real training set
-    before = state.node.detach().clone()
-    detach_for_score = not torch.is_grad_enabled()
-    state_eval = state.clone(detach=detach_for_score)  # ensure score() can't mutate original state
-        
+    # clone state before scoring so score() can't accidentally mutate the real training set
+    assert torch.equal(before, state.node.detach()), "score() mutated state.node before loss"
 
     scores = model.score(state_eval, cand_batch)  # (M*K1,)
 
@@ -248,7 +308,8 @@ def ranking_loss_and_metrics(
     
     
     #loss = bce_ranking_loss(scores, M=M, K1=K1)  
-    loss = softmax_ranking_loss(scores, M=M, K1=K1) # for each source event, rank the true destination above sampled negatives
+    loss = softmax_ranking_loss(scores, M=M, K1=K1, temperature=temperature)
 
-    metrics = mrr_and_hits(scores.detach(), M=M, K1=K1) # so training and eval are both centered on ranking quality
+    # Metrics always use raw scores (temperature affects training loss only).
+    metrics = mrr_and_hits(scores.detach(), M=M, K1=K1)
     return loss, metrics

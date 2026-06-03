@@ -264,18 +264,18 @@ class ChargedParticlesBinnedConfig:
     name: str = "charged_particles"
 
     # DATASET LENGTH / SPLIT
-    num_nodes: int = 64
-    num_bins: int = 512
+    num_nodes: int = 5
+    num_bins: int = 256
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)
 
     # SIMULATION
-    box_size: float = 4.0
+    box_size: float = 5.0
     loc_std: float = 1.0
     vel_norm: float = 0.5
     interaction_strength: float = 1.0
     softening: float = 0.10
     micro_dt: float = 1e-3
-    steps_per_bin: int = 250
+    steps_per_bin: int = 100
     max_force_clip: float = 100.0  # similar spirit to NRI's force clipping
 
     # CHARGE SAMPLING
@@ -286,10 +286,10 @@ class ChargedParticlesBinnedConfig:
     observation_noise_loc: float = 0.0
     observation_noise_vel: float = 0.0
 
-    distance_threshold_jitter_std: float = 0.01
-    force_threshold_jitter_std: float = 0.01
+    distance_threshold_jitter_std: float = 0.0
+    force_threshold_jitter_std: float = 0.0
 
-    obs_edge_keep_prob: float = 1.0     # 1.0 = keep all selected edges
+    obs_edge_keep_prob: float = 1.0     # 0.95 = keep 95% of selected edges
 
     # EVENT EMISSION
     # all_pairs: every directed pair i <- j, j != i
@@ -331,14 +331,14 @@ def _active_cfg_for_split(
 _EDGE_FEATURE_NAMES: Sequence[str] = (
     # "recv_charge",
     # "send_charge",
-    # "recv_px",
-    # "recv_py",
-    # "recv_vx",
-    # "recv_vy",
-    # "send_px",
-    # "send_py",
-    # "send_vx",
-    # "send_vy",
+    "recv_px",
+    "recv_py",
+    "recv_vx",
+    "recv_vy",
+    "send_px",
+    "send_py",
+    "send_vx",
+    "send_vy",
     # "rel_px",
     # "rel_py",
     #"rel_vx",
@@ -385,14 +385,14 @@ def _pair_record(
         [
             # recv_charge,
             # send_charge,
-            # float(recv_pos[0]),
-            # float(recv_pos[1]),
-            # float(recv_vel[0]),
-            # float(recv_vel[1]),
-            # float(send_pos[0]),
-            # float(send_pos[1]),
-            # float(send_vel[0]),
-            # float(send_vel[1]),
+            float(recv_pos[0]),
+            float(recv_pos[1]),
+            float(recv_vel[0]),
+            float(recv_vel[1]),
+            float(send_pos[0]),
+            float(send_pos[1]),
+            float(send_vel[0]),
+            float(send_vel[1]),
             # float(rel_pos[0]),
             # float(rel_pos[1]),
             # float(rel_vel[0]),

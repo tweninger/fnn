@@ -2,7 +2,7 @@ import json
 import time
 import torch
 from typing import Any, Callable, Dict, Iterable, Optional# easy to make parameter-holding classes/turns dataclass -> dictionary
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import copy
 # how event data is stored
 from core.events import EventBatch
@@ -13,7 +13,9 @@ from core.config import ModelConfig
 # real temporal datasets
 from eval.ranking import ranking_loss_and_metrics
 from experiments.interaction_prediction_runs import SweepRun 
+from training.ift_aux import accumulate_ift_aux, finalize_ift_aux
 from utils.repro import set_seed
+from utils.terminal import TermColor, color_text
 from eval.recovery import evaluate_recovery_splits
 from eval.recovery import evaluate_threshold_recovery_splits
 
@@ -41,6 +43,8 @@ class RunResult:
 class TrainConfig:
     num_nodes: int
     num_neg: int = 20 #negative samples
+    hard_neg: bool = False  # if True, mine top-scoring negatives from a random pool
+    ranking_temperature: float = 1.00  # CE on scores/T; T<1 sharpens, T>1 softens (train loss only)
     lr: float = 1e-3
     weight_decay: float = 1e-5 #regularizaiton//penality on large weights
     grad_clip: float = 1.0 #clip gradients if they get too big
@@ -58,6 +62,7 @@ def train_one_epoch(
     bins: Iterable[EventBatch], #training data as event bins
     optimizer: torch.optim.Optimizer, #adam or whatever updates weights
     cfg: TrainConfig, #training settings
+    target_bins: Optional[Iterable[EventBatch]] = None,
 ) -> Dict[str, float]: # returns dict 
     """
     One-step-ahead (binned) TGN training:
@@ -88,31 +93,30 @@ def train_one_epoch(
     total_mrr = 0.0
     n_steps = 0
 
-    # checks for ift
-    kappa_sum = 0.0
-    kappa_n = 0    
+    # IFT step aux: per-bin scalars summed then divided by n_steps (epoch average over bins).
+    ift_sums: Dict[str, float] = {}
+    ift_n = 0
 
 # we are looping through event bins one at a time
 # prev - previous time bin, curr - current time bin
-    prev: Optional[EventBatch] = None
-    for curr in bins:
-        curr = curr.to(device)
+    stream = zip(bins, target_bins) if target_bins is not None else ((b, b) for b in bins)
 
-        # Need consecutive (prev, curr) to do one-step-ahead prediction // no previous bin so prev is curr thats fine
-        if prev is None:
-            prev = curr
+    prev_obs: Optional[EventBatch] = None
+
+    for curr_obs, curr_target in stream:
+        curr_obs = curr_obs.to(device)        # corrupted / observed
+        curr_target = curr_target.to(device)  # clean / full target
+
+        if prev_obs is None:
+            prev_obs = curr_obs
             continue
 
         # use previous bin to update the model state // old hidden + previous events -> new hidden state
         # aux - extra diagnostic vals
-        state, _aux = model.step(state, prev)
+        state, _aux = model.step(state, prev_obs)
 
-        # if kappa returned, store for avg
-        if _aux is not None and "kappa" in _aux:
-            k = _aux["kappa"]
-            if torch.is_tensor(k):
-                kappa_sum += float(k.detach().item())
-                kappa_n += 1        
+        if accumulate_ift_aux(_aux, ift_sums):
+            ift_n += 1
 
         # check whether hidden states are behaving
         h = state.node
@@ -122,8 +126,8 @@ def train_one_epoch(
 
         # right after model.step(state, prev):
         # bug catcher!!
-        if prev.t is not None and getattr(state, "aux", None) is not None and "L_bin_t_min" in state.aux:
-            assert state.aux["L_bin_t_min"] == int(prev.t.min().item()), "step() did not use prev bin for operator"
+        if prev_obs.t is not None and getattr(state, "aux", None) is not None and "L_bin_t_min" in state.aux:
+            assert state.aux["L_bin_t_min"] == int(prev_obs.t.min().item()), "step() did not use prev bin for operator"
 
 
         # make sure no NaN/inf in node state 
@@ -136,31 +140,35 @@ def train_one_epoch(
 
         # all events in prev bin must have same timestamp, all events in curr have same, prev must be earlier than curr
         # data - discrete time bins in order
-        assert prev.t is not None and int(prev.t.min().item()) == int(prev.t.max().item()), \
+        assert prev_obs.t is not None and int(prev_obs.t.min().item()) == int(prev_obs.t.max().item()), \
             "Expected all events in prev bin to have the same timestamp"
-        assert curr.t is not None and int(curr.t.min().item()) == int(curr.t.max().item()), \
+        assert curr_obs.t is not None and int(curr_obs.t.min().item()) == int(curr_obs.t.max().item()), \
             "Expected all events in curr bin to have the same timestamp"
-        assert int(prev.t.max().item()) < int(curr.t.min().item()), \
+        assert int(prev_obs.t.max().item()) < int(curr_obs.t.min().item()), \
             "Expected prev bin to be strictly before curr bin in time"
         
         # sanity check
         if getattr(state, "aux", None) is not None:
             if "L_bin_t_min" in state.aux and "L_bin_t_max" in state.aux:
-                pt = int(prev.t.min().item())
+                pt = int(prev_obs.t.min().item())
                 assert state.aux["L_bin_t_min"] == pt and state.aux["L_bin_t_max"] == pt, \
                     f"L bin mismatch: L=({state.aux['L_bin_t_min']},{state.aux['L_bin_t_max']}) prev.t={pt}"
 
         # given current hidden state, score/predict the next events
+        rank_kw = {}
+        if target_bins is not None:
+            rank_kw["forbidden_events"] = curr_target
+        rank_kw["hard_neg"] = cfg.hard_neg
+        rank_kw["temperature"] = cfg.ranking_temperature
         loss, metrics = ranking_loss_and_metrics(
             model=model,
             state=state,
-            next_events=curr,
+            next_events=curr_target,
             num_nodes=cfg.num_nodes,
             num_neg=cfg.num_neg,
+            **rank_kw,
         )
         
-
-        # ---- 3) optimize ----
 
         # classic pytorch trio hehe
         loss.backward()
@@ -192,7 +200,7 @@ def train_one_epoch(
 
         # Slide the window forward
         # current becomes previous for next iteration!
-        prev = curr
+        prev_obs = curr_obs
 
     # end of epoch return/safety case!! its fine
     if n_steps == 0:
@@ -200,8 +208,7 @@ def train_one_epoch(
 
     # return average training metrics for the epoch
     out = {"loss": total_loss / n_steps, "mrr": total_mrr / n_steps}
-    if kappa_n > 0:
-        out["kappa_mean"] = kappa_sum / kappa_n
+    out.update(finalize_ift_aux(ift_sums, ift_n))
     return out
 
 
@@ -239,7 +246,7 @@ def run_one_experiment(
 
     # Fresh model+opt each run (important!)
     # build model from spec + model config, move to GPU/CPU, use Adam optimizer on model params
-    model = build_model_fn(spec, run.model_cfg).to(device)
+    model = build_model_fn(spec, replace(run.model_cfg, ift_h_init_seed=run.seed)).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
     )
@@ -258,12 +265,41 @@ def run_one_experiment(
     # loop thru 1, 2, x epochs
     for epoch in range(1, epochs + 1):
         # run one training epoch on training bins
-        train_stats_step = train_one_epoch(model, ds.bins("train"), optimizer, train_cfg)
+        # sparse observed memory + dense clean targets whenever ds != clean_ds
+        # (random-drop corruption or deterministic physical thresholding)
+        use_clean_targets = clean_ds is not None and clean_ds is not ds
 
-        # eval on train validation and test!
-        train_eval = evaluate_stream_sliced(model, ds.bins("train"), train_cfg, slices=eval_slices)
-        val_stats  = evaluate_stream_sliced(model, ds.bins("val"),   train_cfg, slices=eval_slices)
-        test_stats = evaluate_stream_sliced(model, ds.bins("test"),  train_cfg, slices=eval_slices)
+        train_stats_step = train_one_epoch(
+            model,
+            ds.bins("train"),          # corrupted observed context
+            optimizer,
+            train_cfg,
+            target_bins=clean_ds.bins("train") if use_clean_targets else None,
+        )
+
+        train_eval = evaluate_stream_sliced(
+            model,
+            ds.bins("train"),
+            train_cfg,
+            slices=eval_slices,
+            target_bins=clean_ds.bins("train") if use_clean_targets else None,
+        )
+
+        val_stats = evaluate_stream_sliced(
+            model,
+            ds.bins("val"),
+            train_cfg,
+            slices=eval_slices,
+            target_bins=clean_ds.bins("val") if use_clean_targets else None,
+        )
+
+        test_stats = evaluate_stream_sliced(
+            model,
+            ds.bins("test"),
+            train_cfg,
+            slices=eval_slices,
+            target_bins=clean_ds.bins("test") if use_clean_targets else None,
+        )
 
         # package stats from this epoch 
         snapshot = {
@@ -276,14 +312,16 @@ def run_one_experiment(
 
         # print nice progress summary !
         km = train_stats_step.get("kappa_mean", None)
-        kappa_str = f"{km:.4f}" if km is not None else ""
-        print(
-            f"[{run.name} | seed={run.seed} | epoch {epoch:03d}] "
-            f"train(step) mrr={train_stats_step['mrr']:.4f} "
-            f"kappa={kappa_str} | "
+        kappa_part = f" kappa={km:.4f}" if km is not None else ""
+        metrics_line = (
+            f"train(step) mrr={train_stats_step['mrr']:.4f}{kappa_part} | "
             f"train(eval) mrr={train_eval['mrr']:.4f} "
             f"val mrr={val_stats['mrr']:.4f} "
             f"test mrr={test_stats['mrr']:.4f}"
+        )
+        print(
+            f"[{run.name} | seed={run.seed} | epoch {epoch:03d}] "
+            + color_text(metrics_line, TermColor.BOLD, TermColor.HOT_PINK)
         )
 
         # if curren validation MRR is the best, remember that
@@ -324,14 +362,13 @@ def run_one_experiment(
         recovery = None
         threshold_recovery = None
 
-        recovery = None
-        threshold_recovery = None
-
         if clean_ds is not None and corruption_cfg is not None:
-            splits_for_recovery = tuple(
-                s for s in ("train", "val", "test")
-                if s in corruption_cfg.get("corrupt_splits", ())
-            )
+            splits_for_recovery = corruption_cfg.get("recovery_splits")
+            if splits_for_recovery is None:
+                splits_for_recovery = tuple(
+                    s for s in ("train", "val", "test")
+                    if s in corruption_cfg.get("corrupt_splits", ())
+                )
             if splits_for_recovery:
                 recovery = evaluate_recovery_splits(
                     model=model,
@@ -375,7 +412,7 @@ def run_one_experiment(
     if save_summary_path is not None:
         with open(save_summary_path, "a") as f:
             f.write(json.dumps(summary) + "\n")
-
+    
     result = RunResult(
         dataset=dataset_name,
         name=run.name,

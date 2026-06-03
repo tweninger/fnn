@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 from dataclasses import replace
@@ -8,7 +7,6 @@ import traceback
 
 import torch
 
-from core.config import ModelConfig
 from eval.evaluate import EvalSlices
 from experiments.dataset_stats import build_dataset_metadata_row
 from experiments.defaults import (
@@ -25,17 +23,6 @@ from experiments.results_summary import (
     format_interaction_metrics,
     format_starting_run_banner,
     format_top_runs_header,
-    print_interaction_seed_avg,
-    format_recovery_label,
-    format_recovery_metrics
-)
-from eval.recovery import (
-    evaluate_recovery_splits,
-    print_recovery_summary,
-    append_recovery_summary_row,
-    evaluate_hidden_positive_recovery,
-    evaluate_threshold_recovery_splits,
-    append_recovery_summary_row
 )
 
 from models.tgn_model import build_tgn_model
@@ -44,16 +31,78 @@ from training.interaction_prediction import run_one_experiment
 from utils.io import append_jsonl
 from utils.output_paths import dataset_group_name, experiment_output_paths
 from datasets.jodie import JODIEBinnedDataset, JODIEConfig
-from datasets.corrupted import CorruptedEventStreamDataset
 
-def get_clean_ref_name(dataset_name: str) -> str:
-    if dataset_name.startswith("wave__"):
-        return "wave__clean_ref"
-    if dataset_name.startswith("springweb"):
-        return "springweb__clean_ref"
-    if dataset_name.startswith("charged_particles__") or dataset_name.startswith("charged_particles_"):
-        return "charged_particles__clean_ref"
-    raise ValueError(f"No clean ref mapping for dataset {dataset_name}")
+
+def _print_count_summary(
+    values: list[int],
+    *,
+    label: str,
+    split: str,
+    max_bins: int,
+) -> None:
+    if not values:
+        print(f"[{label}] split={split}: no samples in first {max_bins} bins")
+        return
+    n = len(values)
+    mean = sum(values) / n
+    vals = sorted(values)
+    median = vals[n // 2]
+    print(
+        f"[{label}] split={split} | src-bin samples={n} | "
+        f"mean={mean:.2f} median={median} min={vals[0]} max={vals[-1]}"
+    )
+
+
+def print_avg_dst_per_src(ds, split: str = "train", max_bins: int = 200) -> None:
+    """
+    Per (src, bin) stats over the first max_bins bins.
+
+    - edges_per_src: event **row** count (what ranking / directed_event drop use)
+    - distinct_dst_per_src: unique dst ids (old stat; repeats to same dst count as 1)
+    - distinct_pair_per_src: unique directed (src, dst) keys (same as distinct_dst when src fixed)
+    """
+    per_src_rows: list[int] = []
+    per_src_distinct_dst: list[int] = []
+    per_src_distinct_pair: list[int] = []
+
+    for i, batch in enumerate(ds.bins(split)):
+        if i >= max_bins:
+            break
+        s, d = batch.src, batch.dst
+        if s.numel() == 0:
+            continue
+        for u in s.unique().tolist():
+            mask = s == u
+            dst_u = d[mask]
+            per_src_rows.append(int(mask.sum().item()))
+            per_src_distinct_dst.append(int(dst_u.unique().numel()))
+            pair_keys = u * int(ds.spec().num_nodes) + dst_u.long()
+            per_src_distinct_pair.append(int(pair_keys.unique().numel()))
+
+    if not per_src_rows:
+        print(f"[src/bin debug] split={split}: no edges in first {max_bins} bins")
+        return
+
+    _print_count_summary(
+        per_src_rows,
+        label="edges_per_src (rows)",
+        split=split,
+        max_bins=max_bins,
+    )
+    _print_count_summary(
+        per_src_distinct_dst,
+        label="distinct_dst_per_src",
+        split=split,
+        max_bins=max_bins,
+    )
+    if any(r != d for r, d in zip(per_src_rows, per_src_distinct_dst)):
+        _print_count_summary(
+            per_src_distinct_pair,
+            label="distinct_pair_per_src",
+            split=split,
+            max_bins=max_bins,
+        )
+
 
 def main():
     cleared_plot_dirs = set()
@@ -63,7 +112,7 @@ def main():
 
     RESULTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/results")
     PLOTS_ROOT = Path("/home/akapociu/ift/interactiondynamics/plots")
-    EXPERIMENT_NAME = "interaction_predictions_thresholded_all_splits_all_models"
+    EXPERIMENT_NAME = "test"
 
     paths = experiment_output_paths(RESULTS_ROOT, PLOTS_ROOT, EXPERIMENT_NAME)
 
@@ -85,26 +134,25 @@ def main():
     physical_datasets = build_physical_datasets(
         device=device,
         md22_npz_paths=md22_npz_paths,
-        include=("wave", "spring_web", "charged_particles"),
-        threshold_splits_options=(("train",),),
-        include_clean_references=True,
+        include=("charged_particles",),
+        threshold_splits_options=(("train", "val", "test"),),
     )
-    clean_refs = {name: ds for name, ds in physical_datasets.items() if name.endswith("__clean_ref")}
-    datasets = {name: ds for name, ds in physical_datasets.items() if not name.endswith("__clean_ref")}
-    # jodie_datasets = {
-    #     "wikipedia": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
-    #     ),
-    #     "reddit": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
-    #     ),
-    #     "mooc": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
-    #     ),
-    #     "lastfm": JODIEBinnedDataset(
-    #         JODIEConfig(root="./data/JODIE", name="LastFM", device=device)
-    #     ),
-    # }
+
+
+    jodie_datasets = {
+        "wikipedia": JODIEBinnedDataset(
+            JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
+        ),
+        # "reddit": JODIEBinnedDataset(
+        #     JODIEConfig(root="./data/JODIE", name="Reddit", device=device)
+        # ),
+        # "mooc": JODIEBinnedDataset(
+        #     JODIEConfig(root="./data/JODIE", name="MOOC", device=device)
+        # ),
+        # "lastfm": JODIEBinnedDataset(
+        #     JODIEConfig(root="./data/JODIE", name="LastFM", device=device)
+        # ),
+    }
 
     datasets = {
         **physical_datasets,
@@ -115,6 +163,8 @@ def main():
 
     for dataset_name, ds in datasets.items():
         spec = ds.spec()
+        print(f"\n=== {dataset_name} ===")
+        print_avg_dst_per_src(ds, split="train")
         # print("Dataset spec:")
         # print(
         #     json.dumps(
@@ -138,30 +188,30 @@ def main():
 
         runs = make_runs(
             base_model_cfg,
-            seeds=(0,),
+            seeds=(0, ),
             aggregator=("ift", "hopfield", "settransformer", "sum", "deepsets"),
             upd=("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
             dropout=(0.0,),
             scorer_dropout=(0.0,),
             use_time_features=(False,),
             ift_kappa_param=("softplus",),
-            ift_dt=(0.05,),
-            ift_gamma=(0.0,),
-            ift_kappa_init=(1.0,),
+            ift_dt=(0.1,),
+            ift_gamma=(0.05, ),
+            ift_kappa_init=(0.1,),
             ift_kappa_cap=(False,),
-            ift_kappa_max=(None,),
-        )
+            ift_kappa_max=(5.0,),
+        )   
 
-        # allowed_pairs = {
-        #     #("sum", "tgn_gru"),
-        #     ("ift", "ift_update"),
-        # }
+        allowed_pairs = {
+            #("sum", "tgn_gru"),
+            ("ift", "ift_update"),
+        }
 
-        # if allowed_pairs is not None:
-        #     runs = [
-        #         run for run in runs
-        #         if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
-        #     ]
+        if allowed_pairs is not None:
+            runs = [
+                run for run in runs
+                if (run.model_cfg.aggregator, run.model_cfg.update) in allowed_pairs
+            ]
 
         dataset_results = []
 
@@ -176,7 +226,7 @@ def main():
                     base_train_cfg=base_train_cfg,
                     run=run_for_ds,
                     build_model_fn=build_tgn_model,
-                    epochs=6,
+                    epochs=5,
                     eval_slices=EvalSlices(early_steps=10),
                     save_jsonl_path=results_jsonl,
                     save_summary_path=summary_jsonl,

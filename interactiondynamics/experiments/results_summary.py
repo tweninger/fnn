@@ -188,12 +188,14 @@ def format_recovery_metrics(recovery: dict | None) -> str:
 
     def _fmt_block(split_name: str, stats: dict) -> str:
         mrr = float(stats.get("mrr", float("nan")))
+        hits1 = float(stats.get("hits@1", float("nan")))
         hits10 = float(stats.get("hits@10", float("nan")))
         removed = int(stats.get("removed_events", 0))
 
         return (
             f"{color_text(split_name, TermColor.BOLD, TermColor.SOFT_PINK)} "
             f"hidden_mrr={color_text(f'{mrr:.4f}', TermColor.HOT_PINK)} | "
+            f"hidden_hits@1={color_text(f'{hits1:.4f}', TermColor.PEACH)} | "
             f"hidden_hits@10={color_text(f'{hits10:.4f}', TermColor.PEACH)} | "
             f"removed={color_text(str(removed), TermColor.GOLD)}"
         )

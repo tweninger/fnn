@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Iterator, Optional, Tuple
 
 import numpy as np
 from scipy.stats import spearmanr
@@ -117,12 +117,25 @@ class NodeEvalSlices:
     early_steps: int = 10
 
 
+def _iter_context_target_bins(
+    context_bins: Iterable[EventBatch],
+    target_bins: Optional[Iterable[EventBatch]] = None,
+) -> Iterator[tuple[EventBatch, EventBatch]]:
+    if target_bins is None:
+        for batch in context_bins:
+            yield batch, batch
+        return
+    for ctx, tgt in zip(context_bins, target_bins):
+        yield ctx, tgt
+
+
 @torch.no_grad()
 def evaluate_node_stream_sliced(
     model,
     bins: Iterable[EventBatch],
     cfg,
     slices: Optional[NodeEvalSlices] = None,
+    target_bins: Optional[Iterable[EventBatch]] = None,
 ) -> Dict[str, float]:
     """
     Evaluate one-step-ahead node prediction over a split.
@@ -169,22 +182,36 @@ def evaluate_node_stream_sliced(
     late_mse = 0.0
     n_late = 0
 
-    prev: Optional[EventBatch] = None
-    for curr in bins:
-        curr = curr.to(device)
+    y_true_chunks = []
+    y_pred_chunks = []
+    mask_chunks = []
+    saw_mask = False
 
-        if prev is None:
-            prev = curr
+    prev_obs: Optional[EventBatch] = None
+    for curr_obs, curr_target in _iter_context_target_bins(bins, target_bins):
+        curr_obs = curr_obs.to(device)
+        curr_target = curr_target.to(device)
+
+        if prev_obs is None:
+            prev_obs = curr_obs
             continue
 
-        state, _aux = model.step(state, prev)
+        state, _aux = model.step(state, prev_obs)
 
         loss, metrics = node_regression_loss_and_metrics(
             model=model,
             state=state,
-            next_events=curr,
+            next_events=curr_target,
             loss_name=cfg.loss_name,
         )
+        pred = model.predict_nodes(state.clone(detach=True))
+        true = curr_target.node_targets
+        if true is not None:
+            y_true_chunks.append(true.detach().cpu().numpy())
+            y_pred_chunks.append(pred.detach().cpu().numpy())
+            if curr_target.node_mask is not None:
+                saw_mask = True
+                mask_chunks.append(curr_target.node_mask.detach().cpu().numpy().astype(bool))
 
         # overall
         total_loss += float(loss.item())
@@ -207,9 +234,9 @@ def evaluate_node_stream_sliced(
             late_mse += float(metrics["mse"])
             n_late += 1
 
-        prev = curr
+        prev_obs = curr_obs
 
-    return {
+    out = {
         "loss": _safe_mean(total_loss, n_steps),
         "mae": _safe_mean(total_mae, n_steps),
         "rmse": _safe_mean(total_rmse, n_steps),
@@ -229,8 +256,24 @@ def evaluate_node_stream_sliced(
         "late_steps": float(n_late),
     }
 
+    if y_true_chunks:
+        y_true_np = np.stack(y_true_chunks, axis=0)
+        y_pred_np = np.stack(y_pred_chunks, axis=0)
+        node_mask_np = None
+        if saw_mask:
+            node_mask_np = np.stack(
+                [
+                    m if m is not None else np.ones((cfg.num_nodes,), dtype=bool)
+                    for m in mask_chunks
+                ],
+                axis=0,
+            )
+        out.update(compute_prediction_analysis(y_true_np, y_pred_np, node_mask_np))
+
+    return out
+
 @torch.no_grad()
-def collect_node_predictions_over_time(model, bins, cfg):
+def collect_node_predictions_over_time(model, bins, cfg, target_bins=None):
     """
     Collect one-step-ahead node predictions across a stream.
 
@@ -257,35 +300,36 @@ def collect_node_predictions_over_time(model, bins, cfg):
     y_pred = []
     masks = []
 
-    prev = None
+    prev_obs = None
     saw_mask = False
 
-    for curr in bins:
-        curr = curr.to(device)
+    for curr_obs, curr_target in _iter_context_target_bins(bins, target_bins):
+        curr_obs = curr_obs.to(device)
+        curr_target = curr_target.to(device)
 
-        if prev is None:
-            prev = curr
+        if prev_obs is None:
+            prev_obs = curr_obs
             continue
 
         # update memory with previous bin
-        state, _aux = model.step(state, prev)
+        state, _aux = model.step(state, prev_obs)
 
         # optional safety: predict on a detached clone so prediction cannot
         # accidentally mutate the live recurrent state
         state_eval = state.clone(detach=True) if state is not None else None
 
         pred = model.predict_nodes(state_eval)  # [N, d_y]
-        true = curr.node_targets
+        true = curr_target.node_targets
 
         if true is None:
-            raise ValueError("curr.node_targets is None; dataset must provide node targets")
+            raise ValueError("curr_target.node_targets is None; dataset must provide node targets")
 
         true = true.to(pred.device, pred.dtype)
 
         # record one scalar time for this bin
-        if curr.t is not None:
-            t_min = int(curr.t.min().item())
-            t_max = int(curr.t.max().item())
+        if curr_target.t is not None:
+            t_min = int(curr_target.t.min().item())
+            t_max = int(curr_target.t.max().item())
             if t_min != t_max:
                 raise ValueError(f"Expected one timestamp per bin, got [{t_min}, {t_max}]")
             t_val = t_min
@@ -296,13 +340,13 @@ def collect_node_predictions_over_time(model, bins, cfg):
         y_true.append(true.detach().cpu().numpy())
         y_pred.append(pred.detach().cpu().numpy())
 
-        if curr.node_mask is not None:
+        if curr_target.node_mask is not None:
             saw_mask = True
-            masks.append(curr.node_mask.detach().cpu().numpy().astype(bool))
+            masks.append(curr_target.node_mask.detach().cpu().numpy().astype(bool))
         else:
             masks.append(None)
 
-        prev = curr
+        prev_obs = curr_obs
 
     if len(times) == 0:
         raise ValueError("No scored steps were collected. Need at least two bins in the stream.")

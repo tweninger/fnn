@@ -21,21 +21,34 @@ class TGNGRUUpdate(UpdateLaw):
     aka... take current node memory and the new message, and update memory with a GRU
     """
 
-    def __init__(self, node_dim: int, msg_dim: int):
+    def __init__(
+        self,
+        node_dim: int,
+        msg_dim: int,
+        h_init_seed: int = 0,
+        h_init_scale: float = 0.01,
+    ):
         super().__init__()
         self.node_dim = int(node_dim)
         self.msg_dim = int(msg_dim)
+        self.h_init_seed = int(h_init_seed)
+        self.h_init_scale = float(h_init_scale)
         self.gru = nn.GRUCell(self.msg_dim, self.node_dim)
 
-    # wow haven't seen this before
     def init_state(
         self,
         batch_size: int,
         num_nodes: int,
         device: torch.device,
     ) -> Optional[ModelState]:
-        # batch_size unused in this minimal version (single global node memory)
-        node = torch.zeros((num_nodes, self.node_dim), device=device)
+        gen = torch.Generator(device=device)
+        gen.manual_seed(self.h_init_seed)
+        node = torch.randn(
+            num_nodes,
+            self.node_dim,
+            generator=gen,
+            device=device,
+        ) * self.h_init_scale
         return ModelState(node=node)
 
     # each step, take the aggregated messages and use GRUCell to update every node's hidden state
