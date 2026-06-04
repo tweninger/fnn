@@ -65,6 +65,7 @@ def _stash_observed_history(
     *,
     current_target: Optional[torch.Tensor],
     prev_target: Optional[torch.Tensor],
+    history_targets: Optional[list[torch.Tensor]] = None,
 ) -> None:
     if state is None:
         return
@@ -77,6 +78,10 @@ def _stash_observed_history(
         aux.pop("ift_prev_observed_target", None)
     else:
         aux["ift_prev_observed_target"] = prev_target.detach()
+    if history_targets:
+        aux["ift_readout_history_scalar"] = torch.stack([target.detach() for target in history_targets], dim=0)
+    else:
+        aux.pop("ift_readout_history_scalar", None)
     state.aux = aux
 
 
@@ -236,6 +241,20 @@ def _set_autonomous_rollout_readout(
     state.aux = aux
 
 
+def _set_rollout_history(
+    state: ModelState,
+    *,
+    history_values: list[Optional[torch.Tensor]],
+) -> None:
+    aux = {} if state.aux is None else dict(state.aux)
+    filtered = [value.detach() for value in history_values if value is not None]
+    if filtered:
+        aux["ift_readout_history_scalar"] = torch.stack(filtered, dim=0)
+    else:
+        aux.pop("ift_readout_history_scalar", None)
+    state.aux = aux
+
+
 @torch.no_grad()
 def evaluate_k_step_rollout(
     model,
@@ -267,9 +286,13 @@ def evaluate_k_step_rollout(
     state_after_prev: list[Optional[ModelState]] = [None] * num_steps
     prev_node_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
     prev_edge_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
+    prev_prev_prev_node_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
+    prev_prev_prev_edge_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
 
     prev_node_target: Optional[torch.Tensor] = None
     prev_edge_target: Optional[torch.Tensor] = None
+    prev_prev_prev_node_target: Optional[torch.Tensor] = None
+    prev_prev_prev_edge_target: Optional[torch.Tensor] = None
     prev_prev_node_target: Optional[torch.Tensor] = None
     prev_prev_edge_target: Optional[torch.Tensor] = None
     for idx in range(num_steps):
@@ -283,17 +306,30 @@ def evaluate_k_step_rollout(
             state,
             current_target=observed_target,
             prev_target=observed_prev_target,
+            history_targets=[
+                target
+                for target in (
+                    prev_prev_prev_edge_target if prev_edge_target is not None else prev_prev_prev_node_target,
+                    prev_prev_edge_target if prev_edge_target is not None else prev_prev_node_target,
+                    prev_edge_target if prev_edge_target is not None else prev_node_target,
+                )
+                if target is not None
+            ],
         )
         state, _ = model.step(state, events_seq[idx - 1])
         state_after_prev[idx] = None if state is None else state.clone(detach=True)
         prev_node_target_seq[idx] = prev_node_target
         prev_edge_target_seq[idx] = prev_edge_target
+        prev_prev_prev_node_target_seq[idx] = prev_prev_prev_node_target
+        prev_prev_prev_edge_target_seq[idx] = prev_prev_prev_edge_target
         if state is not None:
             state.detach_()
         if node_target_seq is not None:
+            prev_prev_prev_node_target = prev_prev_node_target
             prev_prev_node_target = prev_node_target
             prev_node_target = node_target_seq[idx].detach()
         if edge_target_seq is not None:
+            prev_prev_prev_edge_target = prev_prev_edge_target
             prev_prev_edge_target = prev_edge_target
             prev_edge_target = edge_target_seq[idx].targets.detach()
 
@@ -317,11 +353,15 @@ def evaluate_k_step_rollout(
         if autonomous_rollout:
             rollout_prev_node = None if node_target_seq is None else node_target_seq[start_idx]
             rollout_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx].targets
+            rollout_prev_prev_prev_node = None if node_target_seq is None else node_target_seq[start_idx - 2] if start_idx - 2 >= 0 else None
+            rollout_prev_prev_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx - 2].targets if start_idx - 2 >= 0 else None
             rollout_prev_prev_node = None if node_target_seq is None else node_target_seq[start_idx - 1]
             rollout_prev_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx - 1].targets
         else:
             rollout_prev_node = prev_node_target_seq[start_idx]
             rollout_prev_edge = prev_edge_target_seq[start_idx]
+            rollout_prev_prev_prev_node = prev_prev_prev_node_target_seq[start_idx]
+            rollout_prev_prev_prev_edge = prev_prev_prev_edge_target_seq[start_idx]
             rollout_prev_prev_node = prev_node_target_seq[start_idx - 1] if start_idx - 1 >= 0 else None
             rollout_prev_prev_edge = prev_edge_target_seq[start_idx - 1] if start_idx - 1 >= 0 else None
         persistent_prev_node = rollout_prev_node
@@ -357,6 +397,15 @@ def evaluate_k_step_rollout(
                         curr_state,
                         y_prev=rollout_prev_prev_edge,
                         y_t=rollout_prev_edge,
+                    )
+                if curr_state is not None:
+                    _set_rollout_history(
+                        curr_state,
+                        history_values=[
+                            rollout_prev_prev_prev_edge,
+                            rollout_prev_prev_edge,
+                            rollout_prev_edge,
+                        ],
                     )
                 edge_batch = edge_target_seq[idx]
                 edge_pred = model.score(curr_state, edge_batch.events)
@@ -397,11 +446,22 @@ def evaluate_k_step_rollout(
                     curr_state,
                     current_target=rollout_prev_edge if rollout_prev_edge is not None else rollout_prev_node,
                     prev_target=rollout_prev_prev_edge if rollout_prev_prev_edge is not None else rollout_prev_prev_node,
+                    history_targets=[
+                        target
+                        for target in (
+                            rollout_prev_prev_prev_edge if rollout_prev_edge is not None else rollout_prev_prev_prev_node,
+                            rollout_prev_prev_edge if rollout_prev_edge is not None else rollout_prev_prev_node,
+                            rollout_prev_edge if rollout_prev_edge is not None else rollout_prev_node,
+                        )
+                        if target is not None
+                    ],
                 )
                 curr_state, _ = model.step(curr_state, events_seq[idx])
                 if curr_state is not None:
                     curr_state.detach_()
+                rollout_prev_prev_prev_edge = rollout_prev_prev_edge
                 rollout_prev_prev_edge = prior_rollout_prev_edge
+                rollout_prev_prev_prev_node = rollout_prev_prev_node
                 rollout_prev_prev_node = prior_rollout_prev_node
 
         if trace_enabled and trace_rows:
@@ -522,7 +582,9 @@ def evaluate_stream_sliced(
     target_iter = iter(node_targets) if node_targets is not None else None
     edge_target_iter = iter(edge_targets) if edge_targets is not None else None
     prev_node_target: Optional[torch.Tensor] = None
+    prev_prev_prev_node_target: Optional[torch.Tensor] = None
     prev_edge_target: Optional[torch.Tensor] = None
+    prev_prev_prev_edge_target: Optional[torch.Tensor] = None
     prev_prev_node_target: Optional[torch.Tensor] = None
     prev_prev_edge_target: Optional[torch.Tensor] = None
     sanity_done = bool(getattr(cfg, "ift_batch_sanity_done", False))
@@ -546,6 +608,15 @@ def evaluate_stream_sliced(
             state,
             current_target=observed_target,
             prev_target=observed_prev_target,
+            history_targets=[
+                target
+                for target in (
+                    prev_prev_prev_edge_target if prev_edge_target is not None else prev_prev_prev_node_target,
+                    prev_prev_edge_target if prev_edge_target is not None else prev_prev_node_target,
+                    prev_edge_target if prev_edge_target is not None else prev_node_target,
+                )
+                if target is not None
+            ],
         )
         state, _ = model.step(state, prev)
 
@@ -907,9 +978,11 @@ def evaluate_stream_sliced(
         scored_step += 1
         prev = events
         if curr_node_target is not None:
+            prev_prev_prev_node_target = prev_prev_node_target
             prev_prev_node_target = prev_node_target
             prev_node_target = curr_node_target.detach().to(device)
         if curr_edge_target is not None and raw_edge_target_values is not None:
+            prev_prev_prev_edge_target = prev_prev_edge_target
             prev_prev_edge_target = prev_edge_target
             prev_edge_target = raw_edge_target_values.detach()
 

@@ -581,6 +581,54 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
             "rollout_test.rollout_persistent_edge_r2",
         ),
     ),
+    "ift_wave": SyntheticTaskSpec(
+        name="ift_wave",
+        description="Predict driven wave-like propagation over a ring with neighbor coupling and second-order rollout memory.",
+        focus="Topology-aware second-order dynamics for graph-coupled wave propagation.",
+        event_dim=2,
+        recommended_pairs=(
+            IFT_PAIR,
+            ("sum", "hnn"),
+            ("sum", "lnn"),
+            ("sum", "tgn_gru"),
+        ),
+        metric_family="edge_regression",
+        generator_family="ring_wave",
+        graph_type="ring",
+        dynamics_type="wave",
+        event_structure="ring_neighbor_and_self_events",
+        temporal_mode="rollout",
+        feature_schema=("signal", "is_drive"),
+        generator_params={
+            "a": 1.86,
+            "b": -0.92,
+            "c": 0.08,
+            "lap": 0.10,
+            "drive": 0.08,
+            "alpha": 1.0,
+            "gamma": 0.0,
+            "freq_min": 0.04,
+            "freq_max": 0.12,
+            "graph": "fixed_ring",
+        },
+        supported_metrics=(
+            "edge_mse",
+            "edge_r2",
+            "persistent_edge_r2",
+            "rollout_edge_r2",
+            "rollout_edge_nrmse",
+            "rollout_persistent_edge_r2",
+        ),
+        primary_metric_path="rollout_val.rollout_edge_r2",
+        primary_metric_goal="max",
+        summary_metric_paths=(
+            "val.edge_r2",
+            "rollout_val.rollout_edge_r2",
+            "rollout_val.rollout_persistent_edge_r2",
+            "rollout_test.rollout_edge_r2",
+            "rollout_test.rollout_persistent_edge_r2",
+        ),
+    ),
     "edge_ranking_sum_shift": SyntheticTaskSpec(
         name="edge_ranking_sum_shift",
         description="Predict the next-step destination shift induced by the signed sum of per-node event values.",
@@ -883,6 +931,9 @@ class SyntheticDataset(EventStreamDataset):
         if self.cfg.task == "ift_diffusion":
             bins, edge_targets = self._materialize_ift_diffusion()
             return bins, None, edge_targets
+        if self.cfg.task == "ift_wave":
+            bins, edge_targets = self._materialize_ift_wave()
+            return bins, None, edge_targets
         if self.cfg.task in {"edge_ranking_sum_shift", "next_dst_ranking"}:
             return self._materialize_shifted_ranking_stream(self._build_edge_ranking_sum_shift_step), None, None
         if self.cfg.task in {"edge_ranking_keyed_shift", "edge_retrieval"}:
@@ -1169,6 +1220,46 @@ class SyntheticDataset(EventStreamDataset):
                 + 0.25 * drive
             )
             x_curr = np.clip(x_next, -3.0, 3.0).astype(np.float32)
+
+        return bins, edge_targets
+
+    def _materialize_ift_wave(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+        num_nodes = int(self.cfg.num_nodes)
+        node_idx = np.arange(num_nodes, dtype=np.int64)
+        ring_dst_fwd = (node_idx + 1) % num_nodes
+        ring_dst_bwd = (node_idx - 1) % num_nodes
+        phases = self._rng.uniform(0.0, 2.0 * np.pi, size=num_nodes)
+        freqs = self._rng.uniform(0.04, 0.12, size=num_nodes)
+        amps = self._rng.uniform(0.30, 0.65, size=num_nodes)
+        x_prev = self._rng.normal(loc=0.0, scale=0.05, size=num_nodes).astype(np.float32)
+        x_curr = self._rng.normal(loc=0.0, scale=0.10, size=num_nodes).astype(np.float32)
+
+        bins: list[EventBatch] = []
+        edge_targets: list[EdgeTargetBatch] = []
+        for t in range(int(self.cfg.num_bins)):
+            drive = amps * np.sin((freqs * t) + phases)
+            drive += 0.20 * np.cos((0.40 * freqs * t) + (0.9 * phases))
+            drive += self._rng.normal(loc=0.0, scale=0.01, size=num_nodes)
+            drive = drive.astype(np.float32)
+
+            src = np.concatenate([node_idx, node_idx, node_idx])
+            dst = np.concatenate([ring_dst_fwd, ring_dst_bwd, node_idx])
+            signal = np.concatenate([x_curr, x_curr, drive]).astype(np.float32)
+            is_drive = np.concatenate(
+                [
+                    np.zeros((num_nodes,), dtype=np.float32),
+                    np.zeros((num_nodes,), dtype=np.float32),
+                    np.ones((num_nodes,), dtype=np.float32),
+                ]
+            )
+            features = np.stack([signal, is_drive], axis=1)
+            bins.append(self._make_event_batch(src, dst, features, t))
+            edge_targets.append(self._make_edge_target_batch(x_curr, t))
+
+            lap = np.roll(x_curr, 1) - (2.0 * x_curr) + np.roll(x_curr, -1)
+            x_next = (1.86 * x_curr) - (0.92 * x_prev) + (0.10 * lap) + (0.08 * drive)
+            x_next = np.clip(x_next, -4.0, 4.0).astype(np.float32)
+            x_prev, x_curr = x_curr, x_next
 
         return bins, edge_targets
 

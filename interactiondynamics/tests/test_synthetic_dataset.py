@@ -73,7 +73,7 @@ def test_synthetic_dataset_materializes_expected_supervision(task_name: str):
         "conservative_oscillator",
     }:
         expected_events = cfg.num_nodes
-    if task_name == "ift_diffusion":
+    if task_name in {"ift_diffusion", "ift_wave"}:
         expected_events = 3 * cfg.num_nodes
     if task_name == "associative_retrieval":
         expected_events = cfg.num_nodes * (max(3, cfg.events_per_bin // cfg.num_nodes) + 1)
@@ -140,6 +140,16 @@ def test_synthetic_task_axes_capture_graph_dynamics_and_supervision():
     assert "dynamics:diffusion" in tags
     assert "target:edge_regression" in tags
 
+    wave_axes = synthetic_task_axes("ift_wave")
+    assert wave_axes["graph_type"] == "ring"
+    assert wave_axes["dynamics_type"] == "wave"
+    assert wave_axes["temporal_mode"] == "rollout"
+
+    wave_tags = synthetic_task_tags("ift_wave")
+    assert "graph:ring" in wave_tags
+    assert "dynamics:wave" in wave_tags
+    assert "features:signal+is_drive" in wave_tags
+
 
 def test_synthetic_task_query_helpers_group_related_benchmarks():
     additive_tasks = set(list_synthetic_tasks(dynamics_type="additive"))
@@ -157,5 +167,6 @@ def test_synthetic_task_query_helpers_group_related_benchmarks():
 
     grouped = group_synthetic_tasks_by("graph_type")
     assert "ift_diffusion" in grouped["ring"]
+    assert "ift_wave" in grouped["ring"]
     assert "temporal_memory" in grouped["self_loop"]
     assert "deepsets_sum" in grouped["random_pair"]

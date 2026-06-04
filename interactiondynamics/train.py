@@ -164,8 +164,8 @@ def parse_args() -> argparse.Namespace:
     diag.add_argument(
         "--ift-diagnostic-tasks",
         nargs="*",
-        choices=("conservative_oscillator", "ift_diffusion"),
-        default=("conservative_oscillator", "ift_diffusion"),
+        choices=("conservative_oscillator", "ift_diffusion", "ift_wave"),
+        default=("conservative_oscillator", "ift_diffusion", "ift_wave"),
         help="Synthetic tasks to include in the focused IFT diagnostic suite.",
     )
 
@@ -461,8 +461,6 @@ def _diagnostic_baseline_rows(
     task_name: str,
     horizon: int,
 ) -> dict[str, dict[str, float]]:
-    if task_name != "conservative_oscillator":
-        return {}
     train_targets = _stack_split_edge_targets(ds.edge_targets("train") or [])
     val_targets = _stack_split_edge_targets(ds.edge_targets("val") or [])
     test_targets = _stack_split_edge_targets(ds.edge_targets("test") or [])
@@ -471,6 +469,34 @@ def _diagnostic_baseline_rows(
     test_drives = _stack_split_drives(ds.bins("test"), num_nodes=spec.num_nodes, drive_feature_idx=0)
 
     rows: dict[str, dict[str, float]] = {}
+    persistence_val = _sequence_delta_baseline_metrics(
+        val_targets,
+        val_drives,
+        coeffs=torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+        horizon=horizon,
+    )
+    persistence_test = _sequence_delta_baseline_metrics(
+        test_targets,
+        test_drives,
+        coeffs=torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+        horizon=horizon,
+    )
+    rows["persistence"] = {
+        "val_r2": float(persistence_val.get("edge_r2", float("nan"))),
+        "test_r2": float(persistence_test.get("edge_r2", float("nan"))),
+        "rollout_val_rollout_edge_r2": float(persistence_val.get("rollout_edge_r2", float("nan"))),
+        "rollout_test_rollout_edge_r2": float(persistence_test.get("rollout_edge_r2", float("nan"))),
+        "persistent_edge_r2": float(persistence_test.get("rollout_persistent_edge_r2", float("nan"))),
+        "delta_vs_persistent": float(
+            persistence_test.get("rollout_edge_r2", float("nan"))
+            - persistence_test.get("rollout_persistent_edge_r2", float("nan"))
+        ),
+        "edge_delta_r2": float(persistence_test.get("rollout_edge_delta_r2", float("nan"))),
+        "edge_delta_mae": float(persistence_test.get("rollout_edge_delta_mae", float("nan"))),
+    }
+    if task_name != "conservative_oscillator":
+        return rows
+
     for name, order in (("ar1_baseline", 1), ("ar2_baseline", 2)):
         coeffs = _fit_ar_coefficients(train_targets, train_drives, order=order)
         if coeffs is None:
@@ -529,6 +555,108 @@ def _diagnostic_baseline_rows(
     return rows
 
 
+def _rollout_window_summary(
+    split_len: int,
+    *,
+    horizon: int,
+    autonomous: bool,
+    targets: list[torch.Tensor],
+) -> dict[str, float]:
+    if autonomous:
+        valid_windows = max(0, split_len - horizon - 1)
+        max_supported_horizon = max(0, split_len - 2)
+    else:
+        valid_windows = max(0, split_len - horizon)
+        max_supported_horizon = max(0, split_len - 1)
+    flat = torch.cat(targets) if targets else torch.empty((0,), dtype=torch.float32)
+    target_var = float(flat.var(unbiased=False).item()) if flat.numel() > 0 else float("nan")
+    actual_horizon = float(horizon if valid_windows > 0 else max_supported_horizon)
+    return {
+        "split_len": float(split_len),
+        "requested_horizon": float(horizon),
+        "actual_horizon": actual_horizon,
+        "valid_windows": float(valid_windows),
+        "target_variance": target_var,
+    }
+
+
+def _print_rollout_summary(
+    task_name: str,
+    *,
+    horizon: int,
+    rows: dict[str, dict[str, float]],
+    val_targets: list[torch.Tensor],
+    test_targets: list[torch.Tensor],
+) -> None:
+    print(f"\n--- Rollout support: {task_name} ---")
+    print(
+        f"{'run':<20} {'mode':<5} {'val_len':>7} {'test_len':>8} {'req_h':>6} {'act_h':>6} "
+        f"{'val_win':>8} {'test_win':>9} {'val_var':>10} {'test_var':>10}"
+    )
+    print("-" * 100)
+    for name, row in rows.items():
+        autonomous = bool(name.startswith("ift2_ar_") or name == "ift2_auto")
+        val_info = _rollout_window_summary(
+            len(val_targets),
+            horizon=horizon,
+            autonomous=autonomous,
+            targets=val_targets,
+        )
+        test_info = _rollout_window_summary(
+            len(test_targets),
+            horizon=horizon,
+            autonomous=autonomous,
+            targets=test_targets,
+        )
+        mode = "auto" if autonomous else "step"
+        print(
+            f"{name[:20]:<20} {mode:<5} "
+            f"{int(val_info['split_len']):>7} {int(test_info['split_len']):>8} "
+            f"{int(val_info['requested_horizon']):>6} {int(val_info['actual_horizon']):>6} "
+            f"{int(val_info['valid_windows']):>8} {int(test_info['valid_windows']):>9} "
+            f"{val_info['target_variance']:>10.4f} {test_info['target_variance']:>10.4f}"
+        )
+        if val_info["valid_windows"] <= 0 or test_info["valid_windows"] <= 0:
+            print(
+                "  warning"
+                f" | no valid rollout windows for {name} on "
+                f"{'val' if val_info['valid_windows'] <= 0 else ''}"
+                f"{'/' if val_info['valid_windows'] <= 0 and test_info['valid_windows'] <= 0 else ''}"
+                f"{'test' if test_info['valid_windows'] <= 0 else ''}"
+            )
+
+
+def _print_wave_task_metadata(spec) -> None:
+    extra = spec.extra or {}
+    params = dict(extra.get("generator_params") or {})
+    feature_schema = list(extra.get("task_axes", {}).get("feature_schema", []))
+    freq_min = float(params.get("freq_min", float("nan")))
+    freq_max = float(params.get("freq_max", float("nan")))
+    mean_freq = 0.5 * (freq_min + freq_max) if np.isfinite(freq_min) and np.isfinite(freq_max) else float("nan")
+    est_period = (2.0 * np.pi / mean_freq) if np.isfinite(mean_freq) and mean_freq > 0.0 else float("nan")
+    model_uses_ring = extra.get("task_axes", {}).get("graph_type") == "ring"
+    print("\n--- Wave task metadata ---")
+    print(f"feature_schema={feature_schema or ['none']}")
+    print(
+        "generator"
+        f" | graph={params.get('graph', 'unknown')}"
+        f" lap={float(params.get('lap', float('nan'))):.3f}"
+        f" drive={float(params.get('drive', params.get('c', float('nan')))):.3f}"
+        f" a={float(params.get('a', float('nan'))):.3f}"
+        f" b={float(params.get('b', float('nan'))):.3f}"
+        f" alpha={float(params.get('alpha', float('nan'))):.3f}"
+        f" gamma={float(params.get('gamma', float('nan'))):.3f}"
+    )
+    print(
+        "wave"
+        f" | estimated_period={est_period:.3f}"
+        f" freq_min={freq_min:.3f}"
+        f" freq_max={freq_max:.3f}"
+        f" fixed_ring={params.get('graph', '') == 'fixed_ring'}"
+        f" model_L_matches_generator_graph={model_uses_ring}"
+    )
+
+
 def _print_ift_diagnostic_table(
     task_name: str,
     results: list[RunResult],
@@ -538,7 +666,7 @@ def _print_ift_diagnostic_table(
     print(f"\n=== IFT diagnostic table: {task_name} ===")
     header = (
         f"{'run':<20} {'state_v':>8} {'state_t':>8} {'roll_v':>8} {'roll_t':>8} {'pers':>8} "
-        f"{'d_pers':>8} {'delta_r2':>8} {'delta_mae':>9} {'vel_r2':>8} {'kappa':>7} {'gamma':>7} {'dt':>6} "
+        f"{'d_pers':>8} {'delta_r2':>8} {'delta_mae':>9} {'vel_used':>8} {'vel_int':>8} {'kappa':>7} {'gamma':>7} {'dt':>6} "
         f"{'alpha':>7} {'force':>8} {'diff':>8} {'rel_d':>8} {'rel_u':>8} {'vel_f':>7} {'for_f':>7} {'d_corr':>8} {'vel_mse':>8}"
     )
     print(header)
@@ -561,12 +689,16 @@ def _print_ift_diagnostic_table(
             ),
             "edge_delta_r2": _diagnostic_metric(snap, "rollout_test.rollout_edge_delta_r2"),
             "edge_delta_mae": _diagnostic_metric(snap, "rollout_test.rollout_edge_delta_mae"),
-            "decoded_v_r2_against_finite_difference": float(
+            "used_velocity_r2": float(
+                train_step.get("used_velocity_r2_mean", float("nan"))
+            ),
+            "internal_velocity_r2": float(
                 train_step.get(
                     "internal_velocity_r2_mean",
                     train_step.get("decoded_v_r2_against_finite_difference_mean", float("nan")),
                 )
             ),
+            "used_velocity_mse": float(train_step.get("used_velocity_mse_mean", float("nan"))),
             "internal_velocity_mse": float(
                 train_step.get("internal_velocity_mse_mean", train_step.get("velocity_loss_mean", float("nan")))
             ),
@@ -594,7 +726,8 @@ def _print_ift_diagnostic_table(
             f"{row['delta_vs_persistent']:>8.3f} "
             f"{row['edge_delta_r2']:>8.3f} "
             f"{row['edge_delta_mae']:>9.3f} "
-            f"{row['decoded_v_r2_against_finite_difference']:>8.3f} "
+            f"{row['used_velocity_r2']:>8.3f} "
+            f"{row['internal_velocity_r2']:>8.3f} "
             f"{row['learned_kappa']:>7.3f} "
             f"{row['gamma']:>7.3f} "
             f"{row['dt']:>6.3f} "
@@ -608,6 +741,14 @@ def _print_ift_diagnostic_table(
             f"{row['pred_delta_corr']:>8.3f} "
             f"{row['internal_velocity_mse']:>8.3f}"
         )
+        if np.isfinite(row["used_velocity_r2"]) or np.isfinite(row["used_velocity_mse"]):
+            print(
+                "  velocity"
+                f" | vel_used_r2={row['used_velocity_r2']:.4f}"
+                f" vel_internal_r2={row['internal_velocity_r2']:.4f}"
+                f" vel_used_mse={row['used_velocity_mse']:.4f}"
+                f" vel_internal_mse={row['internal_velocity_mse']:.4f}"
+            )
         if readout:
             coeff_line = (
                 "  coeffs"
@@ -637,6 +778,7 @@ def _print_ift_diagnostic_table(
                 f"{row.get('delta_vs_persistent', float('nan')):>8.3f} "
                 f"{row.get('edge_delta_r2', float('nan')):>8.3f} "
                 f"{row.get('edge_delta_mae', float('nan')):>9.3f} "
+                f"{float('nan'):>8.3f} "
                 f"{float('nan'):>8.3f} "
                 f"{float('nan'):>7.3f} "
                 f"{float('nan'):>7.3f} "
@@ -679,6 +821,28 @@ def _describe_ift_task(task_name: str, rows: dict[str, dict[str, float]]) -> lis
             if linear["rollout_test_rollout_edge_r2"] > generic["rollout_test_rollout_edge_r2"] + 0.03:
                 notes.append("IFT needs a better forcing/injection pathway.")
         return notes
+    if task_name == "ift_wave":
+        first_generic = rows.get("ift1_generic")
+        first_linear = rows.get("ift1_linear")
+        second_auto = rows.get("ift2_auto")
+        hist_scores = [
+            rows[name]["rollout_test_rollout_edge_r2"]
+            for name in ("ift2_hist_vel_k1", "ift2_hist_vel_k2", "ift2_hist_vel_k3")
+            if name in rows
+        ]
+        second_tf = rows.get("ift2_ar_tf")
+        if first_generic and first_linear:
+            if first_linear["rollout_test_rollout_edge_r2"] > first_generic["rollout_test_rollout_edge_r2"] + 0.03:
+                notes.append("Structured forcing improves over generic IFT on graph-coupled waves.")
+        if first_generic and second_auto:
+            if second_auto["rollout_test_rollout_edge_r2"] > first_generic["rollout_test_rollout_edge_r2"] + 0.03:
+                notes.append("IFT2-AUTO improves over IFT1, so graph-coupled waves give latent velocity a more natural learning signal.")
+        if second_auto and hist_scores and max(hist_scores) > second_auto["rollout_test_rollout_edge_r2"] + 0.03:
+            notes.append("HIST-VEL improves over AUTO on graph-coupled waves, so velocity is easier to infer from recent history than to maintain as a free latent state.")
+        if second_tf and second_auto:
+            if second_tf["rollout_test_rollout_edge_r2"] > second_auto["rollout_test_rollout_edge_r2"] + 0.03:
+                notes.append("IFT2-TF helps while IFT2-AUTO lags, so the latent velocity issue also appears in graph-coupled waves.")
+        return notes
 
     first_generic = rows.get("ift1_generic")
     first_direct = rows.get("ift1_direct")
@@ -687,6 +851,11 @@ def _describe_ift_task(task_name: str, rows: dict[str, dict[str, float]]) -> lis
     second_gated_linear = rows.get("ift2_gated_linear")
     second_direct = rows.get("ift2_direct")
     second_gated = rows.get("ift2_gated_direct")
+    hist_scores = [
+        rows[name]["rollout_test_rollout_edge_r2"]
+        for name in ("ift2_hist_vel_k1", "ift2_hist_vel_k2", "ift2_hist_vel_k3")
+        if name in rows
+    ]
     ar1 = rows.get("ar1_baseline")
     ar2 = rows.get("ar2_baseline")
     if first_generic and second_generic:
@@ -717,13 +886,15 @@ def _describe_ift_task(task_name: str, rows: dict[str, dict[str, float]]) -> lis
     if ar2 and second_direct:
         if ar2["rollout_test_rollout_edge_r2"] > second_direct["rollout_test_rollout_edge_r2"] + 0.03:
             notes.append("AR(2) beats second-order IFT, so the current IFT2 implementation/readout is still the bottleneck.")
+    if second_direct and hist_scores and max(hist_scores) > second_direct["rollout_test_rollout_edge_r2"] + 0.03:
+        notes.append("HIST-VEL beats latent AUTO, so velocity is easier to infer from recent history than to maintain as an unconstrained latent state.")
     return notes
 
 
 def _infer_drive_feature_idx(task_name: str, feature_schema: list[str]) -> Optional[int]:
     if "drive" in feature_schema:
         return feature_schema.index("drive")
-    if task_name == "ift_diffusion" and "signal" in feature_schema:
+    if task_name in {"ift_diffusion", "ift_wave"} and "signal" in feature_schema:
         return feature_schema.index("signal")
     return None
 
@@ -744,6 +915,8 @@ def run_ift_diagnostics(args: argparse.Namespace, device: torch.device) -> None:
         )
         feature_schema = list(spec.extra.get("task_axes", {}).get("feature_schema", [])) if spec.extra is not None else []
         drive_feature_idx = _infer_drive_feature_idx(task_name, feature_schema)
+        val_targets = _stack_split_edge_targets(ds.edge_targets("val") or [])
+        test_targets = _stack_split_edge_targets(ds.edge_targets("test") or [])
 
         base_train_cfg = TrainConfig(
             num_nodes=spec.num_nodes,
@@ -798,6 +971,8 @@ def run_ift_diagnostics(args: argparse.Namespace, device: torch.device) -> None:
         print(f"feature_schema={feature_schema or ['none']}")
         print(f"ift_drive_feature_idx={drive_feature_idx}")
         print(f"prediction_mode={base_train_cfg.prediction_mode}")
+        if task_name == "ift_wave":
+            _print_wave_task_metadata(spec)
         results: list[RunResult] = []
         for run in runs:
             line = f"run {run.name} | seed={run.seed}"
@@ -832,6 +1007,13 @@ def run_ift_diagnostics(args: argparse.Namespace, device: torch.device) -> None:
             horizon=int(args.rollout_horizon),
         )
         rows = _print_ift_diagnostic_table(task_name, results, extra_rows=extra_rows)
+        _print_rollout_summary(
+            task_name,
+            horizon=int(args.rollout_horizon),
+            rows=rows,
+            val_targets=val_targets,
+            test_targets=test_targets,
+        )
         task_rows[task_name] = rows
         notes = _describe_ift_task(task_name, rows)
         if notes:

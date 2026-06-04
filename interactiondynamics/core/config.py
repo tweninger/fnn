@@ -117,6 +117,7 @@ class ModelConfig:
     ift_internal_velocity_loss_weight: float = 0.0
     ift2_readout_mode: IFT2ReadoutMode = "default"
     ift_velocity_teacher_forcing: bool = False
+    ift_history_vel_steps: int = 0
     ift2_oracle_init: bool = False
     ift2_readout_init_mode: IFT2ReadoutInitMode = "zero"
     ift2_readout_init_scale: float = 0.01

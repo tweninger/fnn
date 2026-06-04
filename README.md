@@ -30,6 +30,7 @@ venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthet
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task associative_retrieval
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task conservative_oscillator
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task ift_diffusion
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task ift_wave
 ```
 
 - `smoke` runs a tiny toy dataset check over the focused model/update shortlist.
@@ -63,6 +64,7 @@ Useful commands:
 venv/bin/python -m interactiondynamics.train ift-diagnose
 venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks ift_diffusion
 venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks conservative_oscillator --num-bins 40 --rollout-horizon 5
+venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks ift_wave --num-bins 40 --rollout-horizon 5
 ```
 
 The diagnostic suite prints:
@@ -111,6 +113,7 @@ Synthetic tasks now cover the full node/edge supervision matrix plus an explicit
 | `temporal_memory` | Damped latent trajectory driven by per-node self events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `val.persistent_edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_test.rollout_edge_r2` | `sum/tgn_gru`, `sum/lnn`, `sum/hnn`, `ift/ift_update` |
 | `conservative_oscillator` | Lightly driven second-order oscillator with long rollout memory. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `val.persistent_edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_test.rollout_edge_r2` | `sum/hnn`, `sum/lnn`, `sum/tgn_gru`, `ift/ift_update` |
 | `ift_diffusion` | Ring-graph diffusion with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/lnn`, `sum/tgn_gru` |
+| `ift_wave` | Ring-coupled second-order wave dynamics with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/hnn`, `sum/lnn`, `sum/tgn_gru` |
 
 #### Node regression
 

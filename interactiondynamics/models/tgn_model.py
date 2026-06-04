@@ -205,6 +205,7 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             near_ar1_coeffs=getattr(cfg, "ift2_near_ar1_coeffs", None),
             oracle_coeffs=oracle_coeffs,
             trainable=bool(getattr(cfg, "ift2_readout_trainable", not bool(getattr(cfg, "ift2_oracle_init", False)))),
+            history_steps=getattr(cfg, "ift_history_vel_steps", 0),
         )
     else:
         sc_fn = SCORER_BUILDERS.get(cfg.scorer)

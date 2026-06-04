@@ -117,9 +117,12 @@ class IFTSecondOrderLinearHVForceScorer(ScoringHead):
         near_ar1_coeffs: Optional[tuple[float, float, float, float]] = None,
         oracle_coeffs: Optional[tuple[float, float, float]] = None,
         trainable: bool = True,
+        history_steps: int = 0,
     ):
         super().__init__()
         self.linear = nn.Linear(3, 1)
+        self.history_steps = max(0, int(history_steps))
+        self.history_linear = nn.Linear(self.history_steps, 1) if self.history_steps > 1 else None
         if init_mode == "zero" and oracle_coeffs is not None:
             init_mode = "oracle"
         self.init_mode = str(init_mode)
@@ -131,9 +134,13 @@ class IFTSecondOrderLinearHVForceScorer(ScoringHead):
             0.0,
         )
         self._initialize_weights(near_ar1_coeffs=near_ar1_coeffs)
+        self._initialize_history_weights()
         if not trainable:
             for param in self.linear.parameters():
                 param.requires_grad_(False)
+            if self.history_linear is not None:
+                for param in self.history_linear.parameters():
+                    param.requires_grad_(False)
 
     def _initialize_weights(
         self,
@@ -167,6 +174,14 @@ class IFTSecondOrderLinearHVForceScorer(ScoringHead):
             if self.init_mode != "zero":
                 raise ValueError(f"Unsupported init_mode={self.init_mode!r}")
 
+    def _initialize_history_weights(self) -> None:
+        if self.history_linear is None:
+            return
+        with torch.no_grad():
+            self.history_linear.weight.zero_()
+            self.history_linear.bias.zero_()
+            self.history_linear.weight[0, 0] = 1.0
+
     def coefficient_dict(self) -> dict[str, float]:
         return {
             "w_y": float(self.linear.weight[0, 0].detach().item()),
@@ -185,6 +200,24 @@ class IFTSecondOrderLinearHVForceScorer(ScoringHead):
             "bias_oracle": self._oracle_coeffs[3],
         }
 
+    def _history_velocity(self, state: ModelState, pos: torch.Tensor) -> Optional[torch.Tensor]:
+        if self.history_steps <= 0 or state.aux is None:
+            return None
+        history = state.aux.get("ift_readout_history_scalar")
+        if not torch.is_tensor(history):
+            return None
+        history_t = history.to(device=pos.device, dtype=pos.dtype)
+        if history_t.dim() != 2 or history_t.size(1) != pos.size(0):
+            return None
+        if history_t.size(0) < self.history_steps + 1:
+            return None
+        deltas = history_t[1:] - history_t[:-1]
+        recent = deltas[-self.history_steps :].flip(0).transpose(0, 1)
+        if self.history_steps == 1:
+            return recent[:, 0]
+        assert self.history_linear is not None
+        return self.history_linear(recent).squeeze(-1)
+
     def forward(self, state: Optional[ModelState], candidate_events: EventBatch) -> torch.Tensor:
         assert state is not None and state.aux is not None, "IFTSecondOrderLinearHVForceScorer requires state.aux."
         pos = state.aux.get("ift_readout_position_scalar")
@@ -193,6 +226,10 @@ class IFTSecondOrderLinearHVForceScorer(ScoringHead):
         assert torch.is_tensor(pos) and torch.is_tensor(vel) and torch.is_tensor(force), (
             "IFTSecondOrderLinearHVForceScorer requires readout scalars in state.aux"
         )
+        hist_vel = self._history_velocity(state, pos)
+        if hist_vel is not None:
+            vel = hist_vel
+            state.aux["ift_readout_velocity_scalar"] = hist_vel.detach()
         dst = candidate_events.dst.to(device=pos.device, dtype=torch.long)
         features = torch.stack([pos[dst], vel[dst], force[dst]], dim=-1)
         return self.linear(features).squeeze(-1)

@@ -71,6 +71,40 @@ def build_ift_diagnostic_runs(
         add("ift1_gated_direct", **shared, ift_update_order="first", ift_forcing_mode="gated_direct_scalar")
         add("gru_baseline", aggregator="sum", update="tgn_gru")
         return runs
+    if task_name == "ift_wave":
+        add("ift1_generic", **shared, ift_update_order="first", ift_forcing_mode="generic_mlp")
+        add("ift1_linear", **shared, ift_update_order="first", ift_forcing_mode="linear_event")
+        add("ift1_direct", **shared, ift_update_order="first", ift_forcing_mode="direct_scalar")
+        add("ift2_auto", **shared, ift_update_order="second", ift_forcing_mode="linear_event")
+        for history_steps in (1, 2, 3):
+            add(
+                f"ift2_hist_vel_k{history_steps}",
+                **shared,
+                ift_update_order="second",
+                ift_forcing_mode="linear_event",
+                ift2_readout_mode="linear_h_v_force",
+                ift_velocity_teacher_forcing=False,
+                ift_history_vel_steps=history_steps,
+                ift2_readout_init_mode="small_random",
+                ift2_readout_init_scale=0.01,
+                lr=1e-2,
+                prediction_mode=cast(PredictionMode, "delta"),
+            )
+        if drive_feature_idx is not None:
+            add(
+                "ift2_ar_tf",
+                **shared,
+                ift_update_order="second",
+                ift_forcing_mode="linear_event",
+                ift2_readout_mode="linear_h_v_force",
+                ift_velocity_teacher_forcing=True,
+                ift2_readout_init_mode="small_random",
+                ift2_readout_init_scale=0.01,
+                lr=1e-2,
+                prediction_mode=cast(PredictionMode, "delta"),
+            )
+        add("gru_baseline", aggregator="sum", update="tgn_gru")
+        return runs
 
     add("ift1_generic", **shared, ift_update_order="first", ift_forcing_mode="generic_mlp")
     add("ift1_direct", **shared, ift_update_order="first", ift_forcing_mode="direct_scalar")
@@ -213,6 +247,20 @@ def build_ift_diagnostic_runs(
         lr=1e-2,
         prediction_mode=cast(PredictionMode, "delta"),
     )
+    for history_steps in (1, 2, 3):
+        add(
+            f"ift2_hist_vel_k{history_steps}",
+            **shared,
+            ift_update_order="second",
+            ift_forcing_mode="direct_scalar",
+            ift2_readout_mode="linear_h_v_force",
+            ift_velocity_teacher_forcing=False,
+            ift_history_vel_steps=history_steps,
+            ift2_readout_init_mode="small_random",
+            ift2_readout_init_scale=0.01,
+            lr=1e-2,
+            prediction_mode=cast(PredictionMode, "delta"),
+        )
     add(
         "neural_ar2_delta",
         **shared,

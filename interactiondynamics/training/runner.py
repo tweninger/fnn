@@ -101,6 +101,7 @@ def _stash_observed_history(
     *,
     current_target: Optional[torch.Tensor],
     prev_target: Optional[torch.Tensor],
+    history_targets: Optional[list[torch.Tensor]] = None,
 ) -> None:
     if state is None:
         return
@@ -113,6 +114,10 @@ def _stash_observed_history(
         aux.pop("ift_prev_observed_target", None)
     else:
         aux["ift_prev_observed_target"] = prev_target.detach()
+    if history_targets:
+        aux["ift_readout_history_scalar"] = torch.stack([target.detach() for target in history_targets], dim=0)
+    else:
+        aux.pop("ift_readout_history_scalar", None)
     state.aux = aux
 
 
@@ -147,6 +152,8 @@ def train_one_epoch(
         "pred_delta_corr",
         "velocity_loss",
         "decoded_v_r2_against_finite_difference",
+        "used_velocity_mse",
+        "used_velocity_r2",
         "internal_velocity_loss",
         "internal_velocity_mse",
         "internal_velocity_r2",
@@ -156,8 +163,10 @@ def train_one_epoch(
     target_iter = iter(node_targets) if node_targets is not None else None
     edge_target_iter = iter(edge_targets) if edge_targets is not None else None
     prev_node_target: Optional[torch.Tensor] = None
+    prev_prev_prev_node_target: Optional[torch.Tensor] = None
     prev_prev_node_target: Optional[torch.Tensor] = None
     prev_edge_target: Optional[torch.Tensor] = None
+    prev_prev_prev_edge_target: Optional[torch.Tensor] = None
     prev_prev_edge_target: Optional[torch.Tensor] = None
     primary_name: Optional[str] = None
     for curr in bins:
@@ -179,6 +188,15 @@ def train_one_epoch(
             state,
             current_target=observed_target,
             prev_target=observed_prev_target,
+            history_targets=[
+                target
+                for target in (
+                    prev_prev_prev_edge_target if prev_edge_target is not None else prev_prev_prev_node_target,
+                    prev_prev_edge_target if prev_edge_target is not None else prev_prev_node_target,
+                    prev_edge_target if prev_edge_target is not None else prev_node_target,
+                )
+                if target is not None
+            ],
         )
         state, aux = model.step(state, prev)
 
@@ -352,6 +370,35 @@ def train_one_epoch(
             curr_edge_target is not None
             and prev_edge_target is not None
             and aux is not None
+        ):
+            stored_velocity = None
+            if state is not None and state.aux is not None:
+                stored_velocity = state.aux.get("ift_readout_velocity_scalar")
+            if not torch.is_tensor(stored_velocity):
+                stored_velocity = aux.get("stored_velocity_scalar")
+            true_velocity = aux.get("true_velocity_scalar")
+            if torch.is_tensor(stored_velocity) and torch.is_tensor(true_velocity):
+                used_velocity_target = true_velocity.to(
+                    device=stored_velocity.device,
+                    dtype=stored_velocity.dtype,
+                )
+                used_velocity_mse = torch.nn.functional.mse_loss(
+                    stored_velocity,
+                    used_velocity_target,
+                )
+                used_velocity_metrics = regression_metrics(
+                    stored_velocity.detach(),
+                    used_velocity_target.detach(),
+                    prefix="used_velocity",
+                )
+                metrics["used_velocity_mse"] = float(used_velocity_mse.detach().item())
+                metrics["used_velocity_r2"] = float(
+                    used_velocity_metrics.get("used_velocity_r2", 0.0)
+                )
+        if (
+            curr_edge_target is not None
+            and prev_edge_target is not None
+            and aux is not None
             and float(getattr(model.update, "internal_velocity_loss_weight", 0.0)) > 0.0
         ):
             stored_velocity = aux.get("internal_velocity_scalar")
@@ -428,9 +475,11 @@ def train_one_epoch(
 
         prev = curr
         if curr_node_target is not None:
+            prev_prev_prev_node_target = prev_prev_node_target
             prev_prev_node_target = prev_node_target
             prev_node_target = curr_node_target.detach().to(device)
         if curr_edge_target is not None:
+            prev_prev_prev_edge_target = prev_prev_edge_target
             prev_prev_edge_target = prev_edge_target
             prev_edge_target = raw_edge_target_values.detach()
 
@@ -768,8 +817,10 @@ def run_one_experiment(
                 f" | force={train_stats_step.get('force_norm_mean', train_stats_step.get('injection_term_norm_mean', float('nan'))):.4f}"
                 f" | rel_diff={train_stats_step.get('relative_diffusion_mean', float('nan')):.4f}"
                 f" | rel_upd={train_stats_step.get('relative_update_mean', float('nan')):.4f}"
-                f" | vel_r2={train_stats_step.get('internal_velocity_r2_mean', train_stats_step.get('decoded_v_r2_against_finite_difference_mean', float('nan'))):.4f}"
-                f" | vel_mse={train_stats_step.get('internal_velocity_mse_mean', train_stats_step.get('velocity_loss_mean', float('nan'))):.4f}"
+                f" | vel_used_r2={train_stats_step.get('used_velocity_r2_mean', float('nan')):.4f}"
+                f" | vel_int_r2={train_stats_step.get('internal_velocity_r2_mean', train_stats_step.get('decoded_v_r2_against_finite_difference_mean', float('nan'))):.4f}"
+                f" | vel_used_mse={train_stats_step.get('used_velocity_mse_mean', float('nan')):.4f}"
+                f" | vel_int_mse={train_stats_step.get('internal_velocity_mse_mean', train_stats_step.get('velocity_loss_mean', float('nan'))):.4f}"
                 f" | vel_f={train_stats_step.get('velocity_fraction_mean', float('nan')):.4f}"
                 f" | force_f={train_stats_step.get('force_fraction_mean', float('nan')):.4f}"
                 f" | Lnnz={train_stats_step.get('L_nnz_mean', float('nan')):.1f}"
