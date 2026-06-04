@@ -242,7 +242,19 @@ class ComposedInteractionModel(InteractionModel):
         messages = self.aggregator(
             state, event_emb, events, self.num_nodes
         )
+        agg_aux = None
+        if state is not None and state.aux is not None:
+            # Aggregators may stash persistent operator state (for example an
+            # EMA-smoothed Laplacian) on the incoming state before the update
+            # law runs. Preserve that state across update laws that allocate a
+            # fresh ModelState instead of mutating/cloning the old one.
+            agg_aux = dict(state.aux)
         next_state, aux = self.update(state, messages, drive)
+        if next_state is not None and agg_aux is not None:
+            next_aux = {} if next_state.aux is None else dict(next_state.aux)
+            merged_aux = dict(agg_aux)
+            merged_aux.update(next_aux)
+            next_state.aux = merged_aux
         return next_state, aux
 
     def score(self, state, candidate_events):

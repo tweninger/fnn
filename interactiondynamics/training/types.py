@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import torch
 
 from interactiondynamics.core.config import ModelConfig
 from interactiondynamics.eval.evaluate import EvalSlices
+
+PredictionMode = Literal["state", "delta", "state_plus_delta"]
 
 
 @dataclass(frozen=True)
@@ -17,6 +19,7 @@ class SweepRun:
     weight_decay: Optional[float] = None
     num_neg: Optional[int] = None
     tbptt_steps: Optional[int] = None
+    prediction_mode: Optional[PredictionMode] = None
     seed: int = 0
 
 
@@ -46,6 +49,7 @@ class TrainConfig:
     node_target_mode: str = "raw"
     edge_target_mode: str = "raw"
     edge_target_scale: str = "raw"
+    prediction_mode: PredictionMode = "state"
     edge_target_mean: float = 0.0
     edge_target_std: float = 1.0
     lr: float = 1e-3

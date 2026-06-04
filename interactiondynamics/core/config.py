@@ -7,6 +7,19 @@ AggregatorType = Literal["ift", "sum", "deepsets", "settransformer", "hopfield"]
 ScorerType = Literal["dot", "mlp"]
 UpdateType = Literal["ift_update", "tgn_gru", "lnn", "hnn", "hopfield_update"]
 KappaParam = Literal["exp", "softplus"]
+IFTLaplacianMode = Literal["current_bin", "ema", "fixed_ring"]
+IFTMessageReduce = Literal["mean", "sum"]
+IFTForcingMode = Literal[
+    "generic_mlp",
+    "linear_event",
+    "gated_linear_event",
+    "direct_scalar",
+    "gated_direct_scalar",
+]
+IFTUpdateOrder = Literal["first", "second"]
+IFTVelocityInitMode = Literal["zero", "learned", "finite_difference"]
+IFT2ReadoutMode = Literal["default", "linear_h_v_force"]
+IFT2ReadoutInitMode = Literal["zero", "small_random", "near_ar1", "oracle"]
 
 @dataclass
 class ModelConfig:
@@ -75,4 +88,35 @@ class ModelConfig:
     ift_learn_kappa: bool = True
     ift_kappa_param: KappaParam = "softplus"
     ift_kappa_max: float | None = None   # None => no clamp cap
-    ift_kappa_cap: bool = False          # if True, clamp to [0, ift_kappa_max]    
+    ift_kappa_cap: bool = False          # if True, clamp to [0, ift_kappa_max]
+    ift_laplacian_mode: IFTLaplacianMode = "ema"
+    ift_laplacian_beta: float = 0.9
+    ift_message_reduce: IFTMessageReduce = "sum"
+    ift_force_reduce: IFTMessageReduce = "sum"
+    ift_forcing_mode: IFTForcingMode = "generic_mlp"
+    ift_drive_feature_idx: Optional[int] = None
+    ift_force_scale_init: float = 1.0
+    ift_force_learn_scale: bool = True
+    ift_force_target_dim: Optional[int] = 0
+    ift_disable_laplacian: bool = False
+    ift_randomize_laplacian: bool = False
+    ift_identity_laplacian: bool = False
+    ift_zero_messages: bool = False
+    ift_zero_injection: bool = False
+    ift_inj_clip: Optional[float] = 1.0
+    ift_direct_drive: bool = False
+    ift_update_order: IFTUpdateOrder = "first"
+    ift_second_order_alpha: float = 1.0
+    ift_second_order_dt: float = 0.1
+    ift_second_order_gamma: float = 0.0
+    ift_second_order_kappa: float = 1.0
+    ift_second_order_learn_params: bool = True
+    ift_velocity_init_mode: IFTVelocityInitMode = "finite_difference"
+    ift_velocity_supervision: bool = True
+    ift_velocity_loss_weight: float = 0.01
+    ift2_readout_mode: IFT2ReadoutMode = "default"
+    ift_velocity_teacher_forcing: bool = False
+    ift2_oracle_init: bool = False
+    ift2_readout_init_mode: IFT2ReadoutInitMode = "zero"
+    ift2_readout_init_scale: float = 0.01
+    ift2_readout_trainable: bool = True

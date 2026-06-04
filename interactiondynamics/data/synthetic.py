@@ -30,6 +30,7 @@ class SyntheticTaskSpec:
     summary_metric_paths: tuple[str, ...] = ()
     requires_node_scorer: bool = False
     feature_schema: tuple[str, ...] = ()
+    generator_params: Optional[Dict[str, Any]] = None
 
     @property
     def supervision_level(self) -> str:
@@ -49,6 +50,7 @@ class SyntheticTaskSpec:
             "supervision_level": self.supervision_level,
             "supervision_type": self.supervision_type,
             "feature_schema": list(self.feature_schema),
+            "generator_params": dict(self.generator_params) if self.generator_params is not None else None,
         }
 
     def tags(self) -> tuple[str, ...]:
@@ -525,6 +527,7 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
         event_structure="self_events",
         temporal_mode="rollout",
         feature_schema=("drive",),
+        generator_params={"a": 1.92, "b": -0.96, "c": 0.08},
         supported_metrics=(
             "edge_mse",
             "edge_r2",
@@ -559,6 +562,7 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
         event_structure="ring_neighbor_and_self_events",
         temporal_mode="rollout",
         feature_schema=("signal", "is_drive"),
+        generator_params={"self": 0.58, "nbr": 0.18, "drive": 0.25},
         supported_metrics=(
             "edge_mse",
             "edge_r2",
@@ -1356,6 +1360,7 @@ class SyntheticDataset(EventStreamDataset):
                 "task_tags": list(self._task.tags()),
                 "recommended_pairs": [f"{agg}/{upd}" for agg, upd in self._task.recommended_pairs],
                 "metric_family": self._task.metric_family,
+                "generator_params": None if self._task.generator_params is None else dict(self._task.generator_params),
                 "supported_metrics": list(self._task.supported_metrics),
                 "primary_metric": {
                     "path": self._task.primary_metric_path,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import itertools
 from dataclasses import asdict
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, cast
 
 import torch
 
@@ -12,7 +12,7 @@ from interactiondynamics.data.jodie import JODIEBinnedDataset, JODIEConfig  # ty
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS, SyntheticDataset, SyntheticDatasetConfig
 from interactiondynamics.data.toy import ToyShiftConfig, ToyShiftDataset
 from interactiondynamics.eval.evaluate import EvalSlices
-from interactiondynamics.training.types import RunSuite, SweepRun, TrainConfig
+from interactiondynamics.training.types import PredictionMode, RunSuite, SweepRun, TrainConfig
 
 
 FOCUSED_COMBINATIONS = {
@@ -22,6 +22,185 @@ FOCUSED_COMBINATIONS = {
     ("settransformer", "hnn"),
     ("settransformer", "tgn_gru"),
 }
+
+
+def build_ift_diagnostic_runs(
+    base_model_cfg: ModelConfig,
+    *,
+    task_name: str,
+    drive_feature_idx: Optional[int],
+    near_ar1_delta_coeffs: Optional[tuple[float, float, float, float]] = None,
+    seed: int = 0,
+) -> list[SweepRun]:
+    runs: list[SweepRun] = []
+
+    def add(
+        name: str,
+        *,
+        lr: Optional[float] = None,
+        prediction_mode: Optional[PredictionMode] = None,
+        **overrides: Any,
+    ) -> None:
+        cfg = ModelConfig(**asdict(base_model_cfg))
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+        if near_ar1_delta_coeffs is not None:
+            setattr(cfg, "ift2_near_ar1_coeffs", near_ar1_delta_coeffs)
+        runs.append(
+            SweepRun(
+                name=name,
+                model_cfg=cfg,
+                lr=lr,
+                prediction_mode=prediction_mode,
+                seed=int(seed),
+            )
+        )
+
+    shared: dict[str, Any] = dict(
+        aggregator="ift",
+        update="ift_update",
+        ift_laplacian_mode="current_bin",
+        ift_message_reduce="sum",
+        ift_force_reduce="sum",
+        ift_drive_feature_idx=drive_feature_idx,
+    )
+    if task_name == "ift_diffusion":
+        add("ift1_generic", **shared, ift_update_order="first", ift_forcing_mode="generic_mlp")
+        add("ift1_linear", **shared, ift_update_order="first", ift_forcing_mode="linear_event")
+        add("ift1_direct", **shared, ift_update_order="first", ift_forcing_mode="direct_scalar")
+        add("ift1_gated_direct", **shared, ift_update_order="first", ift_forcing_mode="gated_direct_scalar")
+        add("gru_baseline", aggregator="sum", update="tgn_gru")
+        return runs
+
+    add("ift1_generic", **shared, ift_update_order="first", ift_forcing_mode="generic_mlp")
+    add("ift1_direct", **shared, ift_update_order="first", ift_forcing_mode="direct_scalar")
+    add("ift2_generic", **shared, ift_update_order="second", ift_forcing_mode="generic_mlp")
+    add("ift2_linear", **shared, ift_update_order="second", ift_forcing_mode="linear_event")
+    add("ift2_gated_linear", **shared, ift_update_order="second", ift_forcing_mode="gated_linear_event")
+    add("ift2_direct", **shared, ift_update_order="second", ift_forcing_mode="direct_scalar")
+    add("ift2_gated_direct", **shared, ift_update_order="second", ift_forcing_mode="gated_direct_scalar")
+    add(
+        "neural_ar2_delta_small_random_lr1e-1",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=1e-1,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "neural_ar2_delta_small_random_lr3e-2",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=3e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "neural_ar2_delta_small_random_lr1e-2",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "neural_ar2_delta_small_random_lr3e-3",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=3e-3,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "neural_ar2_delta_near_ar1",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="near_ar1",
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "neural_ar2_delta_oracle_init_trainable",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_oracle_init=True,
+        ift2_readout_init_mode="oracle",
+        ift2_readout_trainable=True,
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "ift2_linear_h_v_force_teacher_forced",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "ift2_linear_h_v_force_autonomous",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=False,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "neural_ar2_delta",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="zero",
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "ift2_ar2_oracle_init",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_oracle_init=True,
+        ift2_readout_init_mode="oracle",
+        ift2_readout_trainable=False,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add("gru_baseline", aggregator="sum", update="tgn_gru")
+    add("hnn_baseline", aggregator="sum", update="hnn")
+    return runs
 
 
 def make_runs(
@@ -50,6 +229,9 @@ def make_runs(
         cfg.dropout = do
         cfg.scorer_dropout = sdo
         cfg.use_time_features = time_features
+        if agg == "ift":
+            cfg.ift_message_reduce = "sum"
+            cfg.ift_force_reduce = "sum"
 
         base_name = f"agg={agg}|update={update_name}|do={do}|sdo={sdo}|time={time_features}"
 

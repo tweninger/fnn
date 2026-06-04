@@ -20,6 +20,7 @@ from interactiondynamics.eval.node_metrics import (
     node_labels_from_events,
     node_prediction_metrics,
     node_regression_metrics,
+    regression_metrics,
 )
 from interactiondynamics.eval.ranking_metrics import ranking_loss_and_metrics
 from interactiondynamics.training.reporting import (
@@ -42,7 +43,9 @@ from interactiondynamics.training.task_metrics import (
 )
 from interactiondynamics.training.targets import (
     edge_regression_loss,
+    edge_regression_readout,
     global_grad_norm,
+    node_regression_readout,
     reconstruct_raw_edge_predictions,
     reconstruct_raw_node_predictions,
     summarize_edge_targets,
@@ -51,6 +54,22 @@ from interactiondynamics.training.targets import (
     transform_node_targets,
 )
 from interactiondynamics.training.types import RunResult, SweepRun, TrainConfig
+
+
+def _linear_hvf_readout_snapshot(model) -> dict[str, float]:
+    scorer = getattr(model, "scorer", None)
+    if scorer is None or not hasattr(scorer, "coefficient_dict"):
+        return {}
+    coeffs = scorer.coefficient_dict()
+    oracle = scorer.oracle_coefficient_dict() if hasattr(scorer, "oracle_coefficient_dict") else None
+    out = dict(coeffs)
+    if oracle is not None:
+        out.update(oracle)
+        out["abs_diff_w_y"] = abs(coeffs["w_y"] - oracle["w_y_oracle"])
+        out["abs_diff_w_v"] = abs(coeffs["w_v"] - oracle["w_v_oracle"])
+        out["abs_diff_w_drive"] = abs(coeffs["w_drive"] - oracle["w_drive_oracle"])
+        out["abs_diff_bias"] = abs(coeffs["bias"] - oracle["bias_oracle"])
+    return out
 
 
 def short_run_label(run: SweepRun) -> str:
@@ -77,6 +96,26 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
     return cfg
 
 
+def _stash_observed_history(
+    state,
+    *,
+    current_target: Optional[torch.Tensor],
+    prev_target: Optional[torch.Tensor],
+) -> None:
+    if state is None:
+        return
+    aux = {} if state.aux is None else dict(state.aux)
+    if current_target is None:
+        aux.pop("ift_state_observed_target", None)
+    else:
+        aux["ift_state_observed_target"] = current_target.detach()
+    if prev_target is None:
+        aux.pop("ift_prev_observed_target", None)
+    else:
+        aux["ift_prev_observed_target"] = prev_target.detach()
+    state.aux = aux
+
+
 def train_one_epoch(
     model,
     bins: Iterable[EventBatch],
@@ -100,12 +139,23 @@ def train_one_epoch(
     state_delta_sum = 0.0
     state_stat_n = 0
     state_delta_n = 0
+    aux_sums: dict[str, float] = {}
+    aux_counts: dict[str, int] = {}
+    tracked_metric_keys = {
+        "delta_pred_norm",
+        "true_delta_norm",
+        "pred_delta_corr",
+        "velocity_loss",
+        "decoded_v_r2_against_finite_difference",
+    }
 
     prev: Optional[EventBatch] = None
     target_iter = iter(node_targets) if node_targets is not None else None
     edge_target_iter = iter(edge_targets) if edge_targets is not None else None
     prev_node_target: Optional[torch.Tensor] = None
+    prev_prev_node_target: Optional[torch.Tensor] = None
     prev_edge_target: Optional[torch.Tensor] = None
+    prev_prev_edge_target: Optional[torch.Tensor] = None
     primary_name: Optional[str] = None
     for curr in bins:
         curr = curr.to(device)
@@ -120,6 +170,13 @@ def train_one_epoch(
             continue
 
         state_before = None if state is None or state.node is None else state.node.detach().clone()
+        observed_target = prev_edge_target if prev_edge_target is not None else prev_node_target
+        observed_prev_target = prev_prev_edge_target if prev_prev_edge_target is not None else prev_prev_node_target
+        _stash_observed_history(
+            state,
+            current_target=observed_target,
+            prev_target=observed_prev_target,
+        )
         state, aux = model.step(state, prev)
 
         if aux is not None and "kappa" in aux:
@@ -127,6 +184,18 @@ def train_one_epoch(
             if torch.is_tensor(kappa):
                 kappa_sum += float(kappa.detach().item())
                 kappa_n += 1
+        if aux is not None:
+            for key, value in aux.items():
+                scalar: float | None = None
+                if torch.is_tensor(value):
+                    if value.numel() == 1 and torch.isfinite(value).all():
+                        scalar = float(value.detach().item())
+                elif isinstance(value, (int, float, bool)):
+                    scalar = float(value)
+                if scalar is None:
+                    continue
+                aux_sums[key] = aux_sums.get(key, 0.0) + scalar
+                aux_counts[key] = aux_counts.get(key, 0) + 1
 
         h = state.node
         if h is not None:
@@ -179,12 +248,26 @@ def train_one_epoch(
                 metrics = edge_prediction_metrics(edge_preds.detach(), edge_labels)
                 metrics["edge_loss"] = float(loss.detach().item())
             else:
-                edge_target_values = transform_edge_targets(raw_edge_target_values, prev_edge_target, cfg)
-                loss = edge_regression_loss(edge_preds, edge_target_values, cfg)
-                raw_edge_preds = reconstruct_raw_edge_predictions(edge_preds.detach(), prev_edge_target, cfg)
+                edge_view = edge_regression_readout(edge_preds, raw_edge_target_values, prev_edge_target, cfg)
+                loss = edge_regression_loss(edge_view.loss_preds, edge_view.loss_targets, cfg)
+                raw_edge_preds = edge_view.raw_preds.detach()
                 metrics = edge_regression_metrics(raw_edge_preds, raw_edge_target_values)
-                if cfg.edge_target_mode != "raw":
-                    resid_metrics = edge_regression_metrics(edge_preds.detach(), edge_target_values)
+                if edge_view.delta_preds is not None and edge_view.delta_targets is not None:
+                    delta_metrics = regression_metrics(
+                        edge_view.delta_preds.detach(),
+                        edge_view.delta_targets.detach(),
+                        prefix="edge_delta",
+                    )
+                    metrics.update(delta_metrics)
+                    metrics["delta_pred_norm"] = float(
+                        edge_view.delta_preds.detach().pow(2).mean().sqrt().item()
+                    )
+                    metrics["true_delta_norm"] = float(
+                        edge_view.delta_targets.detach().pow(2).mean().sqrt().item()
+                    )
+                    metrics["pred_delta_corr"] = float(delta_metrics.get("edge_delta_corr", 0.0))
+                if cfg.edge_target_mode != "raw" and str(getattr(cfg, "prediction_mode", "state")) == "state":
+                    resid_metrics = edge_regression_metrics(edge_preds.detach(), edge_view.loss_targets)
                     metrics.update({f"edge_resid_{k.removeprefix('edge_')}": v for k, v in resid_metrics.items()})
             total_step_loss = loss
         elif node_primary:
@@ -196,12 +279,12 @@ def train_one_epoch(
                 metrics = node_prediction_metrics(node_logits.detach(), node_labels)
             else:
                 raw_node_target = curr_node_target.to(node_logits.device, dtype=node_logits.dtype)
-                node_target = transform_node_targets(raw_node_target, prev_node_target, cfg)
-                loss = torch.nn.functional.mse_loss(node_logits, node_target)
-                raw_node_preds = reconstruct_raw_node_predictions(node_logits.detach(), prev_node_target, cfg)
+                node_view = node_regression_readout(node_logits, raw_node_target, prev_node_target, cfg)
+                loss = torch.nn.functional.mse_loss(node_view.loss_preds, node_view.loss_targets)
+                raw_node_preds = node_view.raw_preds.detach()
                 metrics = node_regression_metrics(raw_node_preds, raw_node_target)
-                if cfg.node_target_mode != "raw":
-                    resid_node_metrics = node_regression_metrics(node_logits.detach(), node_target)
+                if cfg.node_target_mode != "raw" and str(getattr(cfg, "prediction_mode", "state")) == "state":
+                    resid_node_metrics = node_regression_metrics(node_logits.detach(), node_view.loss_targets)
                     metrics.update({f"node_resid_{k.removeprefix('node_')}": v for k, v in resid_node_metrics.items()})
             metrics["node_loss"] = float(loss.detach().item())
             total_step_loss = loss
@@ -223,12 +306,12 @@ def train_one_epoch(
                     metrics.update(node_prediction_metrics(node_logits.detach(), node_labels))
                 else:
                     raw_node_target = curr_node_target.to(node_logits.device, dtype=node_logits.dtype)
-                    node_target = transform_node_targets(raw_node_target, prev_node_target, cfg)
-                    node_loss = torch.nn.functional.mse_loss(node_logits, node_target)
-                    raw_node_preds = reconstruct_raw_node_predictions(node_logits.detach(), prev_node_target, cfg)
+                    node_view = node_regression_readout(node_logits, raw_node_target, prev_node_target, cfg)
+                    node_loss = torch.nn.functional.mse_loss(node_view.loss_preds, node_view.loss_targets)
+                    raw_node_preds = node_view.raw_preds.detach()
                     metrics.update(node_regression_metrics(raw_node_preds, raw_node_target))
-                    if cfg.node_target_mode != "raw":
-                        resid_node_metrics = node_regression_metrics(node_logits.detach(), node_target)
+                    if cfg.node_target_mode != "raw" and str(getattr(cfg, "prediction_mode", "state")) == "state":
+                        resid_node_metrics = node_regression_metrics(node_logits.detach(), node_view.loss_targets)
                         metrics.update({f"node_resid_{k.removeprefix('node_')}": v for k, v in resid_node_metrics.items()})
             else:
                 node_labels = node_labels_from_events(curr, cfg.num_nodes, device=node_logits.device)
@@ -236,6 +319,38 @@ def train_one_epoch(
                 metrics.update(node_prediction_metrics(node_logits.detach(), node_labels))
             metrics["node_loss"] = float(node_loss.detach().item())
             total_step_loss = total_step_loss + (cfg.node_loss_weight * node_loss)
+
+        if (
+            curr_edge_target is not None
+            and prev_edge_target is not None
+            and aux is not None
+            and bool(getattr(model.update, "velocity_supervision", False))
+        ):
+            decoded_velocity = aux.get("decoded_velocity")
+            if torch.is_tensor(decoded_velocity):
+                velocity_target = (raw_edge_target_values - prev_edge_target).to(
+                    device=decoded_velocity.device,
+                    dtype=decoded_velocity.dtype,
+                )
+                velocity_loss = torch.nn.functional.mse_loss(decoded_velocity, velocity_target)
+                total_step_loss = total_step_loss + (
+                    float(getattr(model.update, "velocity_loss_weight", 0.0)) * velocity_loss
+                )
+                velocity_metrics = regression_metrics(
+                    decoded_velocity.detach(),
+                    velocity_target.detach(),
+                    prefix="decoded_v",
+                )
+                metrics["velocity_loss"] = float(velocity_loss.detach().item())
+                metrics["decoded_v_r2_against_finite_difference"] = float(
+                    velocity_metrics.get("decoded_v_r2", 0.0)
+                )
+
+        for key in tracked_metric_keys:
+            value = metrics.get(key)
+            if isinstance(value, (int, float)):
+                aux_sums[key] = aux_sums.get(key, 0.0) + float(value)
+                aux_counts[key] = aux_counts.get(key, 0) + 1
 
         total_step_loss.backward()
         if cfg.grad_clip and cfg.grad_clip > 0:
@@ -281,8 +396,10 @@ def train_one_epoch(
 
         prev = curr
         if curr_node_target is not None:
+            prev_prev_node_target = prev_node_target
             prev_node_target = curr_node_target.detach().to(device)
         if curr_edge_target is not None:
+            prev_prev_edge_target = prev_edge_target
             prev_edge_target = raw_edge_target_values.detach()
 
     if n_steps == 0:
@@ -300,6 +417,10 @@ def train_one_epoch(
         out["state_node_abs_mean"] = state_abs_sum / state_stat_n
     if state_delta_n > 0:
         out["state_delta_rms_mean"] = state_delta_sum / state_delta_n
+    for key, total in aux_sums.items():
+        count = aux_counts.get(key, 0)
+        if count > 0:
+            out[f"{key}_mean"] = total / count
     return out
 
 
@@ -328,6 +449,22 @@ def run_one_experiment(
     set_seed(run.seed)
 
     train_cfg = TrainConfig(**asdict(base_train_cfg))
+    for key, value in vars(base_train_cfg).items():
+        if not hasattr(train_cfg, key):
+            setattr(train_cfg, key, value)
+    setattr(train_cfg, "ift_drive_feature_idx", getattr(run.model_cfg, "ift_drive_feature_idx", None))
+    setattr(train_cfg, "ift_rollout_trace_print", run.name == "ift2_ar2_oracle_init")
+    setattr(train_cfg, "ift_rollout_trace_done", False)
+    setattr(
+        train_cfg,
+        "ift_rollout_autonomous",
+        bool(
+            getattr(run.model_cfg, "update", None) == "ift_update"
+            and getattr(run.model_cfg, "ift_update_order", "first") == "second"
+            and getattr(run.model_cfg, "ift2_readout_mode", "default") == "linear_h_v_force"
+            and getattr(run.model_cfg, "ift_velocity_init_mode", "finite_difference") == "finite_difference"
+        ),
+    )
     if run.lr is not None:
         train_cfg.lr = run.lr
     if run.weight_decay is not None:
@@ -336,6 +473,8 @@ def run_one_experiment(
         train_cfg.num_neg = run.num_neg
     if run.tbptt_steps is not None:
         train_cfg.tbptt_steps = run.tbptt_steps
+    if run.prediction_mode is not None:
+        train_cfg.prediction_mode = run.prediction_mode
 
     model = build_model_fn(spec, run.model_cfg).to(device)
     optimizer = torch.optim.Adam(
@@ -469,6 +608,7 @@ def run_one_experiment(
         "test": baseline_test,
         "rollout_val": {},
         "rollout_test": {},
+        "readout": _linear_hvf_readout_snapshot(model),
     }
     for epoch in range(1, epochs + 1):
         train_stats_step = train_one_epoch(
@@ -535,6 +675,7 @@ def run_one_experiment(
             "test": test_stats,
             "rollout_val": rollout_val_stats,
             "rollout_test": rollout_test_stats,
+            "readout": _linear_hvf_readout_snapshot(model),
         }
 
         km = train_stats_step.get("kappa_mean", None)
@@ -584,6 +725,25 @@ def run_one_experiment(
         print(f"  ep {epoch:03d}")
         print(losses_str)
         print(f"           metrics{metric_str}")
+        if "diffusion_term_norm_mean" in train_stats_step:
+            print(
+                "           ift"
+                f"     | kappa={train_stats_step.get('learned_kappa_mean', train_stats_step.get('kappa_mean', float('nan'))):.4f}"
+                f" | gamma={train_stats_step.get('gamma_mean', float('nan')):.4f}"
+                f" | dt={train_stats_step.get('dt_mean', float('nan')):.4f}"
+                f" | alpha={train_stats_step.get('alpha_mean', float('nan')):.4f}"
+                f"     | diff={train_stats_step.get('diffusion_term_norm_mean', float('nan')):.4f}"
+                f" | force={train_stats_step.get('force_norm_mean', train_stats_step.get('injection_term_norm_mean', float('nan'))):.4f}"
+                f" | rel_diff={train_stats_step.get('relative_diffusion_mean', float('nan')):.4f}"
+                f" | rel_upd={train_stats_step.get('relative_update_mean', float('nan')):.4f}"
+                f" | vel_r2={train_stats_step.get('decoded_v_r2_against_finite_difference_mean', float('nan')):.4f}"
+                f" | vel_f={train_stats_step.get('velocity_fraction_mean', float('nan')):.4f}"
+                f" | force_f={train_stats_step.get('force_fraction_mean', float('nan')):.4f}"
+                f" | Lnnz={train_stats_step.get('L_nnz_mean', float('nan')):.1f}"
+                f" | Ldens={train_stats_step.get('L_density_mean', float('nan')):.4f}"
+                f" | Ldiag={train_stats_step.get('L_diag_mean_mean', float('nan')):.4f}"
+                f" | Loff={train_stats_step.get('L_offdiag_abs_mean_mean', float('nan')):.4f}"
+            )
         if (node_val_str or node_test_str) and run_primary_name not in {"node_mse", "node_auroc", "node_f1", "node_acc"}:
             print(
                 "           nodes"
@@ -609,6 +769,22 @@ def run_one_experiment(
                     f"           rollout@{rollout_horizon}"
                     f" | {' | '.join(rollout_parts)}"
                 )
+        readout = snapshot.get("readout", {})
+        if readout:
+            coeff_str = (
+                f"           readout | w_y={readout.get('w_y', float('nan')):.4f}"
+                f" | w_v={readout.get('w_v', float('nan')):.4f}"
+                f" | w_drive={readout.get('w_drive', float('nan')):.4f}"
+                f" | bias={readout.get('bias', float('nan')):.4f}"
+            )
+            if "w_y_oracle" in readout:
+                coeff_str += (
+                    f" | oracle=({readout['w_y_oracle']:.4f}, {readout['w_v_oracle']:.4f}, "
+                    f"{readout['w_drive_oracle']:.4f}, {readout['bias_oracle']:.4f})"
+                    f" | abs_diff=({readout['abs_diff_w_y']:.4f}, {readout['abs_diff_w_v']:.4f}, "
+                    f"{readout['abs_diff_w_drive']:.4f}, {readout['abs_diff_bias']:.4f})"
+                )
+            print(coeff_str)
 
         candidate_objective = (
             snapshot_metric_value(snapshot, objective_metric.path)

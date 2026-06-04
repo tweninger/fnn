@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 import torch
 
-from interactiondynamics.core.config import ModelConfig
+from interactiondynamics.core.config import ModelConfig, UpdateType
 from interactiondynamics.data.synthetic import SyntheticDataset, SyntheticDatasetConfig
 from interactiondynamics.models.tgn_model import build_tgn_model
 from interactiondynamics.training.targets import edge_regression_loss
 from interactiondynamics.training.types import TrainConfig
+from interactiondynamics.updates.ift_update import IFTDiffusionUpdate
 
 
 def _update_grad_norms(update_name: str) -> list[float]:
@@ -30,7 +33,7 @@ def _update_grad_norms(update_name: str) -> list[float]:
         scorer="mlp",
         scorer_hidden=128,
         aggregator="sum",
-        update=update_name,
+        update=cast(UpdateType, update_name),
         dropout=0.0,
         scorer_dropout=0.0,
         encoder_hidden=128,
@@ -68,3 +71,33 @@ def test_update_laws_receive_gradient_from_scoring_loss(update_name: str):
 
     assert grad_norms, f"{update_name} update parameters received no gradients"
     assert max(grad_norms) > 0.0, f"{update_name} update gradients were all zero"
+
+
+def test_build_tgn_model_passes_ift_kappa_cap_and_max() -> None:
+    spec = SyntheticDataset(
+        SyntheticDatasetConfig(
+            task="temporal_memory",
+            num_nodes=8,
+            num_bins=4,
+            events_per_bin=8,
+            seed=0,
+            device=torch.device("cpu"),
+        )
+    ).spec()
+
+    model = build_tgn_model(
+        spec,
+        ModelConfig(
+            node_dim=32,
+            msg_dim=32,
+            event_dim=spec.event_dim,
+            aggregator="ift",
+            update="ift_update",
+            ift_kappa_cap=True,
+            ift_kappa_max=2.5,
+        ),
+    )
+
+    assert isinstance(model.update, IFTDiffusionUpdate)
+    assert model.update.kappa_cap is True
+    assert model.update.kappa_max == 2.5

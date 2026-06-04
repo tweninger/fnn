@@ -45,6 +45,47 @@ venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthet
 - For synthetic edge regression, `--edge-target-scale zscore` rescales the MSE loss by the train-split edge-target standard deviation while still reporting raw-space metrics.
 - Ranking metrics now treat ties pessimistically by default, and eval also reports a `persistent_*` baseline that keeps the post-warmup state fixed.
 
+## IFT diagnostics
+
+The `ift` path now supports both first-order diffusion-style updates and second-order oscillator-style diagnostics without leaving the event-bin architecture.
+
+- First-order IFT:
+  - aggregator builds a graph/Laplacian from event bins
+  - update uses diffusion, damping, and forcing
+- Second-order IFT:
+  - carries explicit velocity memory
+  - supports scalar `h/v/force` readout for AR(2)-style diagnostics
+  - supports teacher-forced or autonomous rollout evaluation
+
+Useful commands:
+
+```bash
+venv/bin/python -m interactiondynamics.train ift-diagnose
+venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks ift_diffusion
+venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks conservative_oscillator --num-bins 40 --rollout-horizon 5
+```
+
+The diagnostic suite prints:
+
+- one-step sanity batches for second-order oscillator runs
+- rollout-vs-persistent metrics
+- internal IFT diagnostics such as `kappa`, `dt`, `alpha`, `force_norm`, `diffusion_term_norm`, `relative_update`
+- linear `h/v/force` readout coefficients when that scorer is active
+
+For conservative oscillator diagnostics, the suite also reports:
+
+- `ar1_baseline`
+- `ar2_baseline`
+- `oracle_baseline`
+- `closed_form_delta`
+
+Current status:
+
+- `ift2_ar2_oracle_init` now matches the AR(2) oracle rollout exactly when enough bins are available for second-order rollout seeding.
+- `closed_form_delta` also recovers the oracle solution.
+- learned second-order linear readouts improve with better initialization and larger learning rates, but still trail the oracle after a short run.
+- teacher-forced `h/v/force` learning is available to separate coefficient-learning issues from velocity-propagation issues.
+
 ## Synthetic benchmarks
 
 Synthetic tasks run through the same `interactiondynamics.train` entrypoint via `--dataset synthetic`.
@@ -146,6 +187,8 @@ Legacy aliases remain supported for the older names: `edge_count_threshold`, `ed
   - `rollout_edge_mse`
   - `rollout_edge_r2`
   - `rollout_edge_nrmse`
+  - `rollout_edge_delta_r2`
+  - `rollout_edge_delta_mae`
   - `rollout_node_mse`
   - `rollout_node_r2`
   - `rollout_node_nrmse`

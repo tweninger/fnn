@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Optional
 
 import torch
 
 from interactiondynamics.data.interfaces import EdgeTargetBatch
+
+
+@dataclass(frozen=True)
+class RegressionReadout:
+    loss_preds: torch.Tensor
+    loss_targets: torch.Tensor
+    raw_preds: torch.Tensor
+    delta_preds: Optional[torch.Tensor]
+    delta_targets: Optional[torch.Tensor]
 
 
 def edge_regression_loss(
@@ -45,6 +55,49 @@ def reconstruct_raw_edge_predictions(
     return preds
 
 
+def edge_regression_readout(
+    preds: torch.Tensor,
+    curr_targets: torch.Tensor,
+    prev_targets: Optional[torch.Tensor],
+    cfg: Any,
+) -> RegressionReadout:
+    mode = str(getattr(cfg, "prediction_mode", "state"))
+    if mode == "state":
+        raw_preds = reconstruct_raw_edge_predictions(preds, prev_targets, cfg)
+        loss_targets = transform_edge_targets(curr_targets, prev_targets, cfg)
+        loss_preds = preds
+    elif mode == "delta":
+        if prev_targets is None:
+            raise ValueError("Delta prediction mode requires previous edge targets.")
+        raw_preds = preds + prev_targets.to(device=preds.device, dtype=preds.dtype)
+        loss_preds = preds
+        loss_targets = curr_targets - prev_targets.to(device=curr_targets.device, dtype=curr_targets.dtype)
+    elif mode == "state_plus_delta":
+        if prev_targets is None:
+            raise ValueError("State-plus-delta prediction mode requires previous edge targets.")
+        raw_preds = preds + prev_targets.to(device=preds.device, dtype=preds.dtype)
+        loss_preds = raw_preds
+        loss_targets = curr_targets
+    else:
+        raise ValueError(f"Unsupported prediction_mode={mode!r}")
+
+    if prev_targets is None:
+        delta_preds = None
+        delta_targets = None
+    else:
+        prev_on_pred = prev_targets.to(device=raw_preds.device, dtype=raw_preds.dtype)
+        prev_on_target = prev_targets.to(device=curr_targets.device, dtype=curr_targets.dtype)
+        delta_preds = raw_preds - prev_on_pred
+        delta_targets = curr_targets - prev_on_target
+    return RegressionReadout(
+        loss_preds=loss_preds,
+        loss_targets=loss_targets,
+        raw_preds=raw_preds,
+        delta_preds=delta_preds,
+        delta_targets=delta_targets,
+    )
+
+
 def transform_node_targets(
     curr_targets: torch.Tensor,
     prev_targets: Optional[torch.Tensor],
@@ -67,6 +120,49 @@ def reconstruct_raw_node_predictions(
             raise ValueError("Residual node-target mode requires previous node targets.")
         return preds + prev_targets.to(device=preds.device, dtype=preds.dtype)
     return preds
+
+
+def node_regression_readout(
+    preds: torch.Tensor,
+    curr_targets: torch.Tensor,
+    prev_targets: Optional[torch.Tensor],
+    cfg: Any,
+) -> RegressionReadout:
+    mode = str(getattr(cfg, "prediction_mode", "state"))
+    if mode == "state":
+        raw_preds = reconstruct_raw_node_predictions(preds, prev_targets, cfg)
+        loss_targets = transform_node_targets(curr_targets, prev_targets, cfg)
+        loss_preds = preds
+    elif mode == "delta":
+        if prev_targets is None:
+            raise ValueError("Delta prediction mode requires previous node targets.")
+        raw_preds = preds + prev_targets.to(device=preds.device, dtype=preds.dtype)
+        loss_preds = preds
+        loss_targets = curr_targets - prev_targets.to(device=curr_targets.device, dtype=curr_targets.dtype)
+    elif mode == "state_plus_delta":
+        if prev_targets is None:
+            raise ValueError("State-plus-delta prediction mode requires previous node targets.")
+        raw_preds = preds + prev_targets.to(device=preds.device, dtype=preds.dtype)
+        loss_preds = raw_preds
+        loss_targets = curr_targets
+    else:
+        raise ValueError(f"Unsupported prediction_mode={mode!r}")
+
+    if prev_targets is None:
+        delta_preds = None
+        delta_targets = None
+    else:
+        prev_on_pred = prev_targets.to(device=raw_preds.device, dtype=raw_preds.dtype)
+        prev_on_target = prev_targets.to(device=curr_targets.device, dtype=curr_targets.dtype)
+        delta_preds = raw_preds - prev_on_pred
+        delta_targets = curr_targets - prev_on_target
+    return RegressionReadout(
+        loss_preds=loss_preds,
+        loss_targets=loss_targets,
+        raw_preds=raw_preds,
+        delta_preds=delta_preds,
+        delta_targets=delta_targets,
+    )
 
 
 def _summarize_value_stream(

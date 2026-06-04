@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import argparse
 
 import pytest
 import torch
@@ -9,8 +9,8 @@ from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
 from interactiondynamics.training.presets import build_suite, load_dataset
 
 
-def _synthetic_args(task_name: str) -> SimpleNamespace:
-    return SimpleNamespace(
+def _synthetic_args(task_name: str) -> argparse.Namespace:
+    return argparse.Namespace(
         dataset="synthetic",
         synthetic_task=task_name,
         synthetic_num_nodes=20,
