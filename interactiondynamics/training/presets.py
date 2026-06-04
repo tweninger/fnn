@@ -175,6 +175,44 @@ def build_ift_diagnostic_runs(
         lr=1e-2,
         prediction_mode=cast(PredictionMode, "delta"),
     )
+    for lambda_v in (0.0, 0.01, 0.1, 1.0):
+        add(
+            f"ift2_ar_auto_lambda{str(lambda_v).replace('.', 'p')}",
+            **shared,
+            ift_update_order="second",
+            ift_forcing_mode="direct_scalar",
+            ift2_readout_mode="linear_h_v_force",
+            ift_velocity_teacher_forcing=False,
+            ift2_readout_init_mode="small_random",
+            ift2_readout_init_scale=0.01,
+            ift_internal_velocity_loss_weight=float(lambda_v),
+            lr=1e-2,
+            prediction_mode=cast(PredictionMode, "delta"),
+        )
+    add(
+        "ift2_ar_tf",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=True,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
+    add(
+        "ift2_ar_auto",
+        **shared,
+        ift_update_order="second",
+        ift_forcing_mode="direct_scalar",
+        ift2_readout_mode="linear_h_v_force",
+        ift_velocity_teacher_forcing=False,
+        ift2_readout_init_mode="small_random",
+        ift2_readout_init_scale=0.01,
+        lr=1e-2,
+        prediction_mode=cast(PredictionMode, "delta"),
+    )
     add(
         "neural_ar2_delta",
         **shared,

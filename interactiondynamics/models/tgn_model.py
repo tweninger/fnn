@@ -141,6 +141,7 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
                 velocity_init_mode=getattr(c, "ift_velocity_init_mode", "finite_difference"),
                 velocity_supervision=getattr(c, "ift_velocity_supervision", True),
                 velocity_loss_weight=getattr(c, "ift_velocity_loss_weight", 0.01),
+                internal_velocity_loss_weight=getattr(c, "ift_internal_velocity_loss_weight", 0.0),
                 readout_mode=getattr(c, "ift2_readout_mode", "default"),
                 velocity_teacher_forcing=getattr(c, "ift_velocity_teacher_forcing", False),
             )

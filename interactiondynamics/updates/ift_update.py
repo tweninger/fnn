@@ -1,7 +1,7 @@
 # updates/ift_update.py
 from __future__ import annotations
 
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -112,13 +112,19 @@ class IFTForcingEncoder(nn.Module):
             raise ValueError("direct scalar IFT forcing requires ift_drive_feature_idx")
 
         drive_scalar = raw_features[:, self.drive_feature_idx : self.drive_feature_idx + 1]
-        scale = self.force_scale.to(device=raw_features.device, dtype=raw_features.dtype)
+        scale = cast(torch.Tensor, self.force_scale).to(
+            device=raw_features.device,
+            dtype=raw_features.dtype,
+        )
         if self.force_target_dim is None:
             assert self.force_vector is not None
             vector = self.force_vector.to(device=raw_features.device, dtype=raw_features.dtype)
         else:
-            vector = self.force_basis.to(device=raw_features.device, dtype=raw_features.dtype)
-        return drive_scalar * scale * vector.unsqueeze(0)
+            vector = cast(torch.Tensor, self.force_basis).to(
+                device=raw_features.device,
+                dtype=raw_features.dtype,
+            )
+        return drive_scalar * scale * vector[None, :]
 
     def forward(
         self,
@@ -244,13 +250,19 @@ class IFTDiffusionUpdate(UpdateLaw):
     def _force(self, state: Optional[ModelState], messages: torch.Tensor) -> torch.Tensor:
         if self.direct_drive and state is not None and state.aux is not None and "ift_direct_drive" in state.aux:
             direct_drive = state.aux["ift_direct_drive"].to(device=messages.device, dtype=messages.dtype)
-            scale = self.force_encoder.force_scale.to(device=messages.device, dtype=messages.dtype)
+            scale = cast(torch.Tensor, self.force_encoder.force_scale).to(
+                device=messages.device,
+                dtype=messages.dtype,
+            )
             if self.force_encoder.force_target_dim is None:
                 assert self.force_encoder.force_vector is not None
                 vector = self.force_encoder.force_vector.to(device=messages.device, dtype=messages.dtype)
             else:
-                vector = self.force_encoder.force_basis.to(device=messages.device, dtype=messages.dtype)
-            return direct_drive * scale * vector.unsqueeze(0)
+                vector = cast(torch.Tensor, self.force_encoder.force_basis).to(
+                    device=messages.device,
+                    dtype=messages.dtype,
+                )
+            return direct_drive * scale * vector[None, :]
         return self.force_encoder(messages, state)
 
     def forward(
@@ -347,6 +359,7 @@ class IFTSecondOrderUpdate(UpdateLaw):
         velocity_init_mode: IFTVelocityInitMode = "finite_difference",
         velocity_supervision: bool = True,
         velocity_loss_weight: float = 0.01,
+        internal_velocity_loss_weight: float = 0.0,
         readout_mode: str = "default",
         velocity_teacher_forcing: bool = False,
     ):
@@ -362,6 +375,7 @@ class IFTSecondOrderUpdate(UpdateLaw):
         self.velocity_init_mode: IFTVelocityInitMode = velocity_init_mode
         self.velocity_supervision = bool(velocity_supervision)
         self.velocity_loss_weight = float(velocity_loss_weight)
+        self.internal_velocity_loss_weight = float(internal_velocity_loss_weight)
         self.readout_mode = str(readout_mode)
         self.velocity_teacher_forcing = bool(velocity_teacher_forcing)
 
@@ -391,7 +405,7 @@ class IFTSecondOrderUpdate(UpdateLaw):
             self.register_buffer("kappa_const", torch.tensor(float(kappa), dtype=torch.float32))
 
     def _alpha(self, ref: torch.Tensor) -> torch.Tensor:
-        alpha = self.alpha_param if self.learn_params else self.alpha_const
+        alpha = cast(torch.Tensor, self.alpha_param if self.learn_params else self.alpha_const)
         return alpha.to(device=ref.device, dtype=ref.dtype).reshape(())
 
     def _positive(self, name: str, ref: torch.Tensor) -> torch.Tensor:
@@ -409,13 +423,19 @@ class IFTSecondOrderUpdate(UpdateLaw):
     def _force(self, state: Optional[ModelState], messages: torch.Tensor) -> torch.Tensor:
         if self.direct_drive and state is not None and state.aux is not None and "ift_direct_drive" in state.aux:
             direct_drive = state.aux["ift_direct_drive"].to(device=messages.device, dtype=messages.dtype)
-            scale = self.force_encoder.force_scale.to(device=messages.device, dtype=messages.dtype)
+            scale = cast(torch.Tensor, self.force_encoder.force_scale).to(
+                device=messages.device,
+                dtype=messages.dtype,
+            )
             if self.force_encoder.force_target_dim is None:
                 assert self.force_encoder.force_vector is not None
                 vector = self.force_encoder.force_vector.to(device=messages.device, dtype=messages.dtype)
             else:
-                vector = self.force_encoder.force_basis.to(device=messages.device, dtype=messages.dtype)
-            return direct_drive * scale * vector.unsqueeze(0)
+                vector = cast(torch.Tensor, self.force_encoder.force_basis).to(
+                    device=messages.device,
+                    dtype=messages.dtype,
+                )
+            return direct_drive * scale * vector[None, :]
         return self.force_encoder(messages, state)
 
     def _initial_velocity(self, state: Optional[ModelState], h: torch.Tensor) -> torch.Tensor:
@@ -505,18 +525,16 @@ class IFTSecondOrderUpdate(UpdateLaw):
         if readout_position is None:
             readout_position = h[:, 0]
 
-        readout_velocity = self._scalar_target_feature(state, "ift_velocity_scalar", h)
+        prior_velocity_scalar = self._scalar_target_feature(state, "ift_velocity_scalar", h)
         true_velocity = None
         prev_observed = self._scalar_target_feature(state, "ift_prev_observed_target", h)
         if readout_position is not None and prev_observed is not None:
             true_velocity = readout_position - prev_observed
-        if self.velocity_teacher_forcing and true_velocity is not None:
-            readout_velocity = true_velocity
-        elif readout_velocity is None:
+        if prior_velocity_scalar is None:
             if state.node_prev is not None and state.node_prev.shape == h.shape:
-                readout_velocity = state.node_prev[:, 0]
+                prior_velocity_scalar = state.node_prev[:, 0]
             else:
-                readout_velocity = torch.zeros((h.size(0),), device=h.device, dtype=h.dtype)
+                prior_velocity_scalar = torch.zeros((h.size(0),), device=h.device, dtype=h.dtype)
         readout_force = self._force_scalar(state, h)
 
         alpha = self._alpha(h)
@@ -542,6 +560,12 @@ class IFTSecondOrderUpdate(UpdateLaw):
         v_next = alpha * v - dt * (damping + diffusion) + dt * force
         h_next = h + dt * v_next
         decoded_velocity = self.velocity_decoder(v_next).squeeze(-1)
+        internal_velocity_scalar = v_next[:, 0]
+        readout_velocity = (
+            true_velocity
+            if self.velocity_teacher_forcing and true_velocity is not None
+            else internal_velocity_scalar
+        )
         next_state = ModelState(
             node=h_next,
             node_prev=v_next,
@@ -551,11 +575,12 @@ class IFTSecondOrderUpdate(UpdateLaw):
         next_state.aux["ift_velocity_initialized"] = True
         next_state.aux["ift_prev_h"] = h.detach()
         next_state.aux["ift_position_scalar"] = h_next[:, 0]
-        next_state.aux["ift_velocity_scalar"] = v_next[:, 0]
+        next_state.aux["ift_velocity_scalar"] = internal_velocity_scalar
         next_state.aux["ift_force_scalar"] = readout_force
         next_state.aux["ift_readout_position_scalar"] = readout_position
         next_state.aux["ift_readout_velocity_scalar"] = readout_velocity
         next_state.aux["ift_readout_force_scalar"] = readout_force
+        next_state.aux["ift_prior_velocity_scalar"] = prior_velocity_scalar
 
         h_norm = h.norm(dim=-1).mean()
         v_norm = v.norm(dim=-1).mean()
@@ -594,6 +619,7 @@ class IFTSecondOrderUpdate(UpdateLaw):
             "L_diag_mean": L_diag_mean.detach(),
             "L_offdiag_abs_mean": L_offdiag_abs_mean.detach(),
             "decoded_velocity": decoded_velocity,
+            "internal_velocity_scalar": internal_velocity_scalar,
             "stored_velocity_scalar": readout_velocity.detach(),
             "true_velocity_scalar": (
                 true_velocity.detach()

@@ -539,7 +539,7 @@ def _print_ift_diagnostic_table(
     header = (
         f"{'run':<20} {'state_v':>8} {'state_t':>8} {'roll_v':>8} {'roll_t':>8} {'pers':>8} "
         f"{'d_pers':>8} {'delta_r2':>8} {'delta_mae':>9} {'vel_r2':>8} {'kappa':>7} {'gamma':>7} {'dt':>6} "
-        f"{'alpha':>7} {'force':>8} {'diff':>8} {'rel_d':>8} {'rel_u':>8} {'vel_f':>7} {'for_f':>7} {'d_corr':>8}"
+        f"{'alpha':>7} {'force':>8} {'diff':>8} {'rel_d':>8} {'rel_u':>8} {'vel_f':>7} {'for_f':>7} {'d_corr':>8} {'vel_mse':>8}"
     )
     print(header)
     print("-" * len(header))
@@ -562,7 +562,13 @@ def _print_ift_diagnostic_table(
             "edge_delta_r2": _diagnostic_metric(snap, "rollout_test.rollout_edge_delta_r2"),
             "edge_delta_mae": _diagnostic_metric(snap, "rollout_test.rollout_edge_delta_mae"),
             "decoded_v_r2_against_finite_difference": float(
-                train_step.get("decoded_v_r2_against_finite_difference_mean", float("nan"))
+                train_step.get(
+                    "internal_velocity_r2_mean",
+                    train_step.get("decoded_v_r2_against_finite_difference_mean", float("nan")),
+                )
+            ),
+            "internal_velocity_mse": float(
+                train_step.get("internal_velocity_mse_mean", train_step.get("velocity_loss_mean", float("nan")))
             ),
             "learned_kappa": float(train_step.get("learned_kappa_mean", train_step.get("kappa_mean", float("nan")))),
             "gamma": float(train_step.get("gamma_mean", float("nan"))),
@@ -599,7 +605,8 @@ def _print_ift_diagnostic_table(
             f"{row['relative_update']:>8.3f} "
             f"{row['velocity_fraction']:>7.3f} "
             f"{row['force_fraction']:>7.3f} "
-            f"{row['pred_delta_corr']:>8.3f}"
+            f"{row['pred_delta_corr']:>8.3f} "
+            f"{row['internal_velocity_mse']:>8.3f}"
         )
         if readout:
             coeff_line = (
@@ -641,6 +648,7 @@ def _print_ift_diagnostic_table(
                 f"{float('nan'):>8.3f} "
                 f"{float('nan'):>7.3f} "
                 f"{float('nan'):>7.3f} "
+                f"{float('nan'):>8.3f} "
                 f"{float('nan'):>8.3f}"
             )
             if {"w_y", "w_v", "w_drive", "bias"} <= set(row):

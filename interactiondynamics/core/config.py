@@ -114,6 +114,7 @@ class ModelConfig:
     ift_velocity_init_mode: IFTVelocityInitMode = "finite_difference"
     ift_velocity_supervision: bool = True
     ift_velocity_loss_weight: float = 0.01
+    ift_internal_velocity_loss_weight: float = 0.0
     ift2_readout_mode: IFT2ReadoutMode = "default"
     ift_velocity_teacher_forcing: bool = False
     ift2_oracle_init: bool = False

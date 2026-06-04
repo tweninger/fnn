@@ -147,6 +147,9 @@ def train_one_epoch(
         "pred_delta_corr",
         "velocity_loss",
         "decoded_v_r2_against_finite_difference",
+        "internal_velocity_loss",
+        "internal_velocity_mse",
+        "internal_velocity_r2",
     }
 
     prev: Optional[EventBatch] = None
@@ -344,6 +347,35 @@ def train_one_epoch(
                 metrics["velocity_loss"] = float(velocity_loss.detach().item())
                 metrics["decoded_v_r2_against_finite_difference"] = float(
                     velocity_metrics.get("decoded_v_r2", 0.0)
+                )
+        if (
+            curr_edge_target is not None
+            and prev_edge_target is not None
+            and aux is not None
+            and float(getattr(model.update, "internal_velocity_loss_weight", 0.0)) > 0.0
+        ):
+            stored_velocity = aux.get("internal_velocity_scalar")
+            if not torch.is_tensor(stored_velocity):
+                stored_velocity = aux.get("stored_velocity_scalar")
+            true_velocity = aux.get("true_velocity_scalar")
+            if torch.is_tensor(stored_velocity) and torch.is_tensor(true_velocity):
+                internal_velocity_loss = torch.nn.functional.mse_loss(
+                    stored_velocity,
+                    true_velocity.to(device=stored_velocity.device, dtype=stored_velocity.dtype),
+                )
+                total_step_loss = total_step_loss + (
+                    float(getattr(model.update, "internal_velocity_loss_weight", 0.0))
+                    * internal_velocity_loss
+                )
+                internal_velocity_metrics = regression_metrics(
+                    stored_velocity.detach(),
+                    true_velocity.detach().to(device=stored_velocity.device, dtype=stored_velocity.dtype),
+                    prefix="internal_velocity",
+                )
+                metrics["internal_velocity_loss"] = float(internal_velocity_loss.detach().item())
+                metrics["internal_velocity_mse"] = float(internal_velocity_loss.detach().item())
+                metrics["internal_velocity_r2"] = float(
+                    internal_velocity_metrics.get("internal_velocity_r2", 0.0)
                 )
 
         for key in tracked_metric_keys:
@@ -736,7 +768,8 @@ def run_one_experiment(
                 f" | force={train_stats_step.get('force_norm_mean', train_stats_step.get('injection_term_norm_mean', float('nan'))):.4f}"
                 f" | rel_diff={train_stats_step.get('relative_diffusion_mean', float('nan')):.4f}"
                 f" | rel_upd={train_stats_step.get('relative_update_mean', float('nan')):.4f}"
-                f" | vel_r2={train_stats_step.get('decoded_v_r2_against_finite_difference_mean', float('nan')):.4f}"
+                f" | vel_r2={train_stats_step.get('internal_velocity_r2_mean', train_stats_step.get('decoded_v_r2_against_finite_difference_mean', float('nan'))):.4f}"
+                f" | vel_mse={train_stats_step.get('internal_velocity_mse_mean', train_stats_step.get('velocity_loss_mean', float('nan'))):.4f}"
                 f" | vel_f={train_stats_step.get('velocity_fraction_mean', float('nan')):.4f}"
                 f" | force_f={train_stats_step.get('force_fraction_mean', float('nan')):.4f}"
                 f" | Lnnz={train_stats_step.get('L_nnz_mean', float('nan')):.1f}"
