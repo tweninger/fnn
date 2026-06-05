@@ -1,6 +1,28 @@
-# IFT
+# Field Neural Networks
 
-Interaction field and interaction dynamics experiments.
+Physics-inspired machine learning is compelling because it gives neural models useful structure. Instead of asking a model to learn arbitrary dynamics from data alone, we can constrain the model with known physical principles and let learning focus on the unknown parts of the system.
+
+Hamiltonian Neural Networks (HNNs), for example, learn an energy function whose gradients define motion through position and momentum. Lagrangian Neural Networks (LNNs) take a related approach by learning a Lagrangian that induces the equations of motion. In both cases, the physical object—the Hamiltonian or Lagrangian—is usually encoded through the training objective. The loss encourages the model to recover dynamics that obey the corresponding physical law.
+
+Motion is important, but many systems are better understood as **fields**: quantities distributed over space, graphs, or interacting entities. Fields describe diffusion, wave propagation, smoothing, external forcing, damping, and other structured processes. These systems are broader than particle trajectories and are especially natural for interaction data, where signals move across nodes, edges, communities, or events.
+
+This project explores **Field Neural Networks (FNNs)** and related interaction-field models. The central idea is to move physics-inspired structure out of the loss function and into the **state update rule**. Rather than training only to satisfy a physics residual, the model uses field-inspired updates internally, while the outer training objective remains a standard downstream task loss such as mean squared error for regression or binary cross-entropy for classification.
+
+In other words, we use physics-inspired dynamics as the model’s inductive bias, not necessarily as the final prediction target.
+
+This lets us train field-structured models directly on node and edge tasks:
+
+* node regression
+* edge regression
+* node classification
+* edge classification
+* temporal rollout prediction
+* synthetic diffusion, wave, oscillator, and memory benchmarks
+
+The update functions encode mechanisms such as diffusion, forcing, damping, and second-order velocity-like dynamics. The downstream loss then asks whether those mechanisms help solve predictive tasks.
+
+The result is a family of models that can be compared against GRUs, HNNs, LNNs, persistence baselines, and analytic synthetic baselines. As expected, field-structured models work especially well on field-style tasks: diffusion-like systems favor first-order interaction fields, while wave-like systems benefit from second-order field updates with identifiable velocity or short-history state.
+
 
 ## Development
 
@@ -139,12 +161,117 @@ venv/bin/python -m interactiondynamics.train quick --synthetic-task diffusion --
 venv/bin/python -m interactiondynamics.train quick --synthetic-task wave --ift-variants auto --ift-history-steps 1 2 3
 venv/bin/python -m interactiondynamics.train quick --synthetic-task conservative_oscillator --ift-variants --ift-orders 1 2
 venv/bin/python -m interactiondynamics.train quick --synthetic-task wave --ift-variants linear auto --ift-orders 2 --ift-history-steps 3 --num-bins 40 --rollout-horizon 5
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task edge_temporal_state --epochs 5 --num-bins 96 --synthetic-num-nodes 50 --synthetic-events-per-bin 48 --rollout-horizon 6 --ift-variants linear auto --ift-orders 2 --ift-history-steps 2
 venv/bin/python -m interactiondynamics.train quick --synthetic-task deepsets_sum --ift-variants direct --ift-orders 1
 venv/bin/python -m interactiondynamics.train quick --synthetic-task node_count_threshold --ift-variants
 ```
 
 These runs go through the normal training/eval loop, so the output stays the standard per-run quick preset summary instead of a separate diagnostic table.
 When `--ift-variants` is active, the CLI also prints an IFT diagnostic footer at the end with rollout/state metrics, learned dynamics stats, and any active linear `h/v/force` readout coefficients.
+
+### Worked example: `edge_temporal_state`
+
+Command:
+
+```bash
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task edge_temporal_state --epochs 5 --num-bins 96 --synthetic-num-nodes 50 --synthetic-events-per-bin 48 --rollout-horizon 6 --ift-variants linear auto --ift-orders 2 --ift-history-steps 2
+```
+
+Example output:
+
+```text
+=== Sweep summary (sorted by val.edge_auroc) ===
+method                   seed   kind    objective          val.edge_f1      test.edge_auroc         test.edge_f1
+-----------------------------------------------------------------------------------------------------------------
+ift2_auto                   0   edge       0.9993               0.9774               0.9987               0.9776
+ift2_hist_vel_k2            0   edge       0.9987               0.9733               0.9978               0.9736
+ift2_linear                 0   edge       0.9163               0.5106               0.8885               0.4676
+sum/tgn_gru                 0   edge       0.7841               0.6427               0.7583               0.6654
+sum/hnn                     0   edge       0.6818                0.622               0.6294               0.6514
+sum/lnn                     0   edge       0.5862             0.009881               0.6022               0.1094
+
+=== IFT diagnostic table: edge_temporal_state ===
+run                  target   auc_v   auc_t    f1_v    f1_t  state_v  state_t   roll_v   roll_t     pers   d_pers delta_r2 delta_mae   vel_r2   kappa   gamma     dt   alpha    force     diff    rel_d    rel_u   vel_f   for_f   d_corr  vel_mse
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ift2_auto              edge   0.999   0.999   0.977   0.978        -        -        -        -        -        -        -         -   -0.029   0.693   0.000  1.409   0.781    0.914    0.000    0.000    0.265   0.716   0.284        -    0.051
+  coeffs | w_y=1.2855 w_v=0.6353 w_drive=1.4387 bias=-0.5171
+ift2_hist_vel_k2       edge   0.999   0.998   0.973   0.974        -        -        -        -        -        -        -         -   -0.034   0.853   0.000  0.130   0.739    0.828    0.000    0.000    0.075   0.680   0.320        -    0.051
+  coeffs | w_y=0.5542 w_v=0.4326 w_drive=0.5414 bias=-0.0893
+ift2_linear            edge   0.916   0.889   0.511   0.468        -        -        -        -        -        -        -         -   -0.094   0.983   0.000  0.102   0.997    0.929    0.000    0.000    0.076   0.875   0.125        -    0.054
+  coeffs | w_y=0.2185 w_v=0.2558 w_drive=0.2747 bias=0.0460
+```
+
+Interpretation:
+
+- The autonomous second-order IFT variants dominate this task. `ift2_auto` is best on both validation and test AUROC/F1, and `ift2_hist_vel_k2` is a very close second.
+- `ift2_linear` is much weaker than the autonomous variants, which suggests this task benefits from the richer second-order autonomous readout rather than a simpler linear forcing path alone.
+- The non-IFT baselines are clearly behind here, especially on AUROC, which is the main sign that the temporal-state classification target is aligned with the IFT inductive bias.
+- The blank `state_*`, `roll_*`, and delta columns are expected for classification tasks. Those diagnostics are only defined for regression targets, while classification tasks surface `auc_*` and `f1_*` instead.
+- In the footer, both strong IFT runs learn positive `w_y`, `w_v`, and `w_drive`, so the classifier is using current state, velocity, and drive together. `ift2_auto` leans harder on the drive term and ends up slightly ahead of the history-based variant.
+
+### What the field quantities mean
+
+The IFT models maintain a latent node state over the graph induced by each event bin.
+
+- `h_t in R^(N x d)` is the latent node state at time bin `t`, one `d`-dimensional state per node.
+- The events in the current bin induce an adjacency `A_t`. In the default IFT aggregator, that adjacency is made undirected and can be built from just the current bin or from an EMA-smoothed history of previous bins.
+- The normalized graph Laplacian is
+
+```text
+L_t = I - D_t^(-1/2) A_t D_t^(-1/2)
+```
+
+- `L_t h_t` is the diffusion term. If neighboring nodes have similar state, this term is small. If a node disagrees with its neighbors, this term pushes it back toward local smoothness.
+- `force_t` is the externally driven part of the dynamics, built from event embeddings or structured event features such as a direct drive scalar.
+
+First-order IFT is a damped driven diffusion update:
+
+```text
+h_(t+1) = h_t + dt * (-gamma * h_t - kappa * L_t h_t + force_t)
+```
+
+- `dt`: integration step size.
+- `gamma`: decay or damping on the current state.
+- `kappa`: coupling strength on the Laplacian term. Larger `kappa` means stronger smoothing / diffusion across the graph.
+- `force_t`: input-driven excitation from the current event bin.
+
+This is the right mental model for diffusion-like tasks: the state wants to smooth over the graph, decay a bit, and respond to new input.
+
+Second-order IFT adds an explicit velocity-like latent state `v_t`:
+
+```text
+v_(t+1) = alpha * v_t - dt * (gamma * v_t + kappa * L_t h_t) + dt * force_t
+h_(t+1) = h_t + dt * v_(t+1)
+```
+
+- `v_t`: latent velocity or momentum.
+- `alpha`: velocity carry-over. Larger `alpha` means more inertia from the previous step.
+- `gamma`: damping on velocity.
+- `kappa`: restoring / coupling strength from the Laplacian field.
+
+This is the right mental model for wave-like and oscillator-like tasks: the model is not only smoothing a state, it is carrying momentum forward while the graph field and external drive push on that motion.
+
+For the `auto` and `hist_vel` variants, the second-order scorer exposes a simple scalar readout:
+
+```text
+score_t = w_y * y_t + w_v * v_t + w_drive * u_t + b
+```
+
+- `y_t`: current scalar state readout for the destination node.
+- `v_t`: velocity scalar. In `auto`, this is the internal second-order velocity; in `hist_vel_k*`, it is replaced by a short history-based velocity estimate from the last `k` readout deltas.
+- `u_t`: scalar drive / force readout from the current event bin.
+- `w_y`, `w_v`, `w_drive`, `b`: the learned linear coefficients printed in the footer.
+
+So when the footer shows positive `w_y`, `w_v`, and `w_drive`, it means larger state, velocity, and drive all push the output upward. On classification tasks like `edge_temporal_state`, that scalar is the logit for the positive class.
+
+The other footer columns summarize the internal dynamics:
+
+- `kappa`, `gamma`, `dt`, `alpha`: the learned physical-style parameters above.
+- `force`, `diff`: average magnitudes of the forcing and Laplacian terms.
+- `rel_d`: diffusion magnitude relative to forcing magnitude.
+- `rel_u`: update magnitude relative to current state magnitude.
+- `vel_f`, `for_f`: how much of the second-order update comes from carried velocity versus fresh forcing.
+- `vel_r2`, `vel_mse`: how well the internal velocity aligns with the observed finite-difference velocity proxy when that proxy is available.
 
 ## Synthetic benchmarks
 
