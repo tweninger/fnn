@@ -22,15 +22,164 @@ FOCUSED_COMBINATIONS = {
     ("settransformer", "hnn"),
     ("settransformer", "tgn_gru"),
 }
+IFT_RUN_PAIR = ("ift", "ift_update")
+IFT_VARIANT_CHOICES = ("generic", "linear", "direct", "auto")
+IFT_ORDER_CHOICES = (1, 2)
+IFT_HISTORY_STEP_CHOICES = (1, 2, 3)
 
 
-def build_ift_diagnostic_runs(
+def _shortlist_run_grid() -> dict[str, Any]:
+    return {
+        "seeds": (0,),
+        "aggregator": ("ift", "hopfield", "settransformer", "sum", "deepsets"),
+        "upd": ("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
+        "dropout": (0.0,),
+        "scorer_dropout": (0.0,),
+        "use_time_features": (False,),
+        "ift_kappa_param": ("softplus",),
+        "ift_dt": (0.05,),
+        "ift_gamma": (0.0,),
+        "ift_kappa_init": (1.0,),
+        "ift_kappa_cap": (False,),
+        "ift_kappa_max": (None,),
+    }
+
+
+def _full_run_grid() -> dict[str, Any]:
+    return {
+        "seeds": (0, 42, 123),
+        "aggregator": ("ift", "hopfield", "settransformer", "sum", "deepsets"),
+        "upd": ("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
+        "dropout": (0.0, 0.1),
+        "scorer_dropout": (0.0, 0.1),
+        "use_time_features": (False, True),
+        "ift_kappa_param": ("softplus", "exp"),
+        "ift_dt": (0.01, 0.05, 0.1, 0.2),
+        "ift_gamma": (0.0, 0.01, 0.05, 0.1),
+        "ift_kappa_init": (0.1, 0.5, 1.0, 2.0),
+        "ift_kappa_cap": (False, True),
+        "ift_kappa_max": (1.0, 2.0, 5.0, None),
+    }
+
+
+def _make_shortlist_runs(model_cfg: ModelConfig) -> list[SweepRun]:
+    return make_runs(model_cfg, **_shortlist_run_grid())
+
+
+def _infer_ift_drive_feature_idx(feature_schema: Sequence[str]) -> Optional[int]:
+    if "drive" in feature_schema:
+        return feature_schema.index("drive")
+    if "signal" in feature_schema:
+        return feature_schema.index("signal")
+    if "value" in feature_schema:
+        return feature_schema.index("value")
+    if "shift" in feature_schema:
+        return feature_schema.index("shift")
+    if len(feature_schema) > 0:
+        return 0
+    return None
+
+
+def _supported_ift_variants(*, event_dim: int) -> tuple[str, ...]:
+    if event_dim <= 0:
+        return ("generic",)
+    return IFT_VARIANT_CHOICES
+
+
+def _ift_selector_requested(args: argparse.Namespace) -> bool:
+    return any(
+        getattr(args, name, None) is not None
+        for name in ("ift_variants", "ift_orders", "ift_history_steps")
+    )
+
+
+def _resolve_ift_selection(
+    args: argparse.Namespace,
+    *,
+    task_name: str,
+    event_dim: int,
+) -> tuple[list[int], list[str], list[int]]:
+    raw_orders = cast(Optional[Sequence[int]], getattr(args, "ift_orders", None))
+    raw_variants = cast(Optional[Sequence[str]], getattr(args, "ift_variants", None))
+    raw_history = cast(Optional[Sequence[int]], getattr(args, "ift_history_steps", None))
+    supported_variants = _supported_ift_variants(event_dim=event_dim)
+
+    orders = list(IFT_ORDER_CHOICES) if raw_orders is None or len(raw_orders) == 0 else [int(order) for order in raw_orders]
+    variants = list(supported_variants) if raw_variants is None or len(raw_variants) == 0 else [str(variant) for variant in raw_variants]
+    history_steps = (
+        list(IFT_HISTORY_STEP_CHOICES)
+        if raw_history is None or len(raw_history) == 0
+        else [int(step) for step in raw_history]
+    )
+    unsupported_variants = [variant for variant in variants if variant not in supported_variants]
+    if unsupported_variants:
+        requested = ", ".join(unsupported_variants)
+        supported = ", ".join(supported_variants)
+        raise ValueError(
+            f"IFT variants [{requested}] are not supported for synthetic task {task_name}. "
+            f"Supported variants: {supported}."
+        )
+    if "auto" not in variants and raw_history is not None:
+        raise ValueError("--ift-history-steps requires selecting the auto IFT variant.")
+    if 2 not in orders and ("auto" in variants or raw_history is not None):
+        raise ValueError("IFT auto/history variants require including second-order IFT via --ift-orders 2.")
+    return orders, variants, history_steps
+
+
+def _resolve_selected_ift_variant_runs(
+    base_model_cfg: ModelConfig,
+    *,
+    task_name: str,
+    feature_schema: Sequence[str],
+    args: argparse.Namespace,
+) -> list[SweepRun]:
+    drive_feature_idx = _infer_ift_drive_feature_idx(feature_schema)
+    orders, variants, history_steps = _resolve_ift_selection(
+        args,
+        task_name=task_name,
+        event_dim=int(base_model_cfg.event_dim),
+    )
+    return build_ift_variant_runs(
+        base_model_cfg,
+        task_name=task_name,
+        drive_feature_idx=drive_feature_idx,
+        seed=int(args.seed),
+        orders=orders,
+        variants=variants,
+        history_steps=history_steps,
+    )
+
+
+def _replace_ift_shortlist_run(
+    runs: Sequence[SweepRun],
+    *,
+    replacement_runs: Sequence[SweepRun],
+) -> list[SweepRun]:
+    out: list[SweepRun] = []
+    replaced = False
+    for run in runs:
+        pair = (run.model_cfg.aggregator, run.model_cfg.update)
+        if pair == IFT_RUN_PAIR:
+            if not replaced:
+                out.extend(replacement_runs)
+                replaced = True
+            continue
+        out.append(run)
+    if not replaced:
+        out.extend(replacement_runs)
+    return out
+
+
+def build_ift_variant_runs(
     base_model_cfg: ModelConfig,
     *,
     task_name: str,
     drive_feature_idx: Optional[int],
     near_ar1_delta_coeffs: Optional[tuple[float, float, float, float]] = None,
     seed: int = 0,
+    orders: Optional[Sequence[int]] = None,
+    variants: Optional[Sequence[str]] = None,
+    history_steps: Optional[Sequence[int]] = None,
 ) -> list[SweepRun]:
     runs: list[SweepRun] = []
 
@@ -56,6 +205,13 @@ def build_ift_diagnostic_runs(
             )
         )
 
+    selected_orders = [int(order) for order in (IFT_ORDER_CHOICES if orders is None else orders)]
+    selected_variants = [str(variant) for variant in (IFT_VARIANT_CHOICES if variants is None else variants)]
+    selected_history_steps = [
+        int(step)
+        for step in (IFT_HISTORY_STEP_CHOICES if history_steps is None else history_steps)
+    ]
+
     shared: dict[str, Any] = dict(
         aggregator="ift",
         update="ift_update",
@@ -64,228 +220,58 @@ def build_ift_diagnostic_runs(
         ift_force_reduce="sum",
         ift_drive_feature_idx=drive_feature_idx,
     )
-    if task_name == "ift_diffusion":
-        add("ift1_generic", **shared, ift_update_order="first", ift_forcing_mode="generic_mlp")
-        add("ift1_linear", **shared, ift_update_order="first", ift_forcing_mode="linear_event")
-        add("ift1_direct", **shared, ift_update_order="first", ift_forcing_mode="direct_scalar")
-        add("ift1_gated_direct", **shared, ift_update_order="first", ift_forcing_mode="gated_direct_scalar")
-        add("gru_baseline", aggregator="sum", update="tgn_gru")
-        return runs
-    if task_name == "ift_wave":
-        add("ift1_generic", **shared, ift_update_order="first", ift_forcing_mode="generic_mlp")
-        add("ift1_linear", **shared, ift_update_order="first", ift_forcing_mode="linear_event")
-        add("ift1_direct", **shared, ift_update_order="first", ift_forcing_mode="direct_scalar")
-        add("ift2_auto", **shared, ift_update_order="second", ift_forcing_mode="linear_event")
-        for history_steps in (1, 2, 3):
+    forcing_by_variant = {
+        "generic": "generic_mlp",
+        "linear": "linear_event",
+        "direct": "direct_scalar",
+    }
+    if 1 in selected_orders:
+        for variant in ("generic", "linear", "direct"):
+            if variant not in selected_variants:
+                continue
             add(
-                f"ift2_hist_vel_k{history_steps}",
+                f"ift1_{variant}",
+                **shared,
+                ift_update_order="first",
+                ift_forcing_mode=forcing_by_variant[variant],
+            )
+    if 2 in selected_orders:
+        for variant in ("generic", "linear", "direct"):
+            if variant not in selected_variants:
+                continue
+            add(
+                f"ift2_{variant}",
+                **shared,
+                ift_update_order="second",
+                ift_forcing_mode=forcing_by_variant[variant],
+            )
+        if "auto" in selected_variants:
+            add(
+                "ift2_auto",
                 **shared,
                 ift_update_order="second",
                 ift_forcing_mode="linear_event",
                 ift2_readout_mode="linear_h_v_force",
                 ift_velocity_teacher_forcing=False,
-                ift_history_vel_steps=history_steps,
                 ift2_readout_init_mode="small_random",
                 ift2_readout_init_scale=0.01,
                 lr=1e-2,
                 prediction_mode=cast(PredictionMode, "delta"),
             )
-        if drive_feature_idx is not None:
-            add(
-                "ift2_ar_tf",
-                **shared,
-                ift_update_order="second",
-                ift_forcing_mode="linear_event",
-                ift2_readout_mode="linear_h_v_force",
-                ift_velocity_teacher_forcing=True,
-                ift2_readout_init_mode="small_random",
-                ift2_readout_init_scale=0.01,
-                lr=1e-2,
-                prediction_mode=cast(PredictionMode, "delta"),
-            )
-        add("gru_baseline", aggregator="sum", update="tgn_gru")
-        return runs
-
-    add("ift1_generic", **shared, ift_update_order="first", ift_forcing_mode="generic_mlp")
-    add("ift1_direct", **shared, ift_update_order="first", ift_forcing_mode="direct_scalar")
-    add("ift2_generic", **shared, ift_update_order="second", ift_forcing_mode="generic_mlp")
-    add("ift2_linear", **shared, ift_update_order="second", ift_forcing_mode="linear_event")
-    add("ift2_gated_linear", **shared, ift_update_order="second", ift_forcing_mode="gated_linear_event")
-    add("ift2_direct", **shared, ift_update_order="second", ift_forcing_mode="direct_scalar")
-    add("ift2_gated_direct", **shared, ift_update_order="second", ift_forcing_mode="gated_direct_scalar")
-    add(
-        "neural_ar2_delta_small_random_lr1e-1",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=1e-1,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "neural_ar2_delta_small_random_lr3e-2",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=3e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "neural_ar2_delta_small_random_lr1e-2",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "neural_ar2_delta_small_random_lr3e-3",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=3e-3,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "neural_ar2_delta_near_ar1",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="near_ar1",
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "neural_ar2_delta_oracle_init_trainable",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_oracle_init=True,
-        ift2_readout_init_mode="oracle",
-        ift2_readout_trainable=True,
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "ift2_linear_h_v_force_teacher_forced",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "ift2_linear_h_v_force_autonomous",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=False,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    for lambda_v in (0.0, 0.01, 0.1, 1.0):
-        add(
-            f"ift2_ar_auto_lambda{str(lambda_v).replace('.', 'p')}",
-            **shared,
-            ift_update_order="second",
-            ift_forcing_mode="direct_scalar",
-            ift2_readout_mode="linear_h_v_force",
-            ift_velocity_teacher_forcing=False,
-            ift2_readout_init_mode="small_random",
-            ift2_readout_init_scale=0.01,
-            ift_internal_velocity_loss_weight=float(lambda_v),
-            lr=1e-2,
-            prediction_mode=cast(PredictionMode, "delta"),
-        )
-    add(
-        "ift2_ar_tf",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "ift2_ar_auto",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=False,
-        ift2_readout_init_mode="small_random",
-        ift2_readout_init_scale=0.01,
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    for history_steps in (1, 2, 3):
-        add(
-            f"ift2_hist_vel_k{history_steps}",
-            **shared,
-            ift_update_order="second",
-            ift_forcing_mode="direct_scalar",
-            ift2_readout_mode="linear_h_v_force",
-            ift_velocity_teacher_forcing=False,
-            ift_history_vel_steps=history_steps,
-            ift2_readout_init_mode="small_random",
-            ift2_readout_init_scale=0.01,
-            lr=1e-2,
-            prediction_mode=cast(PredictionMode, "delta"),
-        )
-    add(
-        "neural_ar2_delta",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_readout_init_mode="zero",
-        lr=1e-2,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add(
-        "ift2_ar2_oracle_init",
-        **shared,
-        ift_update_order="second",
-        ift_forcing_mode="direct_scalar",
-        ift2_readout_mode="linear_h_v_force",
-        ift_velocity_teacher_forcing=True,
-        ift2_oracle_init=True,
-        ift2_readout_init_mode="oracle",
-        ift2_readout_trainable=False,
-        prediction_mode=cast(PredictionMode, "delta"),
-    )
-    add("gru_baseline", aggregator="sum", update="tgn_gru")
-    add("hnn_baseline", aggregator="sum", update="hnn")
+            for history_step in selected_history_steps:
+                add(
+                    f"ift2_hist_vel_k{history_step}",
+                    **shared,
+                    ift_update_order="second",
+                    ift_forcing_mode="linear_event",
+                    ift2_readout_mode="linear_h_v_force",
+                    ift_velocity_teacher_forcing=False,
+                    ift_history_vel_steps=history_step,
+                    ift2_readout_init_mode="small_random",
+                    ift2_readout_init_scale=0.01,
+                    lr=1e-2,
+                    prediction_mode=cast(PredictionMode, "delta"),
+                )
     return runs
 
 
@@ -411,41 +397,13 @@ def _base_model_config(*, small: bool) -> ModelConfig:
 
 def _focused_runs(model_cfg: ModelConfig) -> list[SweepRun]:
     return select_runs(
-        make_runs(
-            model_cfg,
-            seeds=(0,),
-            aggregator=("ift", "hopfield", "settransformer"),
-            upd=("ift_update", "hopfield_update", "lnn", "hnn", "tgn_gru"),
-            dropout=(0.0,),
-            scorer_dropout=(0.0,),
-            use_time_features=(False,),
-            ift_kappa_param=("softplus",),
-            ift_dt=(0.05,),
-            ift_gamma=(0.0,),
-            ift_kappa_init=(1.0,),
-            ift_kappa_cap=(False,),
-            ift_kappa_max=(None,),
-        ),
+        _make_shortlist_runs(model_cfg),
         FOCUSED_COMBINATIONS,
     )
 
 
 def _full_runs(model_cfg: ModelConfig) -> list[SweepRun]:
-    return make_runs(
-        model_cfg,
-        seeds=(0, 42, 123),
-        aggregator=("ift", "hopfield", "settransformer", "sum", "deepsets"),
-        upd=("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
-        dropout=(0.0, 0.1),
-        scorer_dropout=(0.0, 0.1),
-        use_time_features=(False, True),
-        ift_kappa_param=("softplus", "exp"),
-        ift_dt=(0.01, 0.05, 0.1, 0.2),
-        ift_gamma=(0.0, 0.01, 0.05, 0.1),
-        ift_kappa_init=(0.1, 0.5, 1.0, 2.0),
-        ift_kappa_cap=(False, True),
-        ift_kappa_max=(1.0, 2.0, 5.0, None),
-    )
+    return make_runs(model_cfg, **_full_run_grid())
 
 
 def _synthetic_default_sizes(preset: str) -> tuple[int, int, int]:
@@ -503,22 +461,16 @@ def _build_synthetic_suite(
     model_cfg.use_node_scorer = task_spec.requires_node_scorer
 
     if preset in {"smoke", "quick"}:
-        shortlist_runs = make_runs(
-            model_cfg,
-            seeds=(0,),
-            aggregator=("ift", "hopfield", "settransformer", "sum", "deepsets"),
-            upd=("ift_update", "tgn_gru", "lnn", "hopfield_update", "hnn"),
-            dropout=(0.0,),
-            scorer_dropout=(0.0,),
-            use_time_features=(False,),
-            ift_kappa_param=("softplus",),
-            ift_dt=(0.05,),
-            ift_gamma=(0.0,),
-            ift_kappa_init=(1.0,),
-            ift_kappa_cap=(False,),
-            ift_kappa_max=(None,),
-        )
+        shortlist_runs = _make_shortlist_runs(model_cfg)
         runs = select_runs(shortlist_runs, set(task_spec.recommended_pairs))
+        if _ift_selector_requested(args):
+            selected_ift_runs = _resolve_selected_ift_variant_runs(
+                model_cfg,
+                task_name=synthetic_cfg.task,
+                feature_schema=task_spec.feature_schema,
+                args=args,
+            )
+            runs = _replace_ift_shortlist_run(runs, replacement_runs=selected_ift_runs)
         epochs = 1 if preset == "smoke" else 4
         early_steps = 5 if preset == "smoke" else 10
     else:

@@ -545,8 +545,8 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
             "rollout_test.rollout_edge_r2",
         ),
     ),
-    "ift_diffusion": SyntheticTaskSpec(
-        name="ift_diffusion",
+    "diffusion": SyntheticTaskSpec(
+        name="diffusion",
         description="Predict graph diffusion over a ring with per-node drives carried through edge events.",
         focus="Topology-aware diffusion and smoothing over repeated interaction structure.",
         event_dim=2,
@@ -581,8 +581,8 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
             "rollout_test.rollout_persistent_edge_r2",
         ),
     ),
-    "ift_wave": SyntheticTaskSpec(
-        name="ift_wave",
+    "wave": SyntheticTaskSpec(
+        name="wave",
         description="Predict driven wave-like propagation over a ring with neighbor coupling and second-order rollout memory.",
         focus="Topology-aware second-order dynamics for graph-coupled wave propagation.",
         event_dim=2,
@@ -928,11 +928,11 @@ class SyntheticDataset(EventStreamDataset):
         if self.cfg.task == "conservative_oscillator":
             bins, edge_targets = self._materialize_conservative_oscillator()
             return bins, None, edge_targets
-        if self.cfg.task == "ift_diffusion":
-            bins, edge_targets = self._materialize_ift_diffusion()
+        if self.cfg.task == "diffusion":
+            bins, edge_targets = self._materialize_diffusion()
             return bins, None, edge_targets
-        if self.cfg.task == "ift_wave":
-            bins, edge_targets = self._materialize_ift_wave()
+        if self.cfg.task == "wave":
+            bins, edge_targets = self._materialize_wave()
             return bins, None, edge_targets
         if self.cfg.task in {"edge_ranking_sum_shift", "next_dst_ranking"}:
             return self._materialize_shifted_ranking_stream(self._build_edge_ranking_sum_shift_step), None, None
@@ -1181,7 +1181,7 @@ class SyntheticDataset(EventStreamDataset):
 
         return bins, edge_targets
 
-    def _materialize_ift_diffusion(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+    def _materialize_diffusion(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
         num_nodes = int(self.cfg.num_nodes)
         node_idx = np.arange(num_nodes, dtype=np.int64)
         ring_dst_fwd = (node_idx + 1) % num_nodes
@@ -1223,7 +1223,7 @@ class SyntheticDataset(EventStreamDataset):
 
         return bins, edge_targets
 
-    def _materialize_ift_wave(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+    def _materialize_wave(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
         num_nodes = int(self.cfg.num_nodes)
         node_idx = np.arange(num_nodes, dtype=np.int64)
         ring_dst_fwd = (node_idx + 1) % num_nodes

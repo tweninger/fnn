@@ -17,6 +17,9 @@ def _synthetic_args(task_name: str) -> argparse.Namespace:
         synthetic_events_per_bin=30,
         num_bins=18,
         seed=3,
+        ift_variants=None,
+        ift_orders=None,
+        ift_history_steps=None,
     )
 
 
@@ -40,3 +43,119 @@ def test_quick_synthetic_suite_uses_task_specific_shortlist(task_name: str):
 
     ds = load_dataset(suite.dataset, suite.dataset_kwargs)
     assert ds.spec().num_nodes == 20
+
+
+def test_quick_synthetic_suite_can_replace_default_ift_run_with_selected_variants() -> None:
+    args = _synthetic_args("wave")
+    args.ift_variants = ["linear", "auto"]
+    args.ift_history_steps = [3]
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    run_names = [run.name for run in suite.runs]
+    assert run_names == [
+        "ift1_linear",
+        "ift2_linear",
+        "ift2_auto",
+        "ift2_hist_vel_k3",
+        "agg=sum|update=tgn_gru|do=0.0|sdo=0.0|time=False",
+        "agg=sum|update=lnn|do=0.0|sdo=0.0|time=False",
+        "agg=sum|update=hnn|do=0.0|sdo=0.0|time=False",
+    ]
+    assert suite.runs[3].prediction_mode == "delta"
+    assert suite.runs[3].lr == 1e-2
+    assert suite.runs[3].model_cfg.ift_history_vel_steps == 3
+
+
+def test_quick_synthetic_suite_expands_empty_ift_variant_selection_to_task_defaults() -> None:
+    args = _synthetic_args("diffusion")
+    args.ift_variants = []
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    assert [run.name for run in suite.runs[:10]] == [
+        "ift1_generic",
+        "ift1_linear",
+        "ift1_direct",
+        "ift2_generic",
+        "ift2_linear",
+        "ift2_direct",
+        "ift2_auto",
+        "ift2_hist_vel_k1",
+        "ift2_hist_vel_k2",
+        "ift2_hist_vel_k3",
+    ]
+
+
+def test_quick_synthetic_suite_rejects_auto_without_second_order() -> None:
+    args = _synthetic_args("diffusion")
+    args.ift_variants = ["auto"]
+    args.ift_orders = [1]
+
+    with pytest.raises(ValueError, match="require including second-order IFT"):
+        build_suite(
+            "quick",
+            torch.device("cpu"),
+            dataset_override="synthetic",
+            args=args,
+        )
+
+
+def test_quick_synthetic_suite_allows_variant_selection_on_non_ift_task() -> None:
+    args = _synthetic_args("deepsets_sum")
+    args.ift_variants = ["direct"]
+    args.ift_orders = [1]
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    assert [run.name for run in suite.runs] == [
+        "ift1_direct",
+        "agg=settransformer|update=tgn_gru|do=0.0|sdo=0.0|time=False",
+        "agg=sum|update=tgn_gru|do=0.0|sdo=0.0|time=False",
+        "agg=deepsets|update=tgn_gru|do=0.0|sdo=0.0|time=False",
+    ]
+    assert suite.runs[0].model_cfg.ift_drive_feature_idx == 0
+
+
+def test_quick_synthetic_suite_expands_empty_ift_variant_selection_on_zero_event_task() -> None:
+    args = _synthetic_args("node_count_threshold")
+    args.ift_variants = []
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    assert [run.name for run in suite.runs] == [
+        "ift1_generic",
+        "ift2_generic",
+        "agg=settransformer|update=tgn_gru|do=0.0|sdo=0.0|time=False",
+        "agg=sum|update=tgn_gru|do=0.0|sdo=0.0|time=False",
+        "agg=deepsets|update=tgn_gru|do=0.0|sdo=0.0|time=False",
+    ]
+
+
+def test_quick_synthetic_suite_rejects_unsupported_variants_for_zero_event_task() -> None:
+    args = _synthetic_args("edge_threshold_classification")
+    args.ift_variants = ["linear"]
+
+    with pytest.raises(ValueError, match="Supported variants: generic"):
+        build_suite(
+            "quick",
+            torch.device("cpu"),
+            dataset_override="synthetic",
+            args=args,
+        )

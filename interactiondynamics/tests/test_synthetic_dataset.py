@@ -73,7 +73,7 @@ def test_synthetic_dataset_materializes_expected_supervision(task_name: str):
         "conservative_oscillator",
     }:
         expected_events = cfg.num_nodes
-    if task_name in {"ift_diffusion", "ift_wave"}:
+    if task_name in {"diffusion", "wave"}:
         expected_events = 3 * cfg.num_nodes
     if task_name == "associative_retrieval":
         expected_events = cfg.num_nodes * (max(3, cfg.events_per_bin // cfg.num_nodes) + 1)
@@ -128,24 +128,24 @@ def test_every_synthetic_task_shortlist_includes_ift_update():
 
 
 def test_synthetic_task_axes_capture_graph_dynamics_and_supervision():
-    ift_axes = synthetic_task_axes("ift_diffusion")
+    ift_axes = synthetic_task_axes("diffusion")
     assert ift_axes["graph_type"] == "ring"
     assert ift_axes["dynamics_type"] == "diffusion"
     assert ift_axes["supervision_level"] == "edge"
     assert ift_axes["supervision_type"] == "regression"
     assert ift_axes["temporal_mode"] == "rollout"
 
-    tags = synthetic_task_tags("ift_diffusion")
+    tags = synthetic_task_tags("diffusion")
     assert "graph:ring" in tags
     assert "dynamics:diffusion" in tags
     assert "target:edge_regression" in tags
 
-    wave_axes = synthetic_task_axes("ift_wave")
+    wave_axes = synthetic_task_axes("wave")
     assert wave_axes["graph_type"] == "ring"
     assert wave_axes["dynamics_type"] == "wave"
     assert wave_axes["temporal_mode"] == "rollout"
 
-    wave_tags = synthetic_task_tags("ift_wave")
+    wave_tags = synthetic_task_tags("wave")
     assert "graph:ring" in wave_tags
     assert "dynamics:wave" in wave_tags
     assert "features:signal+is_drive" in wave_tags
@@ -166,7 +166,7 @@ def test_synthetic_task_query_helpers_group_related_benchmarks():
     assert {"edge_ranking_temporal", "next_dst_temporal_ranking"} <= stateful_edge_tasks
 
     grouped = group_synthetic_tasks_by("graph_type")
-    assert "ift_diffusion" in grouped["ring"]
-    assert "ift_wave" in grouped["ring"]
+    assert "diffusion" in grouped["ring"]
+    assert "wave" in grouped["ring"]
     assert "temporal_memory" in grouped["self_loop"]
     assert "deepsets_sum" in grouped["random_pair"]

@@ -17,6 +17,7 @@ venv/bin/pyright
 ```bash
 venv/bin/python -m interactiondynamics.train smoke
 venv/bin/python -m interactiondynamics.train quick
+venv/bin/python -m interactiondynamics.train sweep
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task deepsets_sum
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task settransformer_max
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task temporal_memory
@@ -29,26 +30,78 @@ venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthet
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task next_dst_ranking
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task associative_retrieval
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task conservative_oscillator
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task ift_diffusion
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task ift_wave
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task diffusion
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave
 ```
 
 - `smoke` runs a tiny toy dataset check over the focused model/update shortlist.
 - `quick` runs the focused shortlist on JODIE Wikipedia:
   - `ift` + `ift_update`
   - `hopfield` + `hopfield_update`
-- `settransformer` + `lnn`
-- `settransformer` + `hnn`
-- `settransformer` + `tgn_gru`
+  - `settransformer` + `lnn`
+  - `settransformer` + `hnn`
+  - `settransformer` + `tgn_gru`
+- `sweep` runs the broader multi-seed preset grid on JODIE Wikipedia.
 - You can override examples like `venv/bin/python -m interactiondynamics.train quick --dataset toy --epochs 1`.
 - `--edge-target-mode residual` trains the edge head to predict next-step changes relative to the previous step while continuing to report raw-space edge metrics.
 - `--node-target-mode residual` does the same for optional node supervision, predicting state changes instead of raw next-step node values.
 - For synthetic edge regression, `--edge-target-scale zscore` rescales the MSE loss by the train-split edge-target standard deviation while still reporting raw-space metrics.
 - Ranking metrics now treat ties pessimistically by default, and eval also reports a `persistent_*` baseline that keeps the post-warmup state fixed.
 
-## IFT diagnostics
+### CLI reference
 
-The `ift` path now supports both first-order diffusion-style updates and second-order oscillator-style diagnostics without leaving the event-bin architecture.
+The training entrypoint is:
+
+```bash
+venv/bin/python -m interactiondynamics.train <smoke|quick|sweep> [flags]
+```
+
+Available subcommands:
+
+- `smoke`: tiny toy-dataset check over the focused shortlist.
+- `quick`: focused shortlist run, defaulting to JODIE Wikipedia.
+- `sweep`: broader multi-seed sweep over the larger preset grid.
+
+Common dataset flags:
+
+- `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand.
+- `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
+- `--synthetic-num-nodes N`: override synthetic node count.
+- `--synthetic-events-per-bin N`: override synthetic event count per bin for set-style tasks.
+- `--num-bins N`: override the number of simulated synthetic time bins.
+- `--seed N`: set the synthetic-data random seed.
+- `--ift-variants [VARIANT ...]`: on `smoke` or `quick`, replace the default `ift/ift_update` run with an IFT sweep over one or more variant families from `{generic, linear, direct, auto}`. Pass no variant names to sweep them all. Using this flag auto-selects the synthetic dataset.
+- `--ift-orders [1 2 ...]`: optionally restrict the IFT sweep to first-order, second-order, or both. Defaults to `1 2` when IFT variants are selected.
+- `--ift-history-steps [1 2 3 ...]`: optionally restrict the history readout sweep for the `auto` family. Defaults to `1 2 3`.
+
+Common training flags:
+
+- `--max-runs N`: cap the number of runs executed after filtering the preset.
+- `--epochs N`: override the preset epoch count.
+- `--rollout-horizon K`: set rollout evaluation horizon for regression tasks.
+- `--use-node-scorer`: force-enable the auxiliary node scorer.
+- `--node-loss-weight W`: weight for the node prediction loss.
+- `--node-scorer-hidden H`: hidden width for the node scorer MLP.
+
+Target and loss flags:
+
+- `--node-target-mode {raw,residual}`: train node targets directly or as deltas from the previous step.
+- `--edge-target-mode {raw,residual}`: train edge targets directly or as deltas from the previous step.
+- `--edge-target-scale {raw,zscore}`: use raw edge regression loss or z-score scaled loss.
+- `--prediction-mode {state,delta,state_plus_delta}`: predict next state directly, predict deltas, or reconstruct state from predicted deltas.
+
+Output flags:
+
+- `--save-jsonl PATH`: append per-epoch metrics and summaries to a JSONL file.
+
+Compatibility note:
+
+- The hidden legacy form `venv/bin/python -m interactiondynamics.train --preset {smoke,quick,full}` is still supported, with `full` mapping to `sweep`.
+- Classification tasks require `--node-target-mode raw` and `--edge-target-mode raw`.
+
+## IFT variants
+
+The `ift` path supports both first-order diffusion-style updates and second-order oscillator-style variants without leaving the event-bin architecture.
 
 - First-order IFT:
   - aggregator builds a graph/Laplacian from event bins
@@ -58,35 +111,40 @@ The `ift` path now supports both first-order diffusion-style updates and second-
   - supports scalar `h/v/force` readout for AR(2)-style diagnostics
   - supports teacher-forced or autonomous rollout evaluation
 
+For synthetic quick/smoke runs, the shortlist normally includes one default `ift` + `ift_update` run when the task recommends it.
+Passing `--ift-variants` replaces that one default IFT run with a sweep over the selected IFT axes while leaving the other quick baseline models in place.
+
+The selector is available on all synthetic tasks.
+
+The sweep axes are:
+
+- order: `1`, `2`
+- variant family: `generic`, `linear`, `direct`, `auto`
+- history steps: `1`, `2`, `3`
+
+How the sweep expands:
+
+- `generic`, `linear`, and `direct` create `ift1_*` and/or `ift2_*` runs depending on `--ift-orders`
+- `auto` creates `ift2_auto`
+- `--ift-history-steps` adds `ift2_hist_vel_k1`, `ift2_hist_vel_k2`, and `ift2_hist_vel_k3` style runs for the `auto` family
+- tasks with event features can sweep all four variant families
+- zero-event tasks currently support `generic` only
+- `--ift-history-steps` requires `auto`
+- `auto` and history sweeps require second-order IFT, so `--ift-orders` must include `2`
+
 Useful commands:
 
 ```bash
-venv/bin/python -m interactiondynamics.train ift-diagnose
-venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks ift_diffusion
-venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks conservative_oscillator --num-bins 40 --rollout-horizon 5
-venv/bin/python -m interactiondynamics.train ift-diagnose --ift-diagnostic-tasks ift_wave --num-bins 40 --rollout-horizon 5
+venv/bin/python -m interactiondynamics.train quick --synthetic-task diffusion --ift-variants linear --ift-orders 1
+venv/bin/python -m interactiondynamics.train quick --synthetic-task wave --ift-variants auto --ift-history-steps 1 2 3
+venv/bin/python -m interactiondynamics.train quick --synthetic-task conservative_oscillator --ift-variants --ift-orders 1 2
+venv/bin/python -m interactiondynamics.train quick --synthetic-task wave --ift-variants linear auto --ift-orders 2 --ift-history-steps 3 --num-bins 40 --rollout-horizon 5
+venv/bin/python -m interactiondynamics.train quick --synthetic-task deepsets_sum --ift-variants direct --ift-orders 1
+venv/bin/python -m interactiondynamics.train quick --synthetic-task node_count_threshold --ift-variants
 ```
 
-The diagnostic suite prints:
-
-- one-step sanity batches for second-order oscillator runs
-- rollout-vs-persistent metrics
-- internal IFT diagnostics such as `kappa`, `dt`, `alpha`, `force_norm`, `diffusion_term_norm`, `relative_update`
-- linear `h/v/force` readout coefficients when that scorer is active
-
-For conservative oscillator diagnostics, the suite also reports:
-
-- `ar1_baseline`
-- `ar2_baseline`
-- `oracle_baseline`
-- `closed_form_delta`
-
-Current status:
-
-- `ift2_ar2_oracle_init` now matches the AR(2) oracle rollout exactly when enough bins are available for second-order rollout seeding.
-- `closed_form_delta` also recovers the oracle solution.
-- learned second-order linear readouts improve with better initialization and larger learning rates, but still trail the oracle after a short run.
-- teacher-forced `h/v/force` learning is available to separate coefficient-learning issues from velocity-propagation issues.
+These runs go through the normal training/eval loop, so the output stays the standard per-run quick preset summary instead of a separate diagnostic table.
+When `--ift-variants` is active, the CLI also prints an IFT diagnostic footer at the end with rollout/state metrics, learned dynamics stats, and any active linear `h/v/force` readout coefficients.
 
 ## Synthetic benchmarks
 
@@ -112,8 +170,8 @@ Synthetic tasks now cover the full node/edge supervision matrix plus an explicit
 | `associative_retrieval` | Value whose key best matches a query event in the same node-local set. | `val.edge_r2` | `val.edge_r2`, `val.edge_corr`, `test.edge_r2`, `test.edge_corr` | `hopfield/tgn_gru`, `settransformer/tgn_gru`, `deepsets/tgn_gru`, `ift/ift_update` |
 | `temporal_memory` | Damped latent trajectory driven by per-node self events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `val.persistent_edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_test.rollout_edge_r2` | `sum/tgn_gru`, `sum/lnn`, `sum/hnn`, `ift/ift_update` |
 | `conservative_oscillator` | Lightly driven second-order oscillator with long rollout memory. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `val.persistent_edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_test.rollout_edge_r2` | `sum/hnn`, `sum/lnn`, `sum/tgn_gru`, `ift/ift_update` |
-| `ift_diffusion` | Ring-graph diffusion with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/lnn`, `sum/tgn_gru` |
-| `ift_wave` | Ring-coupled second-order wave dynamics with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/hnn`, `sum/lnn`, `sum/tgn_gru` |
+| `diffusion` | Ring-graph diffusion with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/lnn`, `sum/tgn_gru` |
+| `wave` | Ring-coupled second-order wave dynamics with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/hnn`, `sum/lnn`, `sum/tgn_gru` |
 
 #### Node regression
 

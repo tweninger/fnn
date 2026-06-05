@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-from typing import Iterable, Optional, cast
+from typing import Iterable, Optional, Sequence, cast
 
 import numpy as np
 import torch
@@ -13,16 +13,14 @@ from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
 from interactiondynamics.eval.node_metrics import regression_metrics
 from interactiondynamics.models.tgn_model import build_tgn_model
 from interactiondynamics.training.presets import (
-    build_ift_diagnostic_runs,
+    IFT_HISTORY_STEP_CHOICES,
+    IFT_ORDER_CHOICES,
+    IFT_VARIANT_CHOICES,
     build_suite,
-    build_synthetic_dataset_config,
     load_dataset,
 )
 from interactiondynamics.training.reporting import (
-    format_node_metric,
-    format_node_metric_bundle,
     infer_primary_metric,
-    node_metric_name,
 )
 from interactiondynamics.training.runner import (
     apply_model_overrides,
@@ -39,143 +37,165 @@ from interactiondynamics.training.task_metrics import (
 from interactiondynamics.training.types import PredictionMode, RunResult, SweepRun, TrainConfig
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run interaction dynamics training presets.")
-    subparsers = parser.add_subparsers(dest="command")
+DATASET_CHOICES = ("toy", "jodie", "synthetic")
+TARGET_MODE_CHOICES = ("raw", "residual")
+EDGE_TARGET_SCALE_CHOICES = ("raw", "zscore")
+PREDICTION_MODE_CHOICES = ("state", "delta", "state_plus_delta")
+PRESET_CHOICES = ("smoke", "quick", "full")
 
+
+def _build_common_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument(
+    data_group = common.add_argument_group("dataset")
+    data_group.add_argument(
         "--dataset",
-        choices=("toy", "jodie", "synthetic"),
+        choices=DATASET_CHOICES,
         default=None,
         help="Optional dataset override when supported by the command.",
     )
-    common.add_argument(
-        "--max-runs",
-        type=int,
-        default=None,
-        help="Optional cap on the number of runs to execute after filtering.",
-    )
-    common.add_argument(
-        "--epochs",
-        type=int,
-        default=None,
-        help="Optional override for the preset epoch count.",
-    )
-    common.add_argument(
-        "--use-node-scorer",
-        action="store_true",
-        help="Enable auxiliary node prediction on whether a node appears in the next bin.",
-    )
-    common.add_argument(
-        "--node-loss-weight",
-        type=float,
-        default=1.0,
-        help="Weight for the auxiliary node prediction loss.",
-    )
-    common.add_argument(
-        "--node-scorer-hidden",
-        type=int,
-        default=128,
-        help="Hidden size for the auxiliary node scorer MLP.",
-    )
-    common.add_argument(
-        "--save-jsonl",
-        type=str,
-        default=None,
-        help="Optional path to append per-epoch JSONL results.",
-    )
-    common.add_argument(
-        "--num-bins",
-        type=int,
-        default=None,
-        help="Number of simulated time bins for synthetic datasets.",
-    )
-    common.add_argument("--seed", type=int, default=0, help="Random seed for simulated datasets.")
-    common.add_argument(
+    data_group.add_argument(
         "--synthetic-task",
         choices=tuple(SYNTHETIC_TASKS.keys()),
         default="deepsets_sum",
         help="Synthetic benchmark task to use when --dataset synthetic.",
     )
-    common.add_argument(
+    data_group.add_argument(
         "--synthetic-num-nodes",
         type=int,
         default=None,
         help="Optional node count override for synthetic datasets.",
     )
-    common.add_argument(
+    data_group.add_argument(
         "--synthetic-events-per-bin",
         type=int,
         default=None,
         help="Optional event-count override for set-based synthetic datasets.",
     )
-    common.add_argument(
-        "--node-target-mode",
-        choices=("raw", "residual"),
-        default="raw",
-        help="Train the node head on raw next-step node values or residuals relative to the previous step.",
+    data_group.add_argument(
+        "--num-bins",
+        type=int,
+        default=None,
+        help="Number of simulated time bins for synthetic datasets.",
     )
-    common.add_argument(
-        "--edge-target-mode",
-        choices=("raw", "residual"),
-        default="raw",
-        help="Train the edge head on raw next-step magnitudes or residuals relative to the previous step.",
+    data_group.add_argument("--seed", type=int, default=0, help="Random seed for simulated datasets.")
+    data_group.add_argument(
+        "--ift-variants",
+        nargs="*",
+        choices=IFT_VARIANT_CHOICES,
+        default=None,
+        help=(
+            "Replace the default quick/smoke IFT run with an IFT variant sweep over "
+            f"{IFT_VARIANT_CHOICES}. Pass no variant names to sweep them all."
+        ),
     )
-    common.add_argument(
-        "--edge-target-scale",
-        choices=("raw", "zscore"),
-        default="raw",
-        help="Use raw edge MSE or scale edge regression loss by the train-split target std.",
+    data_group.add_argument(
+        "--ift-orders",
+        nargs="*",
+        type=int,
+        choices=IFT_ORDER_CHOICES,
+        default=None,
+        help="Optional subset of IFT orders to sweep when --ift-variants is active. Defaults to 1 and 2.",
     )
-    common.add_argument(
-        "--prediction-mode",
-        choices=("state", "delta", "state_plus_delta"),
-        default="state",
-        help="Train regression heads on next-state targets, delta targets, or reconstructed state from predicted deltas.",
+    data_group.add_argument(
+        "--ift-history-steps",
+        nargs="*",
+        type=int,
+        choices=IFT_HISTORY_STEP_CHOICES,
+        default=None,
+        help="Optional subset of history readout steps to sweep for the IFT auto variant. Defaults to 1, 2, and 3.",
     )
-    common.add_argument(
+
+    train_group = common.add_argument_group("training")
+    train_group.add_argument(
+        "--max-runs",
+        type=int,
+        default=None,
+        help="Optional cap on the number of runs to execute after filtering.",
+    )
+    train_group.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Optional override for the preset epoch count.",
+    )
+    train_group.add_argument(
         "--rollout-horizon",
         type=int,
         default=5,
         help="Evaluate k-step target rollout with this horizon for regression datasets.",
     )
-
-    subparsers.add_parser(
-        "smoke",
-        parents=[common],
-        help="Run a tiny smoke test preset.",
+    train_group.add_argument(
+        "--use-node-scorer",
+        action="store_true",
+        help="Enable auxiliary node prediction on whether a node appears in the next bin.",
     )
-    subparsers.add_parser(
-        "quick",
-        parents=[common],
-        help="Run the focused shortlist preset.",
+    train_group.add_argument(
+        "--node-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight for the auxiliary node prediction loss.",
     )
-    subparsers.add_parser(
-        "sweep",
-        parents=[common],
-        help="Run the original broad sweep.",
-    )
-    diag = subparsers.add_parser(
-        "ift-diagnose",
-        parents=[common],
-        help="Run focused IFT ablations on synthetic oscillator and diffusion tasks.",
-    )
-    diag.add_argument(
-        "--ift-diagnostic-tasks",
-        nargs="*",
-        choices=("conservative_oscillator", "ift_diffusion", "ift_wave"),
-        default=("conservative_oscillator", "ift_diffusion", "ift_wave"),
-        help="Synthetic tasks to include in the focused IFT diagnostic suite.",
+    train_group.add_argument(
+        "--node-scorer-hidden",
+        type=int,
+        default=128,
+        help="Hidden size for the auxiliary node scorer MLP.",
     )
 
-    parser.add_argument(
-        "--preset",
-        choices=("smoke", "quick", "full"),
+    target_group = common.add_argument_group("targets")
+    target_group.add_argument(
+        "--node-target-mode",
+        choices=TARGET_MODE_CHOICES,
+        default="raw",
+        help="Train the node head on raw next-step node values or residuals relative to the previous step.",
+    )
+    target_group.add_argument(
+        "--edge-target-mode",
+        choices=TARGET_MODE_CHOICES,
+        default="raw",
+        help="Train the edge head on raw next-step magnitudes or residuals relative to the previous step.",
+    )
+    target_group.add_argument(
+        "--edge-target-scale",
+        choices=EDGE_TARGET_SCALE_CHOICES,
+        default="raw",
+        help="Use raw edge MSE or scale edge regression loss by the train-split target std.",
+    )
+    target_group.add_argument(
+        "--prediction-mode",
+        choices=PREDICTION_MODE_CHOICES,
+        default="state",
+        help="Train regression heads on next-state targets, delta targets, or reconstructed state from predicted deltas.",
+    )
+
+    output_group = common.add_argument_group("output")
+    output_group.add_argument(
+        "--save-jsonl",
+        type=str,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Optional path to append per-epoch JSONL results.",
     )
-    args = parser.parse_args()
+    return common
+
+
+def _add_subcommands(
+    parser: argparse.ArgumentParser,
+    *,
+    common: argparse.ArgumentParser,
+) -> None:
+    subparsers = parser.add_subparsers(dest="command")
+    for name, help_text in (
+        ("smoke", "Run a tiny smoke test preset."),
+        ("quick", "Run the focused shortlist preset."),
+        ("sweep", "Run the original broad sweep."),
+    ):
+        subparsers.add_parser(name, parents=[common], help=help_text)
+
+
+def _resolve_command_or_error(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> argparse.Namespace:
     if args.command is None:
         if args.preset is not None:
             args.command = "sweep" if args.preset == "full" else args.preset
@@ -184,26 +204,18 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _base_diagnostic_model_config(event_dim: int) -> ModelConfig:
-    return ModelConfig(
-        node_dim=128,
-        msg_dim=128,
-        event_dim=event_dim,
-        scorer="mlp",
-        scorer_hidden=256,
-        aggregator="ift",
-        update="ift_update",
-        use_time_features=False,
-        dropout=0.0,
-        scorer_dropout=0.0,
-        encoder_hidden=256,
-        ift_message_reduce="sum",
-        ift_force_reduce="sum",
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run interaction dynamics training presets.")
+    common = _build_common_parser()
+    _add_subcommands(parser, common=common)
+    parser.add_argument(
+        "--preset",
+        choices=PRESET_CHOICES,
+        default=None,
+        help=argparse.SUPPRESS,
     )
-
-
-def _diagnostic_metric(snapshot: dict[str, object], path: str) -> float:
-    return float(snapshot_metric_value(snapshot, path))
+    args = parser.parse_args(argv)
+    return _resolve_command_or_error(parser, args)
 
 
 def _resolve_prediction_mode(raw: str, *, default_state_plus_delta: bool = False) -> PredictionMode:
@@ -370,10 +382,9 @@ def _sequence_baseline_metrics(
     else:
         for start_idx in range(1, len(targets) - horizon + 1):
             prev1 = targets[start_idx - 1]
-            prev2 = None
             curr_pred = prev1
             for idx in range(start_idx, start_idx + horizon):
-                curr_pred = _predict_autoregressive(coeffs, prev1, prev2, drives[idx - 1])
+                curr_pred = _predict_autoregressive(coeffs, prev1, None, drives[idx - 1])
                 prev1 = curr_pred
             rollout_preds.append(curr_pred)
             rollout_truths.append(targets[start_idx + horizon - 1])
@@ -461,42 +472,21 @@ def _diagnostic_baseline_rows(
     task_name: str,
     horizon: int,
 ) -> dict[str, dict[str, float]]:
-    train_targets = _stack_split_edge_targets(ds.edge_targets("train") or [])
-    val_targets = _stack_split_edge_targets(ds.edge_targets("val") or [])
-    test_targets = _stack_split_edge_targets(ds.edge_targets("test") or [])
+    if task_name != "conservative_oscillator":
+        return {}
+    edge_targets_train = ds.edge_targets("train")
+    edge_targets_val = ds.edge_targets("val")
+    edge_targets_test = ds.edge_targets("test")
+    if edge_targets_train is None or edge_targets_val is None or edge_targets_test is None:
+        return {}
+    train_targets = _stack_split_edge_targets(edge_targets_train)
+    val_targets = _stack_split_edge_targets(edge_targets_val)
+    test_targets = _stack_split_edge_targets(edge_targets_test)
     train_drives = _stack_split_drives(ds.bins("train"), num_nodes=spec.num_nodes, drive_feature_idx=0)
     val_drives = _stack_split_drives(ds.bins("val"), num_nodes=spec.num_nodes, drive_feature_idx=0)
     test_drives = _stack_split_drives(ds.bins("test"), num_nodes=spec.num_nodes, drive_feature_idx=0)
 
     rows: dict[str, dict[str, float]] = {}
-    persistence_val = _sequence_delta_baseline_metrics(
-        val_targets,
-        val_drives,
-        coeffs=torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32),
-        horizon=horizon,
-    )
-    persistence_test = _sequence_delta_baseline_metrics(
-        test_targets,
-        test_drives,
-        coeffs=torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32),
-        horizon=horizon,
-    )
-    rows["persistence"] = {
-        "val_r2": float(persistence_val.get("edge_r2", float("nan"))),
-        "test_r2": float(persistence_test.get("edge_r2", float("nan"))),
-        "rollout_val_rollout_edge_r2": float(persistence_val.get("rollout_edge_r2", float("nan"))),
-        "rollout_test_rollout_edge_r2": float(persistence_test.get("rollout_edge_r2", float("nan"))),
-        "persistent_edge_r2": float(persistence_test.get("rollout_persistent_edge_r2", float("nan"))),
-        "delta_vs_persistent": float(
-            persistence_test.get("rollout_edge_r2", float("nan"))
-            - persistence_test.get("rollout_persistent_edge_r2", float("nan"))
-        ),
-        "edge_delta_r2": float(persistence_test.get("rollout_edge_delta_r2", float("nan"))),
-        "edge_delta_mae": float(persistence_test.get("rollout_edge_delta_mae", float("nan"))),
-    }
-    if task_name != "conservative_oscillator":
-        return rows
-
     for name, order in (("ar1_baseline", 1), ("ar2_baseline", 2)):
         coeffs = _fit_ar_coefficients(train_targets, train_drives, order=order)
         if coeffs is None:
@@ -509,7 +499,10 @@ def _diagnostic_baseline_rows(
             "rollout_val_rollout_edge_r2": float(val_metrics.get("rollout_edge_r2", float("nan"))),
             "rollout_test_rollout_edge_r2": float(test_metrics.get("rollout_edge_r2", float("nan"))),
             "persistent_edge_r2": float(test_metrics.get("rollout_persistent_edge_r2", float("nan"))),
-            "delta_vs_persistent": float(test_metrics.get("rollout_edge_r2", float("nan")) - test_metrics.get("rollout_persistent_edge_r2", float("nan"))),
+            "delta_vs_persistent": float(
+                test_metrics.get("rollout_edge_r2", float("nan"))
+                - test_metrics.get("rollout_persistent_edge_r2", float("nan"))
+            ),
             "edge_delta_r2": float(test_metrics.get("rollout_edge_delta_r2", float("nan"))),
             "edge_delta_mae": float(test_metrics.get("rollout_edge_delta_mae", float("nan"))),
         }
@@ -517,7 +510,7 @@ def _diagnostic_baseline_rows(
     generator_params = {}
     if spec.extra is not None:
         generator_params = dict(spec.extra.get("generator_params") or {})
-    if generator_params:
+    if {"a", "b", "c"} <= set(generator_params):
         coeffs = torch.tensor(
             [float(generator_params["a"]), float(generator_params["b"]), float(generator_params["c"])],
             dtype=torch.float32,
@@ -530,7 +523,10 @@ def _diagnostic_baseline_rows(
             "rollout_val_rollout_edge_r2": float(val_metrics.get("rollout_edge_r2", float("nan"))),
             "rollout_test_rollout_edge_r2": float(test_metrics.get("rollout_edge_r2", float("nan"))),
             "persistent_edge_r2": float(test_metrics.get("rollout_persistent_edge_r2", float("nan"))),
-            "delta_vs_persistent": float(test_metrics.get("rollout_edge_r2", float("nan")) - test_metrics.get("rollout_persistent_edge_r2", float("nan"))),
+            "delta_vs_persistent": float(
+                test_metrics.get("rollout_edge_r2", float("nan"))
+                - test_metrics.get("rollout_persistent_edge_r2", float("nan"))
+            ),
             "edge_delta_r2": float(test_metrics.get("rollout_edge_delta_r2", float("nan"))),
             "edge_delta_mae": float(test_metrics.get("rollout_edge_delta_mae", float("nan"))),
         }
@@ -544,7 +540,10 @@ def _diagnostic_baseline_rows(
             "rollout_val_rollout_edge_r2": float(val_metrics.get("rollout_edge_r2", float("nan"))),
             "rollout_test_rollout_edge_r2": float(test_metrics.get("rollout_edge_r2", float("nan"))),
             "persistent_edge_r2": float(test_metrics.get("rollout_persistent_edge_r2", float("nan"))),
-            "delta_vs_persistent": float(test_metrics.get("rollout_edge_r2", float("nan")) - test_metrics.get("rollout_persistent_edge_r2", float("nan"))),
+            "delta_vs_persistent": float(
+                test_metrics.get("rollout_edge_r2", float("nan"))
+                - test_metrics.get("rollout_persistent_edge_r2", float("nan"))
+            ),
             "edge_delta_r2": float(test_metrics.get("rollout_edge_delta_r2", float("nan"))),
             "edge_delta_mae": float(test_metrics.get("rollout_edge_delta_mae", float("nan"))),
             "w_y": float(delta_coeffs[0].item()),
@@ -555,150 +554,150 @@ def _diagnostic_baseline_rows(
     return rows
 
 
-def _rollout_window_summary(
-    split_len: int,
+def _infer_regression_target_kind(snapshot: dict[str, object]) -> Optional[str]:
+    val_metrics = cast(dict[str, float], snapshot.get("val", {}))
+    if "edge_mse" in val_metrics or "edge_r2" in val_metrics:
+        return "edge"
+    if "node_mse" in val_metrics or "node_r2" in val_metrics:
+        return "node"
+    return None
+
+
+def _infer_snapshot_kind(snapshot: dict[str, object]) -> str:
+    val_metrics = cast(dict[str, float], snapshot.get("val", {}))
+    if any(key.startswith("edge_") for key in val_metrics):
+        return "edge"
+    if any(key.startswith("node_") for key in val_metrics):
+        return "node"
+    if "mrr" in val_metrics or "hits@1" in val_metrics:
+        return "rank"
+    return "-"
+
+
+def _snapshot_metric_or_none(snapshot: dict[str, object], path: str) -> Optional[float]:
+    value = float(snapshot_metric_value(snapshot, path))
+    return None if np.isnan(value) else value
+
+
+def _format_table_float(
+    value: Optional[float],
     *,
-    horizon: int,
-    autonomous: bool,
-    targets: list[torch.Tensor],
-) -> dict[str, float]:
-    if autonomous:
-        valid_windows = max(0, split_len - horizon - 1)
-        max_supported_horizon = max(0, split_len - 2)
-    else:
-        valid_windows = max(0, split_len - horizon)
-        max_supported_horizon = max(0, split_len - 1)
-    flat = torch.cat(targets) if targets else torch.empty((0,), dtype=torch.float32)
-    target_var = float(flat.var(unbiased=False).item()) if flat.numel() > 0 else float("nan")
-    actual_horizon = float(horizon if valid_windows > 0 else max_supported_horizon)
+    width: int,
+    precision: int = 3,
+) -> str:
+    if value is None or np.isnan(value):
+        return f"{'-':>{width}}"
+    return f"{value:>{width}.{precision}f}"
+
+
+def _format_summary_float(
+    value: Optional[float],
+    *,
+    width: int,
+) -> str:
+    if value is None or np.isnan(value):
+        return f"{'-':>{width}}"
+    return f"{value:>{width}.4g}"
+
+
+def _build_ift_diagnostic_row(snapshot: dict[str, object]) -> Optional[dict[str, Optional[float] | str]]:
+    target_kind = _infer_regression_target_kind(snapshot)
+    if target_kind is None:
+        inferred_kind = _infer_snapshot_kind(snapshot)
+        return None if inferred_kind == "-" else {
+            "target_kind": inferred_kind,
+            "auc_val": _snapshot_metric_or_none(snapshot, f"val.{inferred_kind}_auroc") if inferred_kind in {"edge", "node"} else None,
+            "auc_test": _snapshot_metric_or_none(snapshot, f"test.{inferred_kind}_auroc") if inferred_kind in {"edge", "node"} else None,
+            "f1_val": _snapshot_metric_or_none(snapshot, f"val.{inferred_kind}_f1") if inferred_kind in {"edge", "node"} else None,
+            "f1_test": _snapshot_metric_or_none(snapshot, f"test.{inferred_kind}_f1") if inferred_kind in {"edge", "node"} else None,
+            "state_val_r2": None,
+            "state_test_r2": None,
+            "rollout_val_r2": None,
+            "rollout_test_r2": None,
+            "persistent_r2": None,
+            "delta_vs_persistent": None,
+            "delta_r2": None,
+            "delta_mae": None,
+        }
+    persistent_r2 = _snapshot_metric_or_none(snapshot, f"val.persistent_{target_kind}_r2")
+    if persistent_r2 is None:
+        persistent_r2 = _snapshot_metric_or_none(snapshot, f"rollout_test.rollout_persistent_{target_kind}_r2")
+    rollout_test_r2 = _snapshot_metric_or_none(snapshot, f"rollout_test.rollout_{target_kind}_r2")
     return {
-        "split_len": float(split_len),
-        "requested_horizon": float(horizon),
-        "actual_horizon": actual_horizon,
-        "valid_windows": float(valid_windows),
-        "target_variance": target_var,
+        "target_kind": target_kind,
+        "auc_val": _snapshot_metric_or_none(snapshot, f"val.{target_kind}_auroc"),
+        "auc_test": _snapshot_metric_or_none(snapshot, f"test.{target_kind}_auroc"),
+        "f1_val": _snapshot_metric_or_none(snapshot, f"val.{target_kind}_f1"),
+        "f1_test": _snapshot_metric_or_none(snapshot, f"test.{target_kind}_f1"),
+        "state_val_r2": _snapshot_metric_or_none(snapshot, f"val.{target_kind}_r2"),
+        "state_test_r2": _snapshot_metric_or_none(snapshot, f"test.{target_kind}_r2"),
+        "rollout_val_r2": _snapshot_metric_or_none(snapshot, f"rollout_val.rollout_{target_kind}_r2"),
+        "rollout_test_r2": rollout_test_r2,
+        "persistent_r2": persistent_r2,
+        "delta_vs_persistent": (
+            None
+            if rollout_test_r2 is None or persistent_r2 is None
+            else rollout_test_r2 - persistent_r2
+        ),
+        "delta_r2": _snapshot_metric_or_none(snapshot, f"rollout_test.rollout_{target_kind}_delta_r2"),
+        "delta_mae": _snapshot_metric_or_none(snapshot, f"rollout_test.rollout_{target_kind}_delta_mae"),
     }
 
 
-def _print_rollout_summary(
-    task_name: str,
-    *,
-    horizon: int,
-    rows: dict[str, dict[str, float]],
-    val_targets: list[torch.Tensor],
-    test_targets: list[torch.Tensor],
-) -> None:
-    print(f"\n--- Rollout support: {task_name} ---")
-    print(
-        f"{'run':<20} {'mode':<5} {'val_len':>7} {'test_len':>8} {'req_h':>6} {'act_h':>6} "
-        f"{'val_win':>8} {'test_win':>9} {'val_var':>10} {'test_var':>10}"
-    )
-    print("-" * 100)
-    for name, row in rows.items():
-        autonomous = bool(name.startswith("ift2_ar_") or name == "ift2_auto")
-        val_info = _rollout_window_summary(
-            len(val_targets),
-            horizon=horizon,
-            autonomous=autonomous,
-            targets=val_targets,
-        )
-        test_info = _rollout_window_summary(
-            len(test_targets),
-            horizon=horizon,
-            autonomous=autonomous,
-            targets=test_targets,
-        )
-        mode = "auto" if autonomous else "step"
-        print(
-            f"{name[:20]:<20} {mode:<5} "
-            f"{int(val_info['split_len']):>7} {int(test_info['split_len']):>8} "
-            f"{int(val_info['requested_horizon']):>6} {int(val_info['actual_horizon']):>6} "
-            f"{int(val_info['valid_windows']):>8} {int(test_info['valid_windows']):>9} "
-            f"{val_info['target_variance']:>10.4f} {test_info['target_variance']:>10.4f}"
-        )
-        if val_info["valid_windows"] <= 0 or test_info["valid_windows"] <= 0:
-            print(
-                "  warning"
-                f" | no valid rollout windows for {name} on "
-                f"{'val' if val_info['valid_windows'] <= 0 else ''}"
-                f"{'/' if val_info['valid_windows'] <= 0 and test_info['valid_windows'] <= 0 else ''}"
-                f"{'test' if test_info['valid_windows'] <= 0 else ''}"
-            )
-
-
-def _print_wave_task_metadata(spec) -> None:
-    extra = spec.extra or {}
-    params = dict(extra.get("generator_params") or {})
-    feature_schema = list(extra.get("task_axes", {}).get("feature_schema", []))
-    freq_min = float(params.get("freq_min", float("nan")))
-    freq_max = float(params.get("freq_max", float("nan")))
-    mean_freq = 0.5 * (freq_min + freq_max) if np.isfinite(freq_min) and np.isfinite(freq_max) else float("nan")
-    est_period = (2.0 * np.pi / mean_freq) if np.isfinite(mean_freq) and mean_freq > 0.0 else float("nan")
-    model_uses_ring = extra.get("task_axes", {}).get("graph_type") == "ring"
-    print("\n--- Wave task metadata ---")
-    print(f"feature_schema={feature_schema or ['none']}")
-    print(
-        "generator"
-        f" | graph={params.get('graph', 'unknown')}"
-        f" lap={float(params.get('lap', float('nan'))):.3f}"
-        f" drive={float(params.get('drive', params.get('c', float('nan')))):.3f}"
-        f" a={float(params.get('a', float('nan'))):.3f}"
-        f" b={float(params.get('b', float('nan'))):.3f}"
-        f" alpha={float(params.get('alpha', float('nan'))):.3f}"
-        f" gamma={float(params.get('gamma', float('nan'))):.3f}"
-    )
-    print(
-        "wave"
-        f" | estimated_period={est_period:.3f}"
-        f" freq_min={freq_min:.3f}"
-        f" freq_max={freq_max:.3f}"
-        f" fixed_ring={params.get('graph', '') == 'fixed_ring'}"
-        f" model_L_matches_generator_graph={model_uses_ring}"
-    )
+def _compact_regression_summary_kind(results: Sequence[RunResult]) -> Optional[str]:
+    for result in results:
+        snapshot = result.best_snapshot if result.best_snapshot else result.final_snapshot
+        target_kind = _infer_regression_target_kind(snapshot)
+        if target_kind is not None:
+            return target_kind
+    return None
 
 
 def _print_ift_diagnostic_table(
     task_name: str,
-    results: list[RunResult],
+    results: Sequence[RunResult],
     *,
     extra_rows: Optional[dict[str, dict[str, float]]] = None,
-) -> dict[str, dict[str, float]]:
+) -> None:
     print(f"\n=== IFT diagnostic table: {task_name} ===")
     header = (
-        f"{'run':<20} {'state_v':>8} {'state_t':>8} {'roll_v':>8} {'roll_t':>8} {'pers':>8} "
-        f"{'d_pers':>8} {'delta_r2':>8} {'delta_mae':>9} {'vel_used':>8} {'vel_int':>8} {'kappa':>7} {'gamma':>7} {'dt':>6} "
+        f"{'run':<20} {'target':>6} {'auc_v':>7} {'auc_t':>7} {'f1_v':>7} {'f1_t':>7} "
+        f"{'state_v':>8} {'state_t':>8} {'roll_v':>8} {'roll_t':>8} {'pers':>8} "
+        f"{'d_pers':>8} {'delta_r2':>8} {'delta_mae':>9} {'vel_r2':>8} {'kappa':>7} {'gamma':>7} {'dt':>6} "
         f"{'alpha':>7} {'force':>8} {'diff':>8} {'rel_d':>8} {'rel_u':>8} {'vel_f':>7} {'for_f':>7} {'d_corr':>8} {'vel_mse':>8}"
     )
     print(header)
     print("-" * len(header))
+    node_delta_metrics_missing = False
+    non_regression_metrics_missing = False
 
-    rows: dict[str, dict[str, float]] = {}
     for result in results:
         snap = result.best_snapshot if result.best_snapshot else result.final_snapshot
         train_step = snap.get("train_step", {})
         readout = snap.get("readout", {})
-        row = {
-            "val_r2": _diagnostic_metric(snap, "val.edge_r2"),
-            "test_r2": _diagnostic_metric(snap, "test.edge_r2"),
-            "rollout_val_rollout_edge_r2": _diagnostic_metric(snap, "rollout_val.rollout_edge_r2"),
-            "rollout_test_rollout_edge_r2": _diagnostic_metric(snap, "rollout_test.rollout_edge_r2"),
-            "persistent_edge_r2": _diagnostic_metric(snap, "rollout_test.rollout_persistent_edge_r2"),
-            "delta_vs_persistent": (
-                _diagnostic_metric(snap, "rollout_test.rollout_edge_r2")
-                - _diagnostic_metric(snap, "rollout_test.rollout_persistent_edge_r2")
-            ),
-            "edge_delta_r2": _diagnostic_metric(snap, "rollout_test.rollout_edge_delta_r2"),
-            "edge_delta_mae": _diagnostic_metric(snap, "rollout_test.rollout_edge_delta_mae"),
-            "used_velocity_r2": float(
-                train_step.get("used_velocity_r2_mean", float("nan"))
-            ),
-            "internal_velocity_r2": float(
+        row = _build_ift_diagnostic_row(snap)
+        if row is None:
+            continue
+        if (
+            cast(Optional[float], row["state_val_r2"]) is None
+            and cast(Optional[float], row["state_test_r2"]) is None
+            and cast(Optional[float], row["rollout_val_r2"]) is None
+            and cast(Optional[float], row["rollout_test_r2"]) is None
+        ):
+            non_regression_metrics_missing = True
+        if (
+            row["target_kind"] == "node"
+            and row["delta_r2"] is None
+            and row["delta_mae"] is None
+        ):
+            node_delta_metrics_missing = True
+        row.update({
+            "decoded_v_r2_against_finite_difference": float(
                 train_step.get(
                     "internal_velocity_r2_mean",
                     train_step.get("decoded_v_r2_against_finite_difference_mean", float("nan")),
                 )
             ),
-            "used_velocity_mse": float(train_step.get("used_velocity_mse_mean", float("nan"))),
             "internal_velocity_mse": float(
                 train_step.get("internal_velocity_mse_mean", train_step.get("velocity_loss_mean", float("nan")))
             ),
@@ -708,47 +707,41 @@ def _print_ift_diagnostic_table(
             "alpha": float(train_step.get("alpha_mean", float("nan"))),
             "force_norm": float(train_step.get("force_norm_mean", train_step.get("injection_term_norm_mean", float("nan")))),
             "diffusion_term_norm": float(train_step.get("diffusion_term_norm_mean", float("nan"))),
-            "injection_term_norm": float(train_step.get("injection_term_norm_mean", float("nan"))),
             "relative_diffusion": float(train_step.get("relative_diffusion_mean", float("nan"))),
             "relative_update": float(train_step.get("relative_update_mean", float("nan"))),
             "velocity_fraction": float(train_step.get("velocity_fraction_mean", float("nan"))),
             "force_fraction": float(train_step.get("force_fraction_mean", float("nan"))),
             "pred_delta_corr": float(train_step.get("pred_delta_corr_mean", float("nan"))),
-        }
-        rows[result.name] = row
+        })
         print(
             f"{result.name[:20]:<20} "
-            f"{row['val_r2']:>8.3f} "
-            f"{row['test_r2']:>8.3f} "
-            f"{row['rollout_val_rollout_edge_r2']:>8.3f} "
-            f"{row['rollout_test_rollout_edge_r2']:>8.3f} "
-            f"{row['persistent_edge_r2']:>8.3f} "
-            f"{row['delta_vs_persistent']:>8.3f} "
-            f"{row['edge_delta_r2']:>8.3f} "
-            f"{row['edge_delta_mae']:>9.3f} "
-            f"{row['used_velocity_r2']:>8.3f} "
-            f"{row['internal_velocity_r2']:>8.3f} "
-            f"{row['learned_kappa']:>7.3f} "
-            f"{row['gamma']:>7.3f} "
-            f"{row['dt']:>6.3f} "
-            f"{row['alpha']:>7.3f} "
-            f"{row['force_norm']:>8.3f} "
-            f"{row['diffusion_term_norm']:>8.3f} "
-            f"{row['relative_diffusion']:>8.3f} "
-            f"{row['relative_update']:>8.3f} "
-            f"{row['velocity_fraction']:>7.3f} "
-            f"{row['force_fraction']:>7.3f} "
-            f"{row['pred_delta_corr']:>8.3f} "
-            f"{row['internal_velocity_mse']:>8.3f}"
+            f"{str(row['target_kind']):>6} "
+            f"{_format_table_float(cast(Optional[float], row['auc_val']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['auc_test']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['f1_val']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['f1_test']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['state_val_r2']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['state_test_r2']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['rollout_val_r2']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['rollout_test_r2']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['persistent_r2']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['delta_vs_persistent']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['delta_r2']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['delta_mae']), width=9)} "
+            f"{_format_table_float(cast(Optional[float], row['decoded_v_r2_against_finite_difference']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['learned_kappa']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['gamma']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['dt']), width=6)} "
+            f"{_format_table_float(cast(Optional[float], row['alpha']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['force_norm']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['diffusion_term_norm']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['relative_diffusion']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['relative_update']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['velocity_fraction']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['force_fraction']), width=7)} "
+            f"{_format_table_float(cast(Optional[float], row['pred_delta_corr']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['internal_velocity_mse']), width=8)}"
         )
-        if np.isfinite(row["used_velocity_r2"]) or np.isfinite(row["used_velocity_mse"]):
-            print(
-                "  velocity"
-                f" | vel_used_r2={row['used_velocity_r2']:.4f}"
-                f" vel_internal_r2={row['internal_velocity_r2']:.4f}"
-                f" vel_used_mse={row['used_velocity_mse']:.4f}"
-                f" vel_internal_mse={row['internal_velocity_mse']:.4f}"
-            )
         if readout:
             coeff_line = (
                 "  coeffs"
@@ -767,31 +760,34 @@ def _print_ift_diagnostic_table(
             print(coeff_line)
     if extra_rows:
         for name, row in extra_rows.items():
-            rows[name] = dict(row)
             print(
                 f"{name[:20]:<20} "
-                f"{row.get('val_r2', float('nan')):>8.3f} "
-                f"{row.get('test_r2', float('nan')):>8.3f} "
-                f"{row.get('rollout_val_rollout_edge_r2', float('nan')):>8.3f} "
-                f"{row.get('rollout_test_rollout_edge_r2', float('nan')):>8.3f} "
-                f"{row.get('persistent_edge_r2', float('nan')):>8.3f} "
-                f"{row.get('delta_vs_persistent', float('nan')):>8.3f} "
-                f"{row.get('edge_delta_r2', float('nan')):>8.3f} "
-                f"{row.get('edge_delta_mae', float('nan')):>9.3f} "
-                f"{float('nan'):>8.3f} "
-                f"{float('nan'):>8.3f} "
-                f"{float('nan'):>7.3f} "
-                f"{float('nan'):>7.3f} "
-                f"{float('nan'):>6.3f} "
-                f"{float('nan'):>7.3f} "
-                f"{float('nan'):>8.3f} "
-                f"{float('nan'):>8.3f} "
-                f"{float('nan'):>8.3f} "
-                f"{float('nan'):>8.3f} "
-                f"{float('nan'):>7.3f} "
-                f"{float('nan'):>7.3f} "
-                f"{float('nan'):>8.3f} "
-                f"{float('nan'):>8.3f}"
+                f"{'edge':>6} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(row.get('val_r2'), width=8)} "
+                f"{_format_table_float(row.get('test_r2'), width=8)} "
+                f"{_format_table_float(row.get('rollout_val_rollout_edge_r2'), width=8)} "
+                f"{_format_table_float(row.get('rollout_test_rollout_edge_r2'), width=8)} "
+                f"{_format_table_float(row.get('persistent_edge_r2'), width=8)} "
+                f"{_format_table_float(row.get('delta_vs_persistent'), width=8)} "
+                f"{_format_table_float(row.get('edge_delta_r2'), width=8)} "
+                f"{_format_table_float(row.get('edge_delta_mae'), width=9)} "
+                f"{_format_table_float(None, width=8)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=6)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=8)} "
+                f"{_format_table_float(None, width=8)} "
+                f"{_format_table_float(None, width=8)} "
+                f"{_format_table_float(None, width=8)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=7)} "
+                f"{_format_table_float(None, width=8)} "
+                f"{_format_table_float(None, width=8)}"
             )
             if {"w_y", "w_v", "w_drive", "bias"} <= set(row):
                 print(
@@ -801,234 +797,74 @@ def _print_ift_diagnostic_table(
                     f" w_drive={float(row['w_drive']):.4f}"
                     f" bias={float(row['bias']):.4f}"
                 )
-    return rows
+    if node_delta_metrics_missing:
+        print("  note: node rollout delta metrics are not currently tracked; delta_r2 and delta_mae are shown as -.")
+    if non_regression_metrics_missing:
+        print("  note: regression-style state and rollout metrics are unavailable for this target family; those columns are shown as -.")
 
 
-def _describe_ift_task(task_name: str, rows: dict[str, dict[str, float]]) -> list[str]:
-    notes: list[str] = []
-    if task_name == "ift_diffusion":
-        generic = rows.get("ift1_generic")
-        structured = [
-            rows[name]["rollout_test_rollout_edge_r2"]
-            for name in ("ift1_linear", "ift1_direct", "ift1_gated_direct")
-            if name in rows
-        ]
-        structured = [value for value in structured if np.isfinite(value)]
-        if generic is not None and structured and max(structured) > generic["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("Structured forcing improves over generic IFT.")
-        linear = rows.get("ift1_linear")
-        if generic is not None and linear is not None:
-            if linear["rollout_test_rollout_edge_r2"] > generic["rollout_test_rollout_edge_r2"] + 0.03:
-                notes.append("IFT needs a better forcing/injection pathway.")
-        return notes
-    if task_name == "ift_wave":
-        first_generic = rows.get("ift1_generic")
-        first_linear = rows.get("ift1_linear")
-        second_auto = rows.get("ift2_auto")
-        hist_scores = [
-            rows[name]["rollout_test_rollout_edge_r2"]
-            for name in ("ift2_hist_vel_k1", "ift2_hist_vel_k2", "ift2_hist_vel_k3")
-            if name in rows
-        ]
-        second_tf = rows.get("ift2_ar_tf")
-        if first_generic and first_linear:
-            if first_linear["rollout_test_rollout_edge_r2"] > first_generic["rollout_test_rollout_edge_r2"] + 0.03:
-                notes.append("Structured forcing improves over generic IFT on graph-coupled waves.")
-        if first_generic and second_auto:
-            if second_auto["rollout_test_rollout_edge_r2"] > first_generic["rollout_test_rollout_edge_r2"] + 0.03:
-                notes.append("IFT2-AUTO improves over IFT1, so graph-coupled waves give latent velocity a more natural learning signal.")
-        if second_auto and hist_scores and max(hist_scores) > second_auto["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("HIST-VEL improves over AUTO on graph-coupled waves, so velocity is easier to infer from recent history than to maintain as a free latent state.")
-        if second_tf and second_auto:
-            if second_tf["rollout_test_rollout_edge_r2"] > second_auto["rollout_test_rollout_edge_r2"] + 0.03:
-                notes.append("IFT2-TF helps while IFT2-AUTO lags, so the latent velocity issue also appears in graph-coupled waves.")
-        return notes
-
-    first_generic = rows.get("ift1_generic")
-    first_direct = rows.get("ift1_direct")
-    second_generic = rows.get("ift2_generic")
-    second_linear = rows.get("ift2_linear")
-    second_gated_linear = rows.get("ift2_gated_linear")
-    second_direct = rows.get("ift2_direct")
-    second_gated = rows.get("ift2_gated_direct")
-    hist_scores = [
-        rows[name]["rollout_test_rollout_edge_r2"]
-        for name in ("ift2_hist_vel_k1", "ift2_hist_vel_k2", "ift2_hist_vel_k3")
-        if name in rows
+def _print_ift_diagnostic_footer(
+    args: argparse.Namespace,
+    *,
+    ds,
+    spec,
+    runs: Sequence[SweepRun],
+    results: Sequence[RunResult],
+) -> None:
+    if spec.extra is None or "synthetic_task" not in spec.extra:
+        return
+    if not _ift_variant_selector_requested(args):
+        return
+    run_lookup = {(run.name, run.seed): run for run in runs}
+    ift_results = [
+        result
+        for result in results
+        if (result.name, result.seed) in run_lookup
+        and run_lookup[(result.name, result.seed)].model_cfg.aggregator == "ift"
     ]
-    ar1 = rows.get("ar1_baseline")
-    ar2 = rows.get("ar2_baseline")
-    if first_generic and second_generic:
-        if second_generic["rollout_test_rollout_edge_r2"] > first_generic["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("The task mismatch is first-order diffusion vs second-order oscillator.")
-    if first_direct and second_direct:
-        if second_direct["rollout_test_rollout_edge_r2"] > first_direct["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("Second-order IFT helps once the forcing signal is exposed.")
-    if second_linear and first_generic:
-        if second_linear["rollout_test_rollout_edge_r2"] > first_generic["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("Linear-event forcing exposes the oscillator drive more directly than the generic message pathway.")
-    direct_scores = [
-        rows[name]["rollout_test_rollout_edge_r2"]
-        for name in ("ift1_direct", "ift2_direct", "ift2_gated_direct", "ift2_linear", "ift2_gated_linear")
-        if name in rows
-    ]
-    if first_generic and direct_scores and max(direct_scores) > first_generic["rollout_test_rollout_edge_r2"] + 0.03:
-        notes.append("IFT needs a better forcing/injection pathway.")
-    if second_gated and second_direct:
-        if second_gated["rollout_test_rollout_edge_r2"] > second_direct["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("Gated direct forcing is better aligned with the oscillator drive signal.")
-    if second_gated_linear and second_linear:
-        if second_gated_linear["rollout_test_rollout_edge_r2"] > second_linear["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("Gated linear forcing is better aligned with the oscillator drive signal.")
-    if ar1 and ar2:
-        if ar2["rollout_test_rollout_edge_r2"] > ar1["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("AR(2) beats AR(1), so the oscillator task genuinely needs second-order memory.")
-    if ar2 and second_direct:
-        if ar2["rollout_test_rollout_edge_r2"] > second_direct["rollout_test_rollout_edge_r2"] + 0.03:
-            notes.append("AR(2) beats second-order IFT, so the current IFT2 implementation/readout is still the bottleneck.")
-    if second_direct and hist_scores and max(hist_scores) > second_direct["rollout_test_rollout_edge_r2"] + 0.03:
-        notes.append("HIST-VEL beats latent AUTO, so velocity is easier to infer from recent history than to maintain as an unconstrained latent state.")
-    return notes
+    if not ift_results:
+        return
+    task_name = str(spec.extra["synthetic_task"])
+    extra_rows = _diagnostic_baseline_rows(
+        ds,
+        spec,
+        task_name=task_name,
+        horizon=int(args.rollout_horizon),
+    )
+    _print_ift_diagnostic_table(task_name, ift_results, extra_rows=extra_rows or None)
 
 
-def _infer_drive_feature_idx(task_name: str, feature_schema: list[str]) -> Optional[int]:
-    if "drive" in feature_schema:
-        return feature_schema.index("drive")
-    if task_name in {"ift_diffusion", "ift_wave"} and "signal" in feature_schema:
-        return feature_schema.index("signal")
-    return None
+def _ift_variant_selector_requested(args: argparse.Namespace) -> bool:
+    return any(
+        getattr(args, name, None) is not None
+        for name in ("ift_variants", "ift_orders", "ift_history_steps")
+    )
 
 
-def run_ift_diagnostics(args: argparse.Namespace, device: torch.device) -> None:
-    task_rows: dict[str, dict[str, dict[str, float]]] = {}
-    epochs = 3 if args.epochs is None else int(args.epochs)
-    diag_tasks = [str(task) for task in args.ift_diagnostic_tasks]
-
-    for task_name in diag_tasks:
-        task_args = argparse.Namespace(**vars(args))
-        task_args.synthetic_task = task_name
-        synthetic_cfg = build_synthetic_dataset_config(task_args, device, preset="quick")
-        ds = load_dataset("synthetic", asdict(synthetic_cfg))
-        spec = ds.spec()
-        objective_metric = parse_task_metric_spec(
-            spec.extra.get("primary_metric") if spec.extra is not None else None
-        )
-        feature_schema = list(spec.extra.get("task_axes", {}).get("feature_schema", [])) if spec.extra is not None else []
-        drive_feature_idx = _infer_drive_feature_idx(task_name, feature_schema)
-        val_targets = _stack_split_edge_targets(ds.edge_targets("val") or [])
-        test_targets = _stack_split_edge_targets(ds.edge_targets("test") or [])
-
-        base_train_cfg = TrainConfig(
-            num_nodes=spec.num_nodes,
-            num_neg=10,
-            lr=1e-3,
-            weight_decay=1e-3,
-            device=device,
-            log_every=0,
-            tbptt_steps=1,
-            node_loss_weight=float(args.node_loss_weight),
-            node_target_type="regression",
-            edge_target_type="regression",
-            node_target_mode=str(args.node_target_mode),
-            edge_target_mode=str(args.edge_target_mode),
-            edge_target_scale=str(args.edge_target_scale),
-            prediction_mode=_resolve_prediction_mode(
-                str(args.prediction_mode),
-                default_state_plus_delta=True,
-            ),
-            rollout_horizon=int(args.rollout_horizon),
-        )
-        setattr(base_train_cfg, "ift_generator_params", spec.extra.get("generator_params", {}) if spec.extra is not None else {})
-        setattr(base_train_cfg, "ift_batch_sanity_print", task_name == "conservative_oscillator")
-        setattr(base_train_cfg, "ift_batch_sanity_done", False)
-        base_model_cfg = _base_diagnostic_model_config(spec.event_dim)
-        near_ar1_delta_coeffs: Optional[tuple[float, float, float, float]] = None
-        if task_name == "conservative_oscillator":
-            train_targets = _stack_split_edge_targets(ds.edge_targets("train") or [])
-            train_drives = _stack_split_drives(ds.bins("train"), num_nodes=spec.num_nodes, drive_feature_idx=0)
-            ar1_coeffs = _fit_ar_coefficients(train_targets, train_drives, order=1)
-            if ar1_coeffs is not None:
-                near_ar1_delta_coeffs = (
-                    float(ar1_coeffs[0].item() - 1.0),
-                    0.0,
-                    float(ar1_coeffs[1].item()),
-                    0.0,
-                )
-        runs = build_ift_diagnostic_runs(
-            base_model_cfg,
-            task_name=task_name,
-            drive_feature_idx=drive_feature_idx,
-            near_ar1_delta_coeffs=near_ar1_delta_coeffs,
-            seed=int(args.seed),
-        )
-        if args.max_runs is not None:
-            runs = runs[: args.max_runs]
-
-        print(
-            f"\n=== Running IFT diagnostics for {task_name} "
-            f"(num_nodes={spec.num_nodes}, num_bins={synthetic_cfg.num_bins}, epochs={epochs}) ==="
-        )
-        print(f"feature_schema={feature_schema or ['none']}")
-        print(f"ift_drive_feature_idx={drive_feature_idx}")
-        print(f"prediction_mode={base_train_cfg.prediction_mode}")
-        if task_name == "ift_wave":
-            _print_wave_task_metadata(spec)
-        results: list[RunResult] = []
-        for run in runs:
-            line = f"run {run.name} | seed={run.seed}"
-            if run.model_cfg.aggregator == "ift":
-                line += (
-                    f" | forcing={run.model_cfg.ift_forcing_mode}"
-                    f" | order={run.model_cfg.ift_update_order}"
-                    f" | drive_idx={run.model_cfg.ift_drive_feature_idx}"
-                    f" | v_init={getattr(run.model_cfg, 'ift_velocity_init_mode', 'finite_difference')}"
-                    f" | readout={getattr(run.model_cfg, 'ift2_readout_mode', 'default')}"
-                )
-            print(line)
-            results.append(
-                run_one_experiment(
-                    ds=ds,
-                    spec=spec,
-                    base_train_cfg=base_train_cfg,
-                    run=run,
-                    build_model_fn=build_tgn_model,  # type: ignore[arg-type]
-                    epochs=epochs,
-                    objective_metric=objective_metric,
-                    eval_slices=None,
-                    save_jsonl_path=args.save_jsonl,
-                    rollout_horizon=int(args.rollout_horizon),
-                )
-            )
-
-        extra_rows = _diagnostic_baseline_rows(
-            ds,
-            spec,
-            task_name=task_name,
-            horizon=int(args.rollout_horizon),
-        )
-        rows = _print_ift_diagnostic_table(task_name, results, extra_rows=extra_rows)
-        _print_rollout_summary(
-            task_name,
-            horizon=int(args.rollout_horizon),
-            rows=rows,
-            val_targets=val_targets,
-            test_targets=test_targets,
-        )
-        task_rows[task_name] = rows
-        notes = _describe_ift_task(task_name, rows)
-        if notes:
-            print("Diagnosis:")
-            for note in notes:
-                print(f"  {note}")
+def _normalize_ift_variant_args(args: argparse.Namespace) -> None:
+    if not _ift_variant_selector_requested(args):
+        return
+    raw_variants = cast(Optional[Sequence[str]], getattr(args, "ift_variants", None))
+    raw_orders = cast(Optional[Sequence[int]], getattr(args, "ift_orders", None))
+    raw_history = cast(Optional[Sequence[int]], getattr(args, "ift_history_steps", None))
+    if args.command not in {"smoke", "quick"}:
+        raise ValueError("IFT variant selection is only supported with the smoke or quick presets.")
+    if raw_history is not None and raw_variants not in (None, []) and "auto" not in raw_variants:
+        raise ValueError("--ift-history-steps requires selecting the auto IFT variant.")
+    if raw_orders not in (None, []) and 2 not in raw_orders:
+        if (raw_variants not in (None, []) and "auto" in raw_variants) or raw_history is not None:
+            raise ValueError("IFT auto/history variants require including second-order IFT via --ift-orders 2.")
+    if args.dataset is None:
+        args.dataset = "synthetic"
+        return
+    if args.dataset != "synthetic":
+        raise ValueError("IFT variant selection requires the synthetic dataset.")
 
 
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if args.command == "ift-diagnose":
-        run_ift_diagnostics(args, device)
-        return
+    _normalize_ift_variant_args(args)
 
     preset = "full" if args.command == "sweep" else args.command
     suite = build_suite(preset, device, dataset_override=args.dataset, args=args)
@@ -1173,43 +1009,57 @@ def main() -> None:
         f"{objective_metric.path if objective_metric is not None else 'best val loss'}) ==="
     )
     if objective_metric is not None:
-        header_metrics: list[str] = []
-        seen_metrics: set[str] = set()
-        for path in [objective_metric.path, *summary_metric_paths]:
-            if path in seen_metrics:
-                continue
-            seen_metrics.add(path)
-            header_metrics.append(path)
-        header = f"{'method':<24} {'seed':>4} {'objective':>12}"
-        for path in header_metrics[1:]:
-            header += f" {path:>24}"
-        header += f" {'node':>32}"
-        print(header)
-        print("-" * len(header))
-        for result in results[:20]:
-            snapshot = result.best_snapshot
-            objective_value = (
-                snapshot_metric_value(snapshot, objective_metric.path)
-                if result.best_snapshot
-                else float("nan")
+        regression_kind = _compact_regression_summary_kind(results)
+        if regression_kind is not None:
+            header = (
+                f"{'method':<24} {'seed':>4} {'kind':>6} {'objective':>12} "
+                f"{'val_mse':>10} {'val_r2':>8} {'pers_r2':>8} "
+                f"{'test_mse':>10} {'test_r2':>8} {'test_roll_r2':>12}"
             )
-            val_metrics = snapshot.get("val", {})
-            test_metrics = snapshot.get("test", {})
-            node_val_summary = format_node_metric(val_metrics)
-            node_test_summary = format_node_metric(test_metrics)
-            node_summary = "-"
-            if node_val_summary or node_test_summary:
-                node_summary = f"va {node_val_summary or '-'} | te {node_test_summary or '-'}"
-
-            row = (
-                f"{short_run_label_from_name(result.name)[:24]:<24} "
-                f"{result.seed:>4d} "
-                f"{objective_value:>12.4g}"
-            )
+            print(header)
+            print("-" * len(header))
+            for result in results[:20]:
+                snapshot = result.best_snapshot if result.best_snapshot else result.final_snapshot
+                objective_value = _snapshot_metric_or_none(snapshot, objective_metric.path)
+                row = (
+                    f"{short_run_label_from_name(result.name)[:24]:<24} "
+                    f"{result.seed:>4d} "
+                    f"{regression_kind:>6} "
+                    f"{_format_summary_float(objective_value, width=12)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'val.{regression_kind}_mse'), width=10)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'val.{regression_kind}_r2'), width=8)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'val.persistent_{regression_kind}_r2'), width=8)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'test.{regression_kind}_mse'), width=10)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'test.{regression_kind}_r2'), width=8)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'rollout_test.rollout_{regression_kind}_r2'), width=12)}"
+                )
+                print(row)
+        else:
+            header_metrics: list[str] = []
+            seen_metrics: set[str] = set()
+            for path in [objective_metric.path, *summary_metric_paths]:
+                if path in seen_metrics:
+                    continue
+                seen_metrics.add(path)
+                header_metrics.append(path)
+            header = f"{'method':<24} {'seed':>4} {'kind':>6} {'objective':>12}"
             for path in header_metrics[1:]:
-                row += f" {snapshot_metric_value(snapshot, path):>24.4g}"
-            row += f" {node_summary:>32}"
-            print(row)
+                header += f" {path:>24}"
+            print(header)
+            print("-" * len(header))
+            for result in results[:20]:
+                snapshot = result.best_snapshot if result.best_snapshot else result.final_snapshot
+                objective_value = _snapshot_metric_or_none(snapshot, objective_metric.path)
+                row = (
+                    f"{short_run_label_from_name(result.name)[:24]:<24} "
+                    f"{result.seed:>4d} "
+                    f"{_infer_snapshot_kind(snapshot):>6} "
+                    f"{_format_summary_float(objective_value, width=12)}"
+                )
+                for path in header_metrics[1:]:
+                    row += f" {_format_summary_float(_snapshot_metric_or_none(snapshot, path), width=24)}"
+                print(row)
+        _print_ift_diagnostic_footer(args, ds=ds, spec=spec, runs=runs, results=results)
         return
 
     summary_primary = (
@@ -1221,53 +1071,49 @@ def main() -> None:
         if results
         else "mrr"
     )
-    if summary_primary == "edge_mse":
+    if summary_primary in {"edge_mse", "node_mse"}:
+        stem = "edge" if summary_primary == "edge_mse" else "node"
         header = (
-            f"{'method':<24} {'seed':>4} {'val_loss':>9} {'val_mse':>10} "
-            f"{'val_r2':>8} {'pers_r2':>8} {'roll_r2':>8} {'val_nrmse':>10} {'test_mse':>10} {'node':>56}"
+            f"{'method':<24} {'seed':>4} {'kind':>6} {'val_loss':>9} "
+            f"{'val_mse':>10} {'val_r2':>8} {'pers_r2':>8} "
+            f"{'test_mse':>10} {'test_r2':>8} {'test_roll_r2':>12}"
         )
     else:
         val_label = f"val_{summary_primary}"
         test_label = f"test_{summary_primary}"
         header = (
-            f"{'method':<24} {'seed':>4} {'val_loss':>9} {val_label:>12} "
-            f"{test_label:>12} {'node':>18}"
+            f"{'method':<24} {'seed':>4} {'kind':>6} {'val_loss':>9} "
+            f"{val_label:>12} {test_label:>12}"
         )
     print(header)
     print("-" * len(header))
     for result in results[:20]:
         val_metrics = result.best_snapshot["val"]
         test_metrics = result.best_snapshot["test"]
-        node_name = node_metric_name(val_metrics)
-        if node_name is None:
-            node_summary = "-"
-        else:
-            node_val_summary = format_node_metric(val_metrics)
-            node_test_summary = format_node_metric(test_metrics)
-            node_summary = f"va {node_val_summary} | te {node_test_summary}"
-
-        if summary_primary == "edge_mse":
+        if summary_primary in {"edge_mse", "node_mse"}:
+            stem = "edge" if summary_primary == "edge_mse" else "node"
             print(
                 f"{short_run_label_from_name(result.name)[:24]:<24} "
                 f"{result.seed:>4d} "
+                f"{stem:>6} "
                 f"{result.best_val_loss:>9.4f} "
-                f"{val_metrics.get('edge_mse', float('nan')):>10.4g} "
-                f"{val_metrics.get('edge_r2', float('nan')):>8.3f} "
-                f"{val_metrics.get('persistent_edge_r2', float('nan')):>8.3f} "
-                f"{result.best_snapshot.get('rollout_val', {}).get('rollout_edge_r2', float('nan')):>8.3f} "
-                f"{val_metrics.get('edge_nrmse', float('nan')):>10.3f} "
-                f"{test_metrics.get('edge_mse', float('nan')):>10.4g} "
-                f"{node_summary:>56}"
+                f"{_format_summary_float(val_metrics.get(f'{stem}_mse'), width=10)} "
+                f"{_format_summary_float(val_metrics.get(f'{stem}_r2'), width=8)} "
+                f"{_format_summary_float(val_metrics.get(f'persistent_{stem}_r2'), width=8)} "
+                f"{_format_summary_float(test_metrics.get(f'{stem}_mse'), width=10)} "
+                f"{_format_summary_float(test_metrics.get(f'{stem}_r2'), width=8)} "
+                f"{_format_summary_float(result.best_snapshot.get('rollout_test', {}).get(f'rollout_{stem}_r2'), width=12)}"
             )
         else:
             print(
                 f"{short_run_label_from_name(result.name)[:24]:<24} "
                 f"{result.seed:>4d} "
+                f"{_infer_snapshot_kind(result.best_snapshot):>6} "
                 f"{result.best_val_loss:>9.4f} "
                 f"{val_metrics.get(summary_primary, float('nan')):>12.4g} "
-                f"{test_metrics.get(summary_primary, float('nan')):>12.4g} "
-                f"{node_summary:>18}"
+                f"{test_metrics.get(summary_primary, float('nan')):>12.4g}"
             )
+    _print_ift_diagnostic_footer(args, ds=ds, spec=spec, runs=runs, results=results)
 
 
 if __name__ == "__main__":

@@ -73,6 +73,8 @@ def _linear_hvf_readout_snapshot(model) -> dict[str, float]:
 
 
 def short_run_label(run: SweepRun) -> str:
+    if "agg=" not in run.name or "update=" not in run.name:
+        return run.name
     agg = run.model_cfg.aggregator
     if agg == "settransformer":
         agg = "settf"
@@ -82,6 +84,8 @@ def short_run_label(run: SweepRun) -> str:
 
 def short_run_label_from_name(name: str) -> str:
     parts = dict(piece.split("=", 1) for piece in name.split("|") if "=" in piece)
+    if "agg" not in parts or "update" not in parts:
+        return name
     agg = parts.get("agg", "?")
     if agg == "settransformer":
         agg = "settf"
