@@ -61,6 +61,9 @@ class TrainConfig:
     update_before_score: bool = True
     debug: bool = False
     rollout_horizon: int = 5
+    # Number of differentiable, autoregressive prediction steps per optimizer
+    # update. One preserves the original one-step teacher-forced trainer.
+    rollout_train_steps: int = 1
 
 
 @dataclass(frozen=True)

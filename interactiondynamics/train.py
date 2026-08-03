@@ -104,6 +104,22 @@ def _build_common_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional subset of history readout steps to sweep for the IFT auto variant. Defaults to 1, 2, and 3.",
     )
+    data_group.add_argument(
+        "--ift-self-rollout",
+        action="store_true",
+        help=(
+            "Add a deterministic closed-loop self-field rollout for ring- and grid-wave tasks. "
+            "It preserves lattice edges, regenerates edge signals from predictions, and removes future external drives."
+        ),
+    )
+    data_group.add_argument(
+        "--ift-free-rollout",
+        action="store_true",
+        help=(
+            "Add a drive-free IFT2 rollout for ring- and grid-wave tasks. It retains observed "
+            "neighbor signals but zeros future external-drive events."
+        ),
+    )
 
     train_group = common.add_argument_group("training")
     train_group.add_argument(
@@ -123,6 +139,15 @@ def _build_common_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Evaluate k-step target rollout with this horizon for regression datasets.",
+    )
+    train_group.add_argument(
+        "--rollout-train-steps",
+        type=int,
+        default=1,
+        help=(
+            "Number of differentiable autoregressive steps per optimizer update for compatible "
+            "IFT2 history-readout runs. One keeps ordinary one-step training."
+        ),
     )
     train_group.add_argument(
         "--use-node-scorer",
@@ -837,7 +862,7 @@ def _print_ift_diagnostic_footer(
 def _ift_variant_selector_requested(args: argparse.Namespace) -> bool:
     return any(
         getattr(args, name, None) is not None
-        for name in ("ift_variants", "ift_orders", "ift_history_steps")
+        for name in ("ift_variants", "ift_orders", "ift_history_steps", "ift_self_rollout", "ift_free_rollout")
     )
 
 
@@ -847,13 +872,18 @@ def _normalize_ift_variant_args(args: argparse.Namespace) -> None:
     raw_variants = cast(Optional[Sequence[str]], getattr(args, "ift_variants", None))
     raw_orders = cast(Optional[Sequence[int]], getattr(args, "ift_orders", None))
     raw_history = cast(Optional[Sequence[int]], getattr(args, "ift_history_steps", None))
+    self_rollout = bool(getattr(args, "ift_self_rollout", False))
+    free_rollout = bool(getattr(args, "ift_free_rollout", False))
     if args.command not in {"smoke", "quick"}:
         raise ValueError("IFT variant selection is only supported with the smoke or quick presets.")
     if raw_history is not None and raw_variants not in (None, []) and "auto" not in raw_variants:
         raise ValueError("--ift-history-steps requires selecting the auto IFT variant.")
     if raw_orders not in (None, []) and 2 not in raw_orders:
-        if (raw_variants not in (None, []) and "auto" in raw_variants) or raw_history is not None:
-            raise ValueError("IFT auto/history variants require including second-order IFT via --ift-orders 2.")
+        if (raw_variants not in (None, []) and "auto" in raw_variants) or raw_history is not None or self_rollout or free_rollout:
+            raise ValueError("IFT auto/history/free/self rollout variants require including second-order IFT via --ift-orders 2.")
+    wave_tasks = {"wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}
+    if (self_rollout or free_rollout) and args.synthetic_task not in wave_tasks:
+        raise ValueError("--ift-free-rollout and --ift-self-rollout are implemented only for the ring- and grid-wave tasks.")
     if args.dataset is None:
         args.dataset = "synthetic"
         return
@@ -890,6 +920,9 @@ def main() -> None:
     base_train_cfg.edge_target_scale = str(args.edge_target_scale)
     base_train_cfg.prediction_mode = _resolve_prediction_mode(str(args.prediction_mode))
     base_train_cfg.rollout_horizon = int(args.rollout_horizon)
+    if args.rollout_train_steps < 1:
+        raise ValueError("--rollout-train-steps must be at least 1.")
+    base_train_cfg.rollout_train_steps = int(args.rollout_train_steps)
     if base_train_cfg.node_target_type == "classification" and base_train_cfg.node_target_mode != "raw":
         raise ValueError("Node classification tasks require --node-target-mode raw.")
     if base_train_cfg.edge_target_type == "classification" and base_train_cfg.edge_target_mode != "raw":
@@ -966,6 +999,7 @@ def main() -> None:
                 f" | forcing={getattr(run.model_cfg, 'ift_forcing_mode', 'generic_mlp')}"
                 f" | drive_idx={getattr(run.model_cfg, 'ift_drive_feature_idx', None)}"
                 f" | order={getattr(run.model_cfg, 'ift_update_order', 'first')}"
+                f" | rollout_train_steps={base_train_cfg.rollout_train_steps}"
             )
         results.append(
             run_one_experiment(

@@ -72,6 +72,60 @@ class SyntheticTaskSpec:
 IFT_PAIR = ("ift", "ift_update")
 
 
+def _grid_wave_task(
+    name: str,
+    *,
+    description: str,
+    focus: str,
+    graph_type: str,
+    topology: str,
+) -> SyntheticTaskSpec:
+    """Build metadata for a second-order wave benchmark on a square lattice."""
+    return SyntheticTaskSpec(
+        name=name,
+        description=description,
+        focus=focus,
+        event_dim=2,
+        recommended_pairs=(
+            IFT_PAIR,
+            ("sum", "hnn"),
+            ("sum", "lnn"),
+            ("sum", "tgn_gru"),
+        ),
+        metric_family="edge_regression",
+        generator_family="grid_wave",
+        graph_type=graph_type,
+        dynamics_type="wave",
+        event_structure="topology_neighbor_and_sparse_drive_events",
+        temporal_mode="rollout",
+        feature_schema=("signal", "is_drive"),
+        generator_params={
+            "a": 1.88,
+            "b": -0.93,
+            "lap": 0.075,
+            "drive": 0.17,
+            "topology": topology,
+        },
+        supported_metrics=(
+            "edge_mse",
+            "edge_r2",
+            "persistent_edge_r2",
+            "rollout_edge_r2",
+            "rollout_edge_nrmse",
+            "rollout_persistent_edge_r2",
+        ),
+        primary_metric_path="rollout_val.rollout_edge_r2",
+        primary_metric_goal="max",
+        summary_metric_paths=(
+            "val.edge_r2",
+            "rollout_val.rollout_edge_r2",
+            "rollout_val.rollout_persistent_edge_r2",
+            "rollout_test.rollout_edge_r2",
+            "rollout_test.rollout_persistent_edge_r2",
+        ),
+    )
+
+
 SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
     "deepsets_sum": SyntheticTaskSpec(
         name="deepsets_sum",
@@ -629,6 +683,34 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
             "rollout_test.rollout_persistent_edge_r2",
         ),
     ),
+    "wave_grid": _grid_wave_task(
+        "wave_grid",
+        description="Predict a driven second-order wave on a rectangular grid with reflecting outer boundaries.",
+        focus="Second-order propagation over a bounded two-dimensional lattice.",
+        graph_type="grid",
+        topology="bounded_grid",
+    ),
+    "wave_torus": _grid_wave_task(
+        "wave_torus",
+        description="Predict a driven second-order wave on a periodic two-dimensional torus grid.",
+        focus="Topology-aware propagation across periodic seams.",
+        graph_type="torus_grid",
+        topology="periodic_grid",
+    ),
+    "wave_doorway": _grid_wave_task(
+        "wave_doorway",
+        description="Predict a driven wave on a grid divided by a wall with a narrow doorway.",
+        focus="Propagation constrained by a topology-changing barrier and aperture.",
+        graph_type="grid_doorway",
+        topology="doorway_barrier",
+    ),
+    "wave_swiss_cheese": _grid_wave_task(
+        "wave_swiss_cheese",
+        description="Predict a driven wave on a grid containing multiple circular node holes.",
+        focus="Propagation around disconnected obstacles in a perforated lattice.",
+        graph_type="grid_swiss_cheese",
+        topology="swiss_cheese",
+    ),
     "edge_ranking_sum_shift": SyntheticTaskSpec(
         name="edge_ranking_sum_shift",
         description="Predict the next-step destination shift induced by the signed sum of per-node event values.",
@@ -934,6 +1016,9 @@ class SyntheticDataset(EventStreamDataset):
         if self.cfg.task == "wave":
             bins, edge_targets = self._materialize_wave()
             return bins, None, edge_targets
+        if self.cfg.task in {"wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
+            bins, edge_targets = self._materialize_grid_wave(self.cfg.task)
+            return bins, None, edge_targets
         if self.cfg.task in {"edge_ranking_sum_shift", "next_dst_ranking"}:
             return self._materialize_shifted_ranking_stream(self._build_edge_ranking_sum_shift_step), None, None
         if self.cfg.task in {"edge_ranking_keyed_shift", "edge_retrieval"}:
@@ -1220,6 +1305,120 @@ class SyntheticDataset(EventStreamDataset):
                 + 0.25 * drive
             )
             x_curr = np.clip(x_next, -3.0, 3.0).astype(np.float32)
+
+        return bins, edge_targets
+
+    def _grid_wave_topology(self, task_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return active nodes, directed edges, and degrees for a square wave lattice."""
+        num_nodes = int(self.cfg.num_nodes)
+        height = math.isqrt(num_nodes)
+        while height > 1 and num_nodes % height != 0:
+            height -= 1
+        width = num_nodes // height
+        if height < 4 or width < 4:
+            raise ValueError(
+                f"{task_name} requires num_nodes to factor into a lattice of at least 4x4; "
+                f"got {self.cfg.num_nodes}."
+            )
+        active = np.ones((height, width), dtype=bool)
+        if task_name == "wave_swiss_cheese":
+            radius = max(1.15, 0.115 * min(height, width))
+            rows, cols = np.ogrid[:height, :width]
+            for row_fraction, col_fraction in ((0.28, 0.30), (0.72, 0.32), (0.50, 0.72)):
+                center_row = row_fraction * (height - 1)
+                center_col = col_fraction * (width - 1)
+                active[(rows - center_row) ** 2 + (cols - center_col) ** 2 <= radius**2] = False
+
+        periodic = task_name == "wave_torus"
+        doorway = task_name == "wave_doorway"
+        wall_col = width // 2
+        doorway_rows = set(range(max(0, height // 2 - 1), min(height, height // 2 + 2)))
+        undirected_edges: list[tuple[int, int]] = []
+        for row in range(height):
+            for col in range(width):
+                if not active[row, col]:
+                    continue
+                for row_step, col_step in ((0, 1), (1, 0)):
+                    next_row = row + row_step
+                    next_col = col + col_step
+                    if periodic:
+                        next_row %= height
+                        next_col %= width
+                    elif next_row >= height or next_col >= width:
+                        continue
+                    if not active[next_row, next_col]:
+                        continue
+                    crosses_doorway_wall = (
+                        doorway
+                        and row_step == 0
+                        and col == wall_col - 1
+                        and next_col == wall_col
+                        and row not in doorway_rows
+                    )
+                    if not crosses_doorway_wall:
+                        undirected_edges.append((row * width + col, next_row * width + next_col))
+
+        if not undirected_edges:
+            raise ValueError(f"{task_name} produced no active lattice edges.")
+        edge_pairs = np.asarray(undirected_edges, dtype=np.int64)
+        edge_src = np.concatenate([edge_pairs[:, 0], edge_pairs[:, 1]])
+        edge_dst = np.concatenate([edge_pairs[:, 1], edge_pairs[:, 0]])
+        degree = np.bincount(edge_src, minlength=num_nodes).astype(np.float32)
+        return active.reshape(-1), edge_src, edge_dst, degree
+
+    def _materialize_grid_wave(self, task_name: str) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+        """Materialize a sparse-driven second-order wave over a grid topology."""
+        active, edge_src, edge_dst, degree = self._grid_wave_topology(task_name)
+        num_nodes = int(self.cfg.num_nodes)
+        active_nodes = np.flatnonzero(active).astype(np.int64)
+        target_locations = ((0.16, 0.16), (0.78, 0.22), (0.24, 0.78))
+        source_nodes: list[int] = []
+        height = math.isqrt(num_nodes)
+        while height > 1 and num_nodes % height != 0:
+            height -= 1
+        width = num_nodes // height
+        node_rows, node_cols = np.divmod(active_nodes, width)
+        for row_fraction, col_fraction in target_locations:
+            distance_sq = (
+                (node_rows - row_fraction * (height - 1)) ** 2
+                + (node_cols - col_fraction * (width - 1)) ** 2
+            )
+            for candidate in active_nodes[np.argsort(distance_sq)]:
+                if int(candidate) not in source_nodes:
+                    source_nodes.append(int(candidate))
+                    break
+        sources = np.asarray(source_nodes, dtype=np.int64)
+        phases = self._rng.uniform(0.0, 2.0 * np.pi, size=sources.size)
+        frequencies = self._rng.uniform(0.045, 0.105, size=sources.size)
+        amplitudes = self._rng.uniform(0.75, 1.10, size=sources.size)
+        x_prev = np.zeros((num_nodes,), dtype=np.float32)
+        x_curr = np.zeros((num_nodes,), dtype=np.float32)
+        x_curr[active] = self._rng.normal(loc=0.0, scale=0.04, size=int(active.sum()))
+
+        bins: list[EventBatch] = []
+        edge_targets: list[EdgeTargetBatch] = []
+        for t in range(int(self.cfg.num_bins)):
+            drive = np.zeros((num_nodes,), dtype=np.float32)
+            drive[sources] = (
+                amplitudes * np.sin(frequencies * t + phases)
+                + 0.22 * np.cos(0.40 * frequencies * t + 0.9 * phases)
+            ).astype(np.float32)
+            src = np.concatenate([edge_src, active_nodes])
+            dst = np.concatenate([edge_dst, active_nodes])
+            signal = np.concatenate([x_curr[edge_src], drive[active_nodes]]).astype(np.float32)
+            is_drive = np.concatenate([
+                np.zeros(edge_src.size, dtype=np.float32),
+                np.ones(active_nodes.size, dtype=np.float32),
+            ])
+            bins.append(self._make_event_batch(src, dst, np.stack([signal, is_drive], axis=1), t))
+            edge_targets.append(self._make_edge_target_batch(x_curr, t))
+
+            neighbor_sum = np.zeros((num_nodes,), dtype=np.float32)
+            np.add.at(neighbor_sum, edge_src, x_curr[edge_dst])
+            laplacian = neighbor_sum - degree * x_curr
+            x_next = 1.88 * x_curr - 0.93 * x_prev + 0.075 * laplacian + 0.17 * drive
+            x_next[~active] = 0.0
+            x_prev, x_curr = x_curr, np.clip(x_next, -4.0, 4.0).astype(np.float32)
 
         return bins, edge_targets
 

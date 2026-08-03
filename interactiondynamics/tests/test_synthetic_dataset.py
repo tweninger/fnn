@@ -13,6 +13,8 @@ from interactiondynamics.data.synthetic import (
     synthetic_task_axes,
     synthetic_task_tags,
 )
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.eval.evaluate import _remove_wave_drive_events, _self_generate_grid_wave_events
 
 
 @pytest.mark.parametrize("task_name", list(SYNTHETIC_TASKS.keys()))
@@ -77,7 +79,10 @@ def test_synthetic_dataset_materializes_expected_supervision(task_name: str):
         expected_events = 3 * cfg.num_nodes
     if task_name == "associative_retrieval":
         expected_events = cfg.num_nodes * (max(3, cfg.events_per_bin // cfg.num_nodes) + 1)
-    assert first_batch.num_events == expected_events
+    if task_name in {"wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
+        assert first_batch.num_events > 0
+    else:
+        assert first_batch.num_events == expected_events
 
     if spec.event_dim == 0:
         assert first_batch.features is None
@@ -170,3 +175,49 @@ def test_synthetic_task_query_helpers_group_related_benchmarks():
     assert "wave" in grouped["ring"]
     assert "temporal_memory" in grouped["self_loop"]
     assert "deepsets_sum" in grouped["random_pair"]
+
+
+def test_grid_wave_topologies_materialize_distinct_structured_event_sets():
+    event_counts: dict[str, int] = {}
+    for task_name in ("wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"):
+        dataset = SyntheticDataset(SyntheticDatasetConfig(task=task_name, num_nodes=64, num_bins=16, seed=3))
+        first_batch = next(iter(dataset.bins("train")))
+        targets = next(iter(dataset.edge_targets("train") or []))
+        assert first_batch.features is not None
+        assert first_batch.features.shape[1] == 2
+        assert torch.isfinite(targets.targets).all()
+        event_counts[task_name] = first_batch.num_events
+
+    assert event_counts["wave_torus"] > event_counts["wave_grid"]
+    assert event_counts["wave_doorway"] < event_counts["wave_grid"]
+    assert event_counts["wave_swiss_cheese"] < event_counts["wave_grid"]
+
+
+def test_self_generated_grid_wave_events_retain_topology_and_remove_external_drive():
+    template = EventBatch(
+        src=torch.tensor([0, 1, 0, 1]),
+        dst=torch.tensor([1, 0, 0, 1]),
+        features=torch.tensor([[0.2, 0.0], [-0.3, 0.0], [0.7, 1.0], [-0.5, 1.0]]),
+    )
+
+    generated = _self_generate_grid_wave_events(template, predicted_field=torch.tensor([1.5, -2.0]))
+
+    assert torch.equal(generated.src, template.src)
+    assert torch.equal(generated.dst, template.dst)
+    assert torch.equal(generated.features[:, 0], torch.tensor([1.5, -2.0, 0.0, 0.0]))
+    assert torch.equal(generated.features[:, 1], torch.tensor([0.0, 0.0, 0.0, 0.0]))
+
+
+def test_drive_free_wave_events_keep_neighbor_signals_and_remove_only_drives():
+    template = EventBatch(
+        src=torch.tensor([0, 1, 0, 1]),
+        dst=torch.tensor([1, 0, 0, 1]),
+        features=torch.tensor([[0.2, 0.0], [-0.3, 0.0], [0.7, 1.0], [-0.5, 1.0]]),
+    )
+
+    free = _remove_wave_drive_events(template)
+
+    assert torch.equal(free.src, template.src)
+    assert torch.equal(free.dst, template.dst)
+    assert torch.equal(free.features[:, 0], torch.tensor([0.2, -0.3, 0.0, 0.0]))
+    assert torch.equal(free.features[:, 1], torch.tensor([0.0, 0.0, 0.0, 0.0]))

@@ -113,6 +113,42 @@ def _extract_rollout_drive(
     return drive
 
 
+def _self_generate_grid_wave_events(
+    template: EventBatch,
+    *,
+    predicted_field: torch.Tensor,
+) -> EventBatch:
+    """Create a closed-loop grid-wave bin from predicted node field values.
+
+    The fixed source/destination lattice is retained. Neighbor-event signals are
+    regenerated from the predicted source-node field, while self-drive events
+    are zeroed so no future external forcing leaks into the rollout.
+    """
+    if template.features is None or template.features.dim() != 2 or template.features.size(1) < 2:
+        raise ValueError("self-generated grid-wave rollout requires [signal, is_drive] event features.")
+    features = template.features.clone()
+    src = template.src.to(device=predicted_field.device, dtype=torch.long)
+    is_drive = features[:, 1].to(device=predicted_field.device) > 0.5
+    features[:, 0] = predicted_field[src].to(device=features.device, dtype=features.dtype)
+    features[is_drive] = 0.0
+    return EventBatch(
+        src=template.src,
+        dst=template.dst,
+        features=features,
+        t=template.t,
+    )
+
+
+def _remove_wave_drive_events(template: EventBatch) -> EventBatch:
+    """Keep the fixed wave topology and neighbor signals but remove exogenous drives."""
+    if template.features is None or template.features.dim() != 2 or template.features.size(1) < 2:
+        raise ValueError("drive-free wave rollout requires [signal, is_drive] event features.")
+    features = template.features.clone()
+    is_drive = features[:, 1] > 0.5
+    features[is_drive] = 0.0
+    return EventBatch(src=template.src, dst=template.dst, features=features, t=template.t)
+
+
 def _print_rollout_trace(
     *,
     coeffs: tuple[float, float, float],
@@ -281,6 +317,10 @@ def evaluate_k_step_rollout(
         return {"rollout_horizon": horizon, "rollout_steps": 0}
 
     autonomous_rollout = bool(getattr(cfg, "ift_rollout_autonomous", False))
+    self_generated_rollout = bool(getattr(cfg, "ift_rollout_self_generated", False))
+    free_drive_rollout = bool(getattr(cfg, "ift_rollout_free_drive", False))
+    if (self_generated_rollout or free_drive_rollout) and not autonomous_rollout:
+        raise ValueError("free and self wave rollouts require autonomous IFT rollout state.")
 
     state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
     state_after_prev: list[Optional[ModelState]] = [None] * num_steps
@@ -456,7 +496,15 @@ def evaluate_k_step_rollout(
                         if target is not None
                     ],
                 )
-                curr_state, _ = model.step(curr_state, events_seq[idx])
+                step_events = events_seq[idx]
+                if self_generated_rollout and rollout_prev_edge is not None:
+                    step_events = _self_generate_grid_wave_events(
+                        step_events,
+                        predicted_field=rollout_prev_edge,
+                    )
+                elif free_drive_rollout:
+                    step_events = _remove_wave_drive_events(step_events)
+                curr_state, _ = model.step(curr_state, step_events)
                 if curr_state is not None:
                     curr_state.detach_()
                 rollout_prev_prev_prev_edge = rollout_prev_prev_edge

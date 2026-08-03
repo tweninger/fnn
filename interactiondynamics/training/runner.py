@@ -13,7 +13,13 @@ import torch
 from interactiondynamics.core.config import ModelConfig
 from interactiondynamics.core.events import EventBatch
 from interactiondynamics.data.interfaces import EdgeTargetBatch
-from interactiondynamics.eval.evaluate import EvalSlices, evaluate_k_step_rollout, evaluate_stream_sliced
+from interactiondynamics.eval.evaluate import (
+    EvalSlices,
+    _remove_wave_drive_events,
+    _self_generate_grid_wave_events,
+    evaluate_k_step_rollout,
+    evaluate_stream_sliced,
+)
 from interactiondynamics.eval.node_metrics import (
     edge_prediction_metrics,
     edge_regression_metrics,
@@ -54,6 +60,7 @@ from interactiondynamics.training.targets import (
     transform_node_targets,
 )
 from interactiondynamics.training.types import RunResult, SweepRun, TrainConfig
+from interactiondynamics.updates.ift_update import IFTSecondOrderUpdate
 
 
 def _linear_hvf_readout_snapshot(model) -> dict[str, float]:
@@ -125,6 +132,131 @@ def _stash_observed_history(
     state.aux = aux
 
 
+def _stash_rollout_history(
+    state,
+    *,
+    current_target: torch.Tensor,
+    prev_target: Optional[torch.Tensor],
+    history_targets: list[torch.Tensor],
+) -> None:
+    """Store differentiable autoregressive readout history for rollout training."""
+    if state is None:
+        return
+    aux = {} if state.aux is None else dict(state.aux)
+    aux["ift_state_observed_target"] = current_target
+    if prev_target is None:
+        aux.pop("ift_prev_observed_target", None)
+    else:
+        aux["ift_prev_observed_target"] = prev_target
+    aux["ift_readout_history_scalar"] = torch.stack(history_targets, dim=0)
+    state.aux = aux
+
+
+def _supports_rollout_training(model, cfg: TrainConfig, edge_targets) -> bool:
+    return bool(
+        int(getattr(cfg, "rollout_train_steps", 1)) > 1
+        and edge_targets is not None
+        and getattr(cfg, "edge_target_type", "regression") == "regression"
+        and isinstance(getattr(model, "update", None), IFTSecondOrderUpdate)
+        and getattr(model.update, "readout_mode", "default") == "linear_h_v_force"
+    )
+
+
+def _train_one_epoch_rollout(
+    model,
+    bins: Iterable[EventBatch],
+    edge_targets: Iterable[EdgeTargetBatch],
+    optimizer: torch.optim.Optimizer,
+    cfg: TrainConfig,
+) -> dict[str, float]:
+    """Truncated differentiable autoregressive training for second-order IFT.
+
+    Each optimizer update unrolls ``rollout_train_steps`` bins. Readout history
+    uses the model's previous raw prediction after the first step. When the
+    self-rollout flag is active, those same predictions regenerate lattice
+    event signals and future drive events are removed.
+    """
+    model.train()
+    device = torch.device(cfg.device)
+    events_seq = [batch.to(device) for batch in bins]
+    target_seq = [
+        EdgeTargetBatch(events=batch.events.to(device), targets=batch.targets.to(device))
+        for batch in edge_targets
+    ]
+    if len(events_seq) != len(target_seq):
+        raise ValueError("Rollout training requires one edge-target batch per event bin.")
+    if len(events_seq) < 2:
+        return {"loss": 0.0, "steps": 0}
+
+    horizon = int(cfg.rollout_train_steps)
+    self_generated = bool(getattr(cfg, "ift_rollout_self_generated", False))
+    free_drive = bool(getattr(cfg, "ift_rollout_free_drive", False))
+    state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
+    loss_sum = 0.0
+    metric_sums: dict[str, float] = {}
+    metric_counts: dict[str, int] = {}
+    updates = 0
+    prediction_steps = 0
+
+    # At chunk i, event bin i - 1 advances the state and target i is scored.
+    for chunk_start in range(1, len(events_seq), horizon):
+        chunk_end = min(chunk_start + horizon, len(events_seq))
+        if state is not None:
+            state.detach_()
+        optimizer.zero_grad(set_to_none=True)
+
+        previous = target_seq[chunk_start - 1].targets
+        two_back = target_seq[chunk_start - 2].targets if chunk_start >= 2 else None
+        three_back = target_seq[chunk_start - 3].targets if chunk_start >= 3 else None
+        step_losses: list[torch.Tensor] = []
+
+        for idx in range(chunk_start, chunk_end):
+            step_events = events_seq[idx - 1]
+            if self_generated:
+                step_events = _self_generate_grid_wave_events(step_events, predicted_field=previous)
+            elif free_drive:
+                step_events = _remove_wave_drive_events(step_events)
+
+            history = [target for target in (three_back, two_back, previous) if target is not None]
+            _stash_rollout_history(
+                state,
+                current_target=previous,
+                prev_target=two_back,
+                history_targets=history,
+            )
+            state, _ = model.step(state, step_events)
+            edge_target = target_seq[idx]
+            edge_preds = model.score(state, edge_target.events)
+            edge_view = edge_regression_readout(edge_preds, edge_target.targets, previous, cfg)
+            loss = edge_regression_loss(edge_view.loss_preds, edge_view.loss_targets, cfg)
+            step_losses.append(loss)
+
+            metrics = edge_regression_metrics(edge_view.raw_preds.detach(), edge_target.targets.detach())
+            for key, value in metrics.items():
+                metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
+                metric_counts[key] = metric_counts.get(key, 0) + 1
+            prediction_steps += 1
+
+            three_back, two_back, previous = two_back, previous, edge_view.raw_preds
+
+        if not step_losses:
+            continue
+        chunk_loss = torch.stack(step_losses).mean()
+        chunk_loss.backward()
+        if cfg.grad_clip and cfg.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        optimizer.step()
+        if state is not None:
+            state.detach_()
+        loss_sum += float(chunk_loss.detach().item())
+        updates += 1
+
+    out = {"loss": loss_sum / max(updates, 1), "steps": prediction_steps}
+    for key, value in metric_sums.items():
+        out[key] = value / metric_counts[key]
+    return out
+
+
 def train_one_epoch(
     model,
     bins: Iterable[EventBatch],
@@ -133,6 +265,9 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     cfg: TrainConfig,
 ) -> dict[str, float]:
+    if _supports_rollout_training(model, cfg, edge_targets):
+        assert edge_targets is not None
+        return _train_one_epoch_rollout(model, bins, edge_targets, optimizer, cfg)
     model.train()
     device = torch.device(cfg.device)
     state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
@@ -524,7 +659,7 @@ def run_one_experiment(
     base_train_cfg: TrainConfig,
     run: SweepRun,
     build_model_fn: Callable[[Any, ModelConfig], torch.nn.Module],
-    epochs: int = 5,
+    epochs: int = 10,
     objective_metric: Optional[TaskMetricSpec] = None,
     eval_slices: Optional[EvalSlices] = None,
     save_jsonl_path: Optional[str] = None,
@@ -549,6 +684,16 @@ def run_one_experiment(
             and getattr(run.model_cfg, "ift2_readout_mode", "default") == "linear_h_v_force"
             and getattr(run.model_cfg, "ift_velocity_init_mode", "finite_difference") == "finite_difference"
         ),
+    )
+    setattr(
+        train_cfg,
+        "ift_rollout_self_generated",
+        bool(getattr(run.model_cfg, "ift_rollout_self_generated", False)),
+    )
+    setattr(
+        train_cfg,
+        "ift_rollout_free_drive",
+        bool(getattr(run.model_cfg, "ift_rollout_free_drive", False)),
     )
     if run.lr is not None:
         train_cfg.lr = run.lr

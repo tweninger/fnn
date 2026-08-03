@@ -122,3 +122,5 @@ class ModelConfig:
     ift2_readout_init_mode: IFT2ReadoutInitMode = "zero"
     ift2_readout_init_scale: float = 0.01
     ift2_readout_trainable: bool = True
+    ift_rollout_self_generated: bool = False
+    ift_rollout_free_drive: bool = False

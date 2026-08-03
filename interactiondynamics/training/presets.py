@@ -26,6 +26,7 @@ IFT_RUN_PAIR = ("ift", "ift_update")
 IFT_VARIANT_CHOICES = ("generic", "linear", "direct", "auto")
 IFT_ORDER_CHOICES = (1, 2)
 IFT_HISTORY_STEP_CHOICES = (1, 2, 3)
+GRID_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}
 
 
 def _shortlist_run_grid() -> dict[str, Any]:
@@ -89,7 +90,7 @@ def _supported_ift_variants(*, event_dim: int) -> tuple[str, ...]:
 def _ift_selector_requested(args: argparse.Namespace) -> bool:
     return any(
         getattr(args, name, None) is not None
-        for name in ("ift_variants", "ift_orders", "ift_history_steps")
+        for name in ("ift_variants", "ift_orders", "ift_history_steps", "ift_self_rollout", "ift_free_rollout")
     )
 
 
@@ -147,6 +148,8 @@ def _resolve_selected_ift_variant_runs(
         orders=orders,
         variants=variants,
         history_steps=history_steps,
+        self_rollout=bool(getattr(args, "ift_self_rollout", False)),
+        free_rollout=bool(getattr(args, "ift_free_rollout", False)),
     )
 
 
@@ -180,6 +183,8 @@ def build_ift_variant_runs(
     orders: Optional[Sequence[int]] = None,
     variants: Optional[Sequence[str]] = None,
     history_steps: Optional[Sequence[int]] = None,
+    self_rollout: bool = False,
+    free_rollout: bool = False,
 ) -> list[SweepRun]:
     runs: list[SweepRun] = []
 
@@ -272,6 +277,41 @@ def build_ift_variant_runs(
                     lr=1e-2,
                     prediction_mode=cast(PredictionMode, "delta"),
                 )
+    if self_rollout or free_rollout:
+        if task_name not in {"wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
+            raise ValueError("Free and self IFT rollouts are implemented only for the ring- and grid-wave tasks.")
+        if 2 not in selected_orders:
+            raise ValueError("Free and self IFT rollouts require including second-order IFT via --ift-orders 2.")
+    if free_rollout:
+        add(
+            "ift2_free_hist_vel_k1",
+            **shared,
+            ift_update_order="second",
+            ift_forcing_mode="linear_event",
+            ift2_readout_mode="linear_h_v_force",
+            ift_velocity_teacher_forcing=False,
+            ift_history_vel_steps=1,
+            ift2_readout_init_mode="small_random",
+            ift2_readout_init_scale=0.01,
+            ift_rollout_free_drive=True,
+            lr=1e-2,
+            prediction_mode=cast(PredictionMode, "delta"),
+        )
+    if self_rollout:
+        add(
+            "ift2_self_hist_vel_k1",
+            **shared,
+            ift_update_order="second",
+            ift_forcing_mode="linear_event",
+            ift2_readout_mode="linear_h_v_force",
+            ift_velocity_teacher_forcing=False,
+            ift_history_vel_steps=1,
+            ift2_readout_init_mode="small_random",
+            ift2_readout_init_scale=0.01,
+            ift_rollout_self_generated=True,
+            lr=1e-2,
+            prediction_mode=cast(PredictionMode, "delta"),
+        )
     return runs
 
 
@@ -431,6 +471,9 @@ def build_synthetic_dataset_config(
         else args.synthetic_events_per_bin
     )
     task = str(args.synthetic_task)
+    if task in GRID_WAVE_TASKS and args.synthetic_num_nodes is None:
+        # Keep the default benchmark a square lattice at every preset size.
+        dataset_num_nodes = {"smoke": 36, "quick": 64, "sweep": 100}[preset]
     return SyntheticDatasetConfig(
         name=f"synthetic_{task}_{preset}",
         task=task,

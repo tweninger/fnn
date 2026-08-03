@@ -95,6 +95,46 @@ def test_quick_synthetic_suite_expands_empty_ift_variant_selection_to_task_defau
     ]
 
 
+def test_grid_wave_suite_can_add_a_closed_loop_self_rollout() -> None:
+    args = _synthetic_args("wave_grid")
+    args.ift_variants = ["auto"]
+    args.ift_orders = [2]
+    args.ift_history_steps = [1]
+    args.ift_self_rollout = True
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    self_run = next(run for run in suite.runs if run.name == "ift2_self_hist_vel_k1")
+    assert self_run.prediction_mode == "delta"
+    assert self_run.model_cfg.ift_rollout_self_generated
+    assert self_run.model_cfg.ift_history_vel_steps == 1
+
+
+def test_ring_wave_suite_can_add_drive_free_and_self_rollouts() -> None:
+    args = _synthetic_args("wave")
+    args.ift_variants = ["auto"]
+    args.ift_orders = [2]
+    args.ift_history_steps = [1]
+    args.ift_free_rollout = True
+    args.ift_self_rollout = True
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    free_run = next(run for run in suite.runs if run.name == "ift2_free_hist_vel_k1")
+    self_run = next(run for run in suite.runs if run.name == "ift2_self_hist_vel_k1")
+    assert free_run.model_cfg.ift_rollout_free_drive
+    assert not free_run.model_cfg.ift_rollout_self_generated
+    assert self_run.model_cfg.ift_rollout_self_generated
+
+
 def test_quick_synthetic_suite_rejects_auto_without_second_order() -> None:
     args = _synthetic_args("diffusion")
     args.ift_variants = ["auto"]

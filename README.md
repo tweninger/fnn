@@ -54,7 +54,13 @@ venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthet
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task conservative_oscillator
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task diffusion
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_grid
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_torus
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_doorway
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_swiss_cheese
 ```
+
+The grid-wave tasks use sparse local drives and topology-specific neighbor events. `wave_grid` has reflecting outer boundaries, `wave_torus` wraps both axes, `wave_doorway` adds a wall with a three-node aperture, and `wave_swiss_cheese` removes circular patches of nodes.
 
 - `smoke` runs a tiny toy dataset check over the focused model/update shortlist.
 - `quick` runs the focused shortlist on JODIE Wikipedia:
@@ -95,12 +101,15 @@ Common dataset flags:
 - `--ift-variants [VARIANT ...]`: on `smoke` or `quick`, replace the default `ift/ift_update` run with an IFT sweep over one or more variant families from `{generic, linear, direct, auto}`. Pass no variant names to sweep them all. Using this flag auto-selects the synthetic dataset.
 - `--ift-orders [1 2 ...]`: optionally restrict the IFT sweep to first-order, second-order, or both. Defaults to `1 2` when IFT variants are selected.
 - `--ift-history-steps [1 2 3 ...]`: optionally restrict the history readout sweep for the `auto` family. Defaults to `1 2 3`.
+- `--ift-self-rollout`: add the ring-/grid-wave IFT2 history model evaluated with self-generated neighbor signals and no future external drives.
+- `--ift-free-rollout`: add the ring-/grid-wave IFT2 history model evaluated with observed neighbor signals but no future external drives. Together with `--ift-self-rollout`, this separates missing forcing from self-generated relational inputs.
 
 Common training flags:
 
 - `--max-runs N`: cap the number of runs executed after filtering the preset.
 - `--epochs N`: override the preset epoch count.
 - `--rollout-horizon K`: set rollout evaluation horizon for regression tasks.
+- `--rollout-train-steps K`: for compatible IFT2 history-readout runs, optimize an average loss over `K` differentiable autoregressive steps before each optimizer update. With `--ift-self-rollout`, regenerated neighbor signals and removed future drives are used during this training unroll too. The default, `1`, is the original one-step trainer.
 - `--use-node-scorer`: force-enable the auxiliary node scorer.
 - `--node-loss-weight W`: weight for the node prediction loss.
 - `--node-scorer-hidden H`: hidden width for the node scorer MLP.
