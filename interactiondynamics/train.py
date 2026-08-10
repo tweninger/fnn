@@ -10,6 +10,7 @@ import torch
 from interactiondynamics.core.config import ModelConfig
 from interactiondynamics.data.interfaces import EdgeTargetBatch
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
+from interactiondynamics.data.synthetic import DIFFUSION_TOPOLOGY_CHOICES
 from interactiondynamics.eval.node_metrics import regression_metrics
 from interactiondynamics.models.tgn_model import build_tgn_model
 from interactiondynamics.training.presets import (
@@ -37,10 +38,10 @@ from interactiondynamics.training.task_metrics import (
 from interactiondynamics.training.types import PredictionMode, RunResult, SweepRun, TrainConfig
 
 
-DATASET_CHOICES = ("toy", "jodie", "synthetic")
 TARGET_MODE_CHOICES = ("raw", "residual")
 EDGE_TARGET_SCALE_CHOICES = ("raw", "zscore")
 PREDICTION_MODE_CHOICES = ("state", "delta", "state_plus_delta")
+DATASET_CHOICES = ("toy", "jodie", "synthetic")
 PRESET_CHOICES = ("smoke", "quick", "full")
 
 
@@ -58,6 +59,12 @@ def _build_common_parser() -> argparse.ArgumentParser:
         choices=tuple(SYNTHETIC_TASKS.keys()),
         default="deepsets_sum",
         help="Synthetic benchmark task to use when --dataset synthetic.",
+    )
+    data_group.add_argument(
+        "--synthetic-topology",
+        choices=DIFFUSION_TOPOLOGY_CHOICES,
+        default=None,
+        help="Topology for the diffusion synthetic task; defaults to ring.",
     )
     data_group.add_argument(
         "--synthetic-num-nodes",
@@ -107,18 +114,12 @@ def _build_common_parser() -> argparse.ArgumentParser:
     data_group.add_argument(
         "--ift-self-rollout",
         action="store_true",
-        help=(
-            "Add a deterministic closed-loop self-field rollout for ring- and grid-wave tasks. "
-            "It preserves lattice edges, regenerates edge signals from predictions, and removes future external drives."
-        ),
+        help="Add a deterministic closed-loop self-field rollout for ring- and grid-wave tasks.",
     )
     data_group.add_argument(
         "--ift-free-rollout",
         action="store_true",
-        help=(
-            "Add a drive-free IFT2 rollout for ring- and grid-wave tasks. It retains observed "
-            "neighbor signals but zeros future external-drive events."
-        ),
+        help="Add a drive-free IFT2 rollout for ring- and grid-wave tasks.",
     )
 
     train_group = common.add_argument_group("training")
@@ -644,9 +645,13 @@ def _build_ift_diagnostic_row(snapshot: dict[str, object]) -> Optional[dict[str,
             "delta_r2": None,
             "delta_mae": None,
         }
-    persistent_r2 = _snapshot_metric_or_none(snapshot, f"val.persistent_{target_kind}_r2")
-    if persistent_r2 is None:
-        persistent_r2 = _snapshot_metric_or_none(snapshot, f"rollout_test.rollout_persistent_{target_kind}_r2")
+    # The diagnostic rollout columns must compare like with like: use the
+    # frozen baseline evaluated at the same test rollout horizon, not the
+    # unrelated one-step validation persistence score.
+    persistent_r2 = _snapshot_metric_or_none(
+        snapshot,
+        f"rollout_test.rollout_persistent_{target_kind}_r2",
+    )
     rollout_test_r2 = _snapshot_metric_or_none(snapshot, f"rollout_test.rollout_{target_kind}_r2")
     return {
         "target_kind": target_kind,
@@ -687,8 +692,8 @@ def _print_ift_diagnostic_table(
     print(f"\n=== IFT diagnostic table: {task_name} ===")
     header = (
         f"{'run':<20} {'target':>6} {'auc_v':>7} {'auc_t':>7} {'f1_v':>7} {'f1_t':>7} "
-        f"{'state_v':>8} {'state_t':>8} {'roll_v':>8} {'roll_t':>8} {'pers':>8} "
-        f"{'d_pers':>8} {'delta_r2':>8} {'delta_mae':>9} {'vel_r2':>8} {'kappa':>7} {'gamma':>7} {'dt':>6} "
+        f"{'state_v':>8} {'state_t':>8} {'roll_v':>8} {'roll_t':>8} {'roll_pers':>9} "
+        f"{'d_rollpers':>10} {'delta_r2':>8} {'delta_mae':>9} {'vel_r2':>8} {'kappa':>7} {'gamma':>7} {'dt':>6} "
         f"{'alpha':>7} {'force':>8} {'diff':>8} {'rel_d':>8} {'rel_u':>8} {'vel_f':>7} {'for_f':>7} {'d_corr':>8} {'vel_mse':>8}"
     )
     print(header)
@@ -749,8 +754,8 @@ def _print_ift_diagnostic_table(
             f"{_format_table_float(cast(Optional[float], row['state_test_r2']), width=8)} "
             f"{_format_table_float(cast(Optional[float], row['rollout_val_r2']), width=8)} "
             f"{_format_table_float(cast(Optional[float], row['rollout_test_r2']), width=8)} "
-            f"{_format_table_float(cast(Optional[float], row['persistent_r2']), width=8)} "
-            f"{_format_table_float(cast(Optional[float], row['delta_vs_persistent']), width=8)} "
+            f"{_format_table_float(cast(Optional[float], row['persistent_r2']), width=9)} "
+            f"{_format_table_float(cast(Optional[float], row['delta_vs_persistent']), width=10)} "
             f"{_format_table_float(cast(Optional[float], row['delta_r2']), width=8)} "
             f"{_format_table_float(cast(Optional[float], row['delta_mae']), width=9)} "
             f"{_format_table_float(cast(Optional[float], row['decoded_v_r2_against_finite_difference']), width=8)} "
@@ -838,7 +843,7 @@ def _print_ift_diagnostic_footer(
 ) -> None:
     if spec.extra is None or "synthetic_task" not in spec.extra:
         return
-    if not _ift_variant_selector_requested(args):
+    if not _ift_variant_selector_requested(args) and str(args.synthetic_task) != "diffusion":
         return
     run_lookup = {(run.name, run.seed): run for run in runs}
     ift_results = [
@@ -881,9 +886,9 @@ def _normalize_ift_variant_args(args: argparse.Namespace) -> None:
     if raw_orders not in (None, []) and 2 not in raw_orders:
         if (raw_variants not in (None, []) and "auto" in raw_variants) or raw_history is not None or self_rollout or free_rollout:
             raise ValueError("IFT auto/history/free/self rollout variants require including second-order IFT via --ift-orders 2.")
-    wave_tasks = {"wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}
-    if (self_rollout or free_rollout) and args.synthetic_task not in wave_tasks:
-        raise ValueError("--ift-free-rollout and --ift-self-rollout are implemented only for the ring- and grid-wave tasks.")
+    autonomous_tasks = {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}
+    if (self_rollout or free_rollout) and args.synthetic_task not in autonomous_tasks:
+        raise ValueError("--ift-free-rollout and --ift-self-rollout are implemented only for diffusion and wave tasks.")
     if args.dataset is None:
         args.dataset = "synthetic"
         return
@@ -895,7 +900,6 @@ def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _normalize_ift_variant_args(args)
-
     preset = "full" if args.command == "sweep" else args.command
     suite = build_suite(preset, device, dataset_override=args.dataset, args=args)
     ds = load_dataset(suite.dataset, suite.dataset_kwargs)
@@ -1047,8 +1051,8 @@ def main() -> None:
         if regression_kind is not None:
             header = (
                 f"{'method':<24} {'seed':>4} {'kind':>6} {'objective':>12} "
-                f"{'val_mse':>10} {'val_r2':>8} {'pers_r2':>8} "
-                f"{'test_mse':>10} {'test_r2':>8} {'test_roll_r2':>12}"
+                f"{'val_mse':>10} {'val_r2':>8} {'val_pers_r2':>11} "
+                f"{'test_mse':>10} {'test_r2':>8} {'test_roll_r2':>12} {'test_roll_pers_r2':>17}"
             )
             print(header)
             print("-" * len(header))
@@ -1062,10 +1066,11 @@ def main() -> None:
                     f"{_format_summary_float(objective_value, width=12)} "
                     f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'val.{regression_kind}_mse'), width=10)} "
                     f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'val.{regression_kind}_r2'), width=8)} "
-                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'val.persistent_{regression_kind}_r2'), width=8)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'val.persistent_{regression_kind}_r2'), width=11)} "
                     f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'test.{regression_kind}_mse'), width=10)} "
                     f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'test.{regression_kind}_r2'), width=8)} "
-                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'rollout_test.rollout_{regression_kind}_r2'), width=12)}"
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'rollout_test.rollout_{regression_kind}_r2'), width=12)} "
+                    f"{_format_summary_float(_snapshot_metric_or_none(snapshot, f'rollout_test.rollout_persistent_{regression_kind}_r2'), width=17)}"
                 )
                 print(row)
         else:

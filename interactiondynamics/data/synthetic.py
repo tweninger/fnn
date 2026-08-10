@@ -70,6 +70,7 @@ class SyntheticTaskSpec:
 
 
 IFT_PAIR = ("ift", "ift_update")
+DIFFUSION_TOPOLOGY_CHOICES = ("ring", "grid", "torus", "doorway", "swiss_cheese")
 
 
 def _grid_wave_task(
@@ -947,6 +948,7 @@ class SyntheticDatasetConfig:
     num_nodes: int = 64
     num_bins: int = 120
     events_per_bin: int = 256
+    diffusion_topology: Optional[str] = None
     split_fracs: tuple[float, float, float] = (0.6, 0.2, 0.2)
     seed: int = 0
     device: Optional[torch.device] = None
@@ -959,6 +961,12 @@ class SyntheticDataset(EventStreamDataset):
                 f"Unknown synthetic task: {cfg.task}. "
                 f"Available: {', '.join(sorted(SYNTHETIC_TASKS))}"
             )
+        if cfg.diffusion_topology is not None:
+            if cfg.task != "diffusion":
+                raise ValueError("diffusion_topology is supported only for the diffusion task.")
+            if cfg.diffusion_topology not in DIFFUSION_TOPOLOGY_CHOICES:
+                allowed = ", ".join(DIFFUSION_TOPOLOGY_CHOICES)
+                raise ValueError(f"Unknown diffusion topology {cfg.diffusion_topology!r}. Allowed: {allowed}.")
         self.cfg = cfg
         self._task = SYNTHETIC_TASKS[cfg.task]
         self._rng = np.random.default_rng(int(cfg.seed))
@@ -1267,6 +1275,12 @@ class SyntheticDataset(EventStreamDataset):
         return bins, edge_targets
 
     def _materialize_diffusion(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+        topology = self.cfg.diffusion_topology or "ring"
+        if topology == "ring":
+            return self._materialize_ring_diffusion()
+        return self._materialize_grid_diffusion(topology)
+
+    def _materialize_ring_diffusion(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
         num_nodes = int(self.cfg.num_nodes)
         node_idx = np.arange(num_nodes, dtype=np.int64)
         ring_dst_fwd = (node_idx + 1) % num_nodes
@@ -1304,6 +1318,60 @@ class SyntheticDataset(EventStreamDataset):
                 + 0.18 * np.roll(x_curr, -1)
                 + 0.25 * drive
             )
+            x_curr = np.clip(x_next, -3.0, 3.0).astype(np.float32)
+
+        return bins, edge_targets
+
+    def _materialize_grid_diffusion(
+        self,
+        topology: str,
+    ) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+        """Materialize first-order diffusion on a grid-derived topology."""
+        topology_task = {
+            "grid": "wave_grid",
+            "torus": "wave_torus",
+            "doorway": "wave_doorway",
+            "swiss_cheese": "wave_swiss_cheese",
+        }[topology]
+        active, edge_src, edge_dst, degree = self._grid_wave_topology(topology_task)
+        num_nodes = int(self.cfg.num_nodes)
+        active_nodes = np.flatnonzero(active).astype(np.int64)
+        phases = self._rng.uniform(0.0, 2.0 * np.pi, size=active_nodes.size)
+        freqs = self._rng.uniform(0.05, 0.16, size=active_nodes.size)
+        amps = self._rng.uniform(0.30, 0.70, size=active_nodes.size)
+        x_curr = np.zeros((num_nodes,), dtype=np.float32)
+        x_curr[active] = self._rng.normal(loc=0.0, scale=0.10, size=active_nodes.size)
+
+        bins: list[EventBatch] = []
+        edge_targets: list[EdgeTargetBatch] = []
+        for t in range(int(self.cfg.num_bins)):
+            drive = np.zeros((num_nodes,), dtype=np.float32)
+            drive[active_nodes] = (
+                amps * np.sin(freqs * t + phases)
+                + 0.22 * np.cos((0.35 * freqs * t) + (1.1 * phases))
+                + self._rng.normal(loc=0.0, scale=0.015, size=active_nodes.size)
+            ).astype(np.float32)
+
+            src = np.concatenate([edge_src, active_nodes])
+            dst = np.concatenate([edge_dst, active_nodes])
+            signal = np.concatenate([x_curr[edge_src], drive[active_nodes]]).astype(np.float32)
+            is_drive = np.concatenate([
+                np.zeros(edge_src.size, dtype=np.float32),
+                np.ones(active_nodes.size, dtype=np.float32),
+            ])
+            bins.append(self._make_event_batch(src, dst, np.stack([signal, is_drive], axis=1), t))
+            edge_targets.append(self._make_edge_target_batch(x_curr, t))
+
+            neighbor_sum = np.zeros((num_nodes,), dtype=np.float32)
+            np.add.at(neighbor_sum, edge_dst, x_curr[edge_src])
+            neighbor_mean = np.divide(
+                neighbor_sum,
+                degree,
+                out=np.zeros_like(neighbor_sum),
+                where=degree > 0.0,
+            )
+            x_next = 0.58 * x_curr + 0.36 * neighbor_mean + 0.25 * drive
+            x_next[~active] = 0.0
             x_curr = np.clip(x_next, -3.0, 3.0).astype(np.float32)
 
         return bins, edge_targets
@@ -1636,6 +1704,30 @@ class SyntheticDataset(EventStreamDataset):
 
     def spec(self) -> DataSpec:
         dataset_name = self.cfg.name or f"synthetic_{self.cfg.task}"
+        task_axes = self._task.axes()
+        task_tags = list(self._task.tags())
+        if self.cfg.task == "diffusion" and self.cfg.diffusion_topology not in {None, "ring"}:
+            topology = cast(str, self.cfg.diffusion_topology)
+            graph_types = {
+                "grid": "grid",
+                "torus": "torus_grid",
+                "doorway": "grid_doorway",
+                "swiss_cheese": "grid_swiss_cheese",
+            }
+            task_axes["graph_type"] = graph_types[topology]
+            task_axes["generator_family"] = "grid_diffusion"
+            task_axes["event_structure"] = "topology_neighbor_and_drive_events"
+            generator_params = {} if task_axes["generator_params"] is None else dict(task_axes["generator_params"])
+            generator_params["topology"] = topology
+            task_axes["generator_params"] = generator_params
+            task_tags = [
+                tag
+                for tag in task_tags
+                if not tag.startswith(("family:", "graph:", "events:"))
+            ]
+            task_tags.append("family:grid_diffusion")
+            task_tags.append(f"graph:{graph_types[topology]}")
+            task_tags.append("events:topology_neighbor_and_drive_events")
         return DataSpec(
             name=dataset_name,
             num_nodes=int(self.cfg.num_nodes),
@@ -1646,8 +1738,8 @@ class SyntheticDataset(EventStreamDataset):
                 "synthetic_task": self._task.name,
                 "focus": self._task.focus,
                 "description": self._task.description,
-                "task_axes": self._task.axes(),
-                "task_tags": list(self._task.tags()),
+                "task_axes": task_axes,
+                "task_tags": task_tags,
                 "recommended_pairs": [f"{agg}/{upd}" for agg, upd in self._task.recommended_pairs],
                 "metric_family": self._task.metric_family,
                 "generator_params": None if self._task.generator_params is None else dict(self._task.generator_params),

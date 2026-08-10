@@ -27,6 +27,17 @@ IFT_VARIANT_CHOICES = ("generic", "linear", "direct", "auto")
 IFT_ORDER_CHOICES = (1, 2)
 IFT_HISTORY_STEP_CHOICES = (1, 2, 3)
 GRID_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}
+# Each baseline retains its intended architecture pairing.  In particular,
+# Hopfield aggregation is evaluated with its Hopfield update, while LNN/HNN
+# use the Set Transformer event encoder rather than arbitrary hybrid pairs.
+DIFFUSION_COMPARISON_PANEL = (
+    ("sum", "tgn_gru"),
+    ("deepsets", "tgn_gru"),
+    ("settransformer", "tgn_gru"),
+    ("hopfield", "hopfield_update"),
+    ("settransformer", "lnn"),
+    ("settransformer", "hnn"),
+)
 
 
 def _shortlist_run_grid() -> dict[str, Any]:
@@ -278,8 +289,8 @@ def build_ift_variant_runs(
                     prediction_mode=cast(PredictionMode, "delta"),
                 )
     if self_rollout or free_rollout:
-        if task_name not in {"wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
-            raise ValueError("Free and self IFT rollouts are implemented only for the ring- and grid-wave tasks.")
+        if task_name not in {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
+            raise ValueError("Free and self IFT rollouts are implemented only for diffusion and wave tasks.")
         if 2 not in selected_orders:
             raise ValueError("Free and self IFT rollouts require including second-order IFT via --ift-orders 2.")
     if free_rollout:
@@ -442,6 +453,24 @@ def _focused_runs(model_cfg: ModelConfig) -> list[SweepRun]:
     )
 
 
+def _diffusion_runs(model_cfg: ModelConfig, *, seed: int) -> list[SweepRun]:
+    """Return the default first-order FNN diffusion comparison panel."""
+    runs = build_ift_variant_runs(
+        model_cfg,
+        task_name="diffusion",
+        drive_feature_idx=_infer_ift_drive_feature_idx(("signal", "is_drive")),
+        seed=seed,
+        orders=(1,),
+        variants=("generic", "linear", "direct"),
+    )
+    for aggregator, update in DIFFUSION_COMPARISON_PANEL:
+        cfg = ModelConfig(**asdict(model_cfg))
+        cfg.aggregator = aggregator  # type: ignore[assignment]
+        cfg.update = update  # type: ignore[assignment]
+        runs.append(SweepRun(name=f"{aggregator}/{update}", model_cfg=cfg, seed=seed))
+    return runs
+
+
 def _full_runs(model_cfg: ModelConfig) -> list[SweepRun]:
     return make_runs(model_cfg, **_full_run_grid())
 
@@ -460,6 +489,10 @@ def build_synthetic_dataset_config(
     *,
     preset: str,
 ) -> SyntheticDatasetConfig:
+    task = str(args.synthetic_task)
+    topology = getattr(args, "synthetic_topology", None)
+    if topology is not None and task != "diffusion":
+        raise ValueError("--synthetic-topology is supported only with --synthetic-task diffusion.")
     num_nodes, default_bins, default_events = _synthetic_default_sizes(preset)
     dataset_num_bins = int(default_bins if args.num_bins is None else args.num_bins)
     dataset_num_nodes = int(
@@ -470,16 +503,16 @@ def build_synthetic_dataset_config(
         if args.synthetic_events_per_bin is None
         else args.synthetic_events_per_bin
     )
-    task = str(args.synthetic_task)
-    if task in GRID_WAVE_TASKS and args.synthetic_num_nodes is None:
+    if (task in GRID_WAVE_TASKS or (task == "diffusion" and topology not in {None, "ring"})) and args.synthetic_num_nodes is None:
         # Keep the default benchmark a square lattice at every preset size.
         dataset_num_nodes = {"smoke": 36, "quick": 64, "sweep": 100}[preset]
     return SyntheticDatasetConfig(
-        name=f"synthetic_{task}_{preset}",
+        name=f"synthetic_{task}_{topology or 'ring'}_{preset}" if task == "diffusion" else f"synthetic_{task}_{preset}",
         task=task,
         num_nodes=dataset_num_nodes,
         num_bins=dataset_num_bins,
         events_per_bin=dataset_events,
+        diffusion_topology=topology,
         seed=int(args.seed),
         device=device,
     )
@@ -503,7 +536,19 @@ def _build_synthetic_suite(
     model_cfg.event_dim = task_spec.event_dim
     model_cfg.use_node_scorer = task_spec.requires_node_scorer
 
-    if preset in {"smoke", "quick"}:
+    if preset in {"smoke", "quick"} and synthetic_cfg.task == "diffusion":
+        runs = _diffusion_runs(model_cfg, seed=int(args.seed))
+        if _ift_selector_requested(args):
+            selected_ift_runs = _resolve_selected_ift_variant_runs(
+                model_cfg,
+                task_name=synthetic_cfg.task,
+                feature_schema=task_spec.feature_schema,
+                args=args,
+            )
+            runs = _replace_ift_shortlist_run(runs, replacement_runs=selected_ift_runs)
+        epochs = 1 if preset == "smoke" else 4
+        early_steps = 5 if preset == "smoke" else 10
+    elif preset in {"smoke", "quick"}:
         shortlist_runs = _make_shortlist_runs(model_cfg)
         runs = select_runs(shortlist_runs, set(task_spec.recommended_pairs))
         if _ift_selector_requested(args):

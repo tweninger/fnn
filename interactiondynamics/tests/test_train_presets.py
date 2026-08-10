@@ -6,7 +6,11 @@ import pytest
 import torch
 
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
-from interactiondynamics.training.presets import build_suite, load_dataset
+from interactiondynamics.training.presets import (
+    DIFFUSION_COMPARISON_PANEL,
+    build_suite,
+    load_dataset,
+)
 
 
 def _synthetic_args(task_name: str) -> argparse.Namespace:
@@ -37,12 +41,36 @@ def test_quick_synthetic_suite_uses_task_specific_shortlist(task_name: str):
     assert suite.dataset_kwargs["task"] == task_name
 
     task_pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
-    assert task_pairs == set(SYNTHETIC_TASKS[task_name].recommended_pairs)
+    expected_pairs = (
+        {("ift", "ift_update"), *DIFFUSION_COMPARISON_PANEL}
+        if task_name == "diffusion"
+        else set(SYNTHETIC_TASKS[task_name].recommended_pairs)
+    )
+    assert task_pairs == expected_pairs
     if SYNTHETIC_TASKS[task_name].requires_node_scorer:
         assert all(run.model_cfg.use_node_scorer for run in suite.runs)
 
     ds = load_dataset(suite.dataset, suite.dataset_kwargs)
     assert ds.spec().num_nodes == 20
+
+
+def test_diffusion_task_uses_the_fixed_first_order_comparison_panel() -> None:
+    args = _synthetic_args("diffusion")
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    assert [run.name for run in suite.runs[:3]] == [
+        "ift1_generic",
+        "ift1_linear",
+        "ift1_direct",
+    ]
+    pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
+    assert pairs == {("ift", "ift_update"), *DIFFUSION_COMPARISON_PANEL}
+    assert len(suite.runs) == 3 + len(DIFFUSION_COMPARISON_PANEL)
 
 
 def test_quick_synthetic_suite_can_replace_default_ift_run_with_selected_variants() -> None:
@@ -132,6 +160,29 @@ def test_ring_wave_suite_can_add_drive_free_and_self_rollouts() -> None:
     self_run = next(run for run in suite.runs if run.name == "ift2_self_hist_vel_k1")
     assert free_run.model_cfg.ift_rollout_free_drive
     assert not free_run.model_cfg.ift_rollout_self_generated
+    assert self_run.model_cfg.ift_rollout_self_generated
+
+
+def test_diffusion_suite_can_add_drive_free_and_self_rollouts() -> None:
+    args = _synthetic_args("diffusion")
+    args.ift_variants = ["auto"]
+    args.ift_orders = [2]
+    args.ift_history_steps = [1]
+    args.ift_free_rollout = True
+    args.ift_self_rollout = True
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    run_names = {run.name for run in suite.runs}
+    assert "ift2_free_hist_vel_k1" in run_names
+    assert "ift2_self_hist_vel_k1" in run_names
+    free_run = next(run for run in suite.runs if run.name == "ift2_free_hist_vel_k1")
+    self_run = next(run for run in suite.runs if run.name == "ift2_self_hist_vel_k1")
+    assert free_run.model_cfg.ift_rollout_free_drive
     assert self_run.model_cfg.ift_rollout_self_generated
 
 

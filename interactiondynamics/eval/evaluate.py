@@ -3,7 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import math
-from typing import Dict, Iterable, Optional, cast
+from typing import Any, Dict, Iterable, Optional, cast
 import torch
 
 from interactiondynamics.core.events import EventBatch
@@ -300,7 +300,7 @@ def evaluate_k_step_rollout(
     cfg,
     *,
     horizon: int = 5,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     model.eval()
     device = torch.device(cfg.device)
     horizon = max(1, int(horizon))
@@ -316,18 +316,16 @@ def evaluate_k_step_rollout(
     if num_steps <= horizon:
         return {"rollout_horizon": horizon, "rollout_steps": 0}
 
-    autonomous_rollout = bool(getattr(cfg, "ift_rollout_autonomous", False))
+    # This flag controls only IFT2 readout-history injection. All model
+    # families use the same rollout windows below.
+    autonomous_readout = bool(getattr(cfg, "ift_rollout_autonomous", False))
     self_generated_rollout = bool(getattr(cfg, "ift_rollout_self_generated", False))
     free_drive_rollout = bool(getattr(cfg, "ift_rollout_free_drive", False))
-    if (self_generated_rollout or free_drive_rollout) and not autonomous_rollout:
+    if (self_generated_rollout or free_drive_rollout) and not autonomous_readout:
         raise ValueError("free and self wave rollouts require autonomous IFT rollout state.")
 
     state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
     state_after_prev: list[Optional[ModelState]] = [None] * num_steps
-    prev_node_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
-    prev_edge_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
-    prev_prev_prev_node_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
-    prev_prev_prev_edge_target_seq: list[Optional[torch.Tensor]] = [None] * num_steps
 
     prev_node_target: Optional[torch.Tensor] = None
     prev_edge_target: Optional[torch.Tensor] = None
@@ -358,10 +356,6 @@ def evaluate_k_step_rollout(
         )
         state, _ = model.step(state, events_seq[idx - 1])
         state_after_prev[idx] = None if state is None else state.clone(detach=True)
-        prev_node_target_seq[idx] = prev_node_target
-        prev_edge_target_seq[idx] = prev_edge_target
-        prev_prev_prev_node_target_seq[idx] = prev_prev_prev_node_target
-        prev_prev_prev_edge_target_seq[idx] = prev_prev_prev_edge_target
         if state is not None:
             state.detach_()
         if node_target_seq is not None:
@@ -377,33 +371,32 @@ def evaluate_k_step_rollout(
     edge_persistent_acc = _acc_init()
     node_acc = _acc_init()
     node_persistent_acc = _acc_init()
+    edge_step_acc: dict[int, dict] = {}
+    edge_persistent_step_acc: dict[int, dict] = {}
+    node_step_acc: dict[int, dict] = {}
+    node_persistent_step_acc: dict[int, dict] = {}
     rollout_steps = 0
 
-    if autonomous_rollout:
-        start_range = range(1, num_steps - horizon)
-    else:
-        start_range = range(1, num_steps - horizon + 1)
+    # Every rollout begins from observed y_t, after consuming event bin t,
+    # and scores y_{t + horizon}. All model families use these same windows.
+    start_range = range(1, num_steps - horizon)
 
     for start_idx in start_range:
-        end_idx = start_idx + horizon if autonomous_rollout else start_idx + horizon - 1
-        state_idx = start_idx + 1 if autonomous_rollout else start_idx
+        end_idx = start_idx + horizon
+        state_idx = start_idx + 1
         rollout_state = state_after_prev[state_idx]
         if rollout_state is None:
             continue
-        if autonomous_rollout:
-            rollout_prev_node = None if node_target_seq is None else node_target_seq[start_idx]
-            rollout_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx].targets
-            rollout_prev_prev_prev_node = None if node_target_seq is None else node_target_seq[start_idx - 2] if start_idx - 2 >= 0 else None
-            rollout_prev_prev_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx - 2].targets if start_idx - 2 >= 0 else None
-            rollout_prev_prev_node = None if node_target_seq is None else node_target_seq[start_idx - 1]
-            rollout_prev_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx - 1].targets
-        else:
-            rollout_prev_node = prev_node_target_seq[start_idx]
-            rollout_prev_edge = prev_edge_target_seq[start_idx]
-            rollout_prev_prev_prev_node = prev_prev_prev_node_target_seq[start_idx]
-            rollout_prev_prev_prev_edge = prev_prev_prev_edge_target_seq[start_idx]
-            rollout_prev_prev_node = prev_node_target_seq[start_idx - 1] if start_idx - 1 >= 0 else None
-            rollout_prev_prev_edge = prev_edge_target_seq[start_idx - 1] if start_idx - 1 >= 0 else None
+        rollout_prev_node = None if node_target_seq is None else node_target_seq[start_idx]
+        rollout_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx].targets
+        rollout_prev_prev_prev_node = (
+            None if node_target_seq is None or start_idx < 2 else node_target_seq[start_idx - 2]
+        )
+        rollout_prev_prev_prev_edge = (
+            None if edge_target_seq is None or start_idx < 2 else edge_target_seq[start_idx - 2].targets
+        )
+        rollout_prev_prev_node = None if node_target_seq is None else node_target_seq[start_idx - 1]
+        rollout_prev_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx - 1].targets
         persistent_prev_node = rollout_prev_node
         persistent_prev_edge = rollout_prev_edge
         curr_state = rollout_state.clone(detach=True)
@@ -422,13 +415,13 @@ def evaluate_k_step_rollout(
             and rollout_prev_edge is not None
         )
 
-        score_start_idx = start_idx + 1 if autonomous_rollout else start_idx
+        score_start_idx = start_idx + 1
         for idx in range(score_start_idx, end_idx + 1):
             prior_rollout_prev_edge = rollout_prev_edge
             prior_rollout_prev_node = rollout_prev_node
             if edge_target_seq is not None:
                 if (
-                    autonomous_rollout
+                    autonomous_readout
                     and curr_state is not None
                     and rollout_prev_edge is not None
                     and rollout_prev_prev_edge is not None
@@ -452,6 +445,26 @@ def evaluate_k_step_rollout(
                 edge_view = _edge_regression_readout(edge_pred, edge_batch.targets, rollout_prev_edge, cfg)
                 final_edge_pred_raw = edge_view.raw_preds.detach()
                 final_edge_true_raw = edge_batch.targets
+                relative_step = idx - start_idx
+                edge_step_metrics = edge_regression_metrics(final_edge_pred_raw, final_edge_true_raw)
+                edge_step_loss = torch.nn.functional.mse_loss(final_edge_pred_raw, final_edge_true_raw)
+                _acc_update(
+                    edge_step_acc.setdefault(relative_step, _acc_init()),
+                    float(edge_step_loss.item()),
+                    edge_step_metrics,
+                )
+                if persistent_prev_edge is not None:
+                    persistent_edge_pred = persistent_prev_edge.to(
+                        device=final_edge_true_raw.device,
+                        dtype=final_edge_true_raw.dtype,
+                    )
+                    persistent_step_metrics = edge_regression_metrics(persistent_edge_pred, final_edge_true_raw)
+                    persistent_step_loss = torch.nn.functional.mse_loss(persistent_edge_pred, final_edge_true_raw)
+                    _acc_update(
+                        edge_persistent_step_acc.setdefault(relative_step, _acc_init()),
+                        float(persistent_step_loss.item()),
+                        persistent_step_metrics,
+                    )
                 if (
                     trace_enabled
                     and prior_rollout_prev_edge is not None
@@ -479,6 +492,24 @@ def evaluate_k_step_rollout(
                 node_view = _node_regression_readout(node_pred, node_target_seq[idx], rollout_prev_node, cfg)
                 final_node_pred_raw = node_view.raw_preds.detach()
                 final_node_true_raw = node_target_seq[idx]
+                relative_step = idx - start_idx
+                node_step_loss = torch.nn.functional.mse_loss(final_node_pred_raw, final_node_true_raw)
+                _acc_update(
+                    node_step_acc.setdefault(relative_step, _acc_init()),
+                    float(node_step_loss.item()),
+                    node_regression_metrics(final_node_pred_raw, final_node_true_raw),
+                )
+                if persistent_prev_node is not None:
+                    persistent_node_pred = persistent_prev_node.to(
+                        device=final_node_true_raw.device,
+                        dtype=final_node_true_raw.dtype,
+                    )
+                    persistent_node_loss = torch.nn.functional.mse_loss(persistent_node_pred, final_node_true_raw)
+                    _acc_update(
+                        node_persistent_step_acc.setdefault(relative_step, _acc_init()),
+                        float(persistent_node_loss.item()),
+                        node_regression_metrics(persistent_node_pred, final_node_true_raw),
+                    )
                 rollout_prev_node = final_node_pred_raw
 
             if idx < end_idx:
@@ -591,6 +622,18 @@ def evaluate_k_step_rollout(
             if key in {"loss", "steps"}:
                 continue
             out[f"{prefix}_{key}"] = float(value)
+
+    def finalize_by_step(step_acc: dict[int, dict]) -> dict[str, dict[str, float]]:
+        finalized: dict[str, dict[str, float]] = {}
+        for step, acc in sorted(step_acc.items()):
+            block = _acc_finalize(acc)
+            finalized[str(step)] = {key: float(value) for key, value in block.items()}
+        return finalized
+
+    out["rollout_by_step"] = finalize_by_step(edge_step_acc)
+    out["rollout_persistent_by_step"] = finalize_by_step(edge_persistent_step_acc)
+    out["rollout_node_by_step"] = finalize_by_step(node_step_acc)
+    out["rollout_node_persistent_by_step"] = finalize_by_step(node_persistent_step_acc)
     return out
 
 

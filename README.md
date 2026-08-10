@@ -36,45 +36,79 @@ venv/bin/pyright
 
 ## Training presets
 
+Use `smoke` to check that a task and its recommended shortlist execute. Use
+`quick` for a small pilot; it is not a paper-scale result. `sweep` retains
+the broader legacy JODIE grid.
+
 ```bash
-venv/bin/python -m interactiondynamics.train smoke
-venv/bin/python -m interactiondynamics.train quick
-venv/bin/python -m interactiondynamics.train sweep
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task deepsets_sum
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task settransformer_max
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task temporal_memory
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task node_count_threshold
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task node_keyed_trigger
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task node_temporal_state
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task node_sum_regression
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task node_temporal_regression
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task edge_threshold_classification
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task next_dst_ranking
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task associative_retrieval
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task conservative_oscillator
+venv/bin/python -m interactiondynamics.train smoke --dataset synthetic --synthetic-task deepsets_sum
 venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task diffusion
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_grid
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_torus
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_doorway
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task wave_swiss_cheese
+venv/bin/python -m interactiondynamics.train sweep
 ```
 
-The grid-wave tasks use sparse local drives and topology-specific neighbor events. `wave_grid` has reflecting outer boundaries, `wave_torus` wraps both axes, `wave_doorway` adds a wall with a three-node aperture, and `wave_swiss_cheese` removes circular patches of nodes.
+### Synthetic task map
 
-- `smoke` runs a tiny toy dataset check over the focused model/update shortlist.
-- `quick` runs the focused shortlist on JODIE Wikipedia:
-  - `ift` + `ift_update`
-  - `hopfield` + `hopfield_update`
-  - `settransformer` + `lnn`
-  - `settransformer` + `hnn`
-  - `settransformer` + `tgn_gru`
-- `sweep` runs the broader multi-seed preset grid on JODIE Wikipedia.
-- You can override examples like `venv/bin/python -m interactiondynamics.train quick --dataset toy --epochs 1`.
-- `--edge-target-mode residual` trains the edge head to predict next-step changes relative to the previous step while continuing to report raw-space edge metrics.
-- `--node-target-mode residual` does the same for optional node supervision, predicting state changes instead of raw next-step node values.
-- For synthetic edge regression, `--edge-target-scale zscore` rescales the MSE loss by the train-split edge-target standard deviation while still reporting raw-space metrics.
-- Ranking metrics now treat ties pessimistically by default, and eval also reports a `persistent_*` baseline that keeps the post-warmup state fixed.
+“Order” refers to the order of the **data-generating dynamics**, not to an
+arbitrary IFT setting selected at the command line. “N/A” means that no
+field-dynamics order is meaningful for the task.
+
+#### N/A — aggregation, selection, classification, and routing controls
+
+These tasks test event-set processing or supervision type. They are useful
+controls, but they are not evidence for a first- or second-order field claim.
+
+| Task family | Canonical task(s) | What it tests |
+| --- | --- | --- |
+| Additive aggregation | `deepsets_sum`, `node_sum_regression`, `next_dst_ranking` | Sum of incident event values. |
+| Keyed selection | `settransformer_max`, `node_keyed_value`, `edge_retrieval` | Select an event value by its key. |
+| Associative retrieval | `associative_retrieval` | Query–key–value retrieval in a node-local event set. |
+| Threshold / trigger classification | `node_count_threshold`, `node_keyed_trigger`, `edge_threshold_classification`, `edge_keyed_trigger_classification` | Classification from an incident event set. |
+
+#### First-order — relational diffusion
+
+| Task | Domain and mechanism | Recommended use |
+| --- | --- | --- |
+| `diffusion` | Driven diffusion over a selected interaction topology: ring by default, or grid-derived domains. | Main first-order mechanism test. |
+
+The normal `diffusion` shortlist is its first-order comparison panel: three
+FNN forcing variants; Sum, Deep Sets, and Set Transformer with GRU; Hopfield
+with its Hopfield update; and Set Transformer with LNN and HNN updates. For a
+longer pilot, run:
+
+```bash
+venv/bin/python -m interactiondynamics.train quick \
+  --dataset synthetic \
+  --synthetic-task diffusion \
+  --num-bins 192 \
+  --epochs 20 \
+  --rollout-horizon 20
+```
+
+Choose the diffusion domain independently of the mechanism:
+
+```bash
+venv/bin/python -m interactiondynamics.train quick \
+  --dataset synthetic \
+  --synthetic-task diffusion \
+  --synthetic-topology doorway
+```
+
+Available diffusion topologies are `ring` (default), `grid`, `torus`,
+`doorway`, and `swiss_cheese`.
+
+#### Second-order — inertia, velocity, and waves
+
+| Task family | Canonical task(s) | Domain and mechanism |
+| --- | --- | --- |
+| Local driven oscillator | `temporal_memory`, `node_temporal_regression`, `node_temporal_state`, `edge_temporal_state`, `next_dst_temporal_ranking` | Independent self-loop systems with AR(2)-style state, velocity carry-over, and forcing; **not** graph propagation. |
+| Conservative local oscillator | `conservative_oscillator` | Lightly driven, long-memory second-order oscillator. |
+| Ring wave | `wave` | Driven wave propagation with neighbor coupling on a ring. |
+| Topological grid waves | `wave_grid`, `wave_torus`, `wave_doorway`, `wave_swiss_cheese` | Second-order propagation over bounded, periodic, barrier, and perforated grid topologies. |
+
+The grid-wave tasks use sparse local drives and topology-specific neighbor
+events. `wave_grid` has reflecting outer boundaries, `wave_torus` wraps
+both axes, `wave_doorway` adds a wall with a three-node aperture, and
+`wave_swiss_cheese` removes circular patches of nodes.
 
 ### CLI reference
 
@@ -94,6 +128,7 @@ Common dataset flags:
 
 - `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand.
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
+- `--synthetic-topology {ring,grid,torus,doorway,swiss_cheese}`: choose the domain for `diffusion`; the default is `ring`.
 - `--synthetic-num-nodes N`: override synthetic node count.
 - `--synthetic-events-per-bin N`: override synthetic event count per bin for set-style tasks.
 - `--num-bins N`: override the number of simulated synthetic time bins.
@@ -101,14 +136,15 @@ Common dataset flags:
 - `--ift-variants [VARIANT ...]`: on `smoke` or `quick`, replace the default `ift/ift_update` run with an IFT sweep over one or more variant families from `{generic, linear, direct, auto}`. Pass no variant names to sweep them all. Using this flag auto-selects the synthetic dataset.
 - `--ift-orders [1 2 ...]`: optionally restrict the IFT sweep to first-order, second-order, or both. Defaults to `1 2` when IFT variants are selected.
 - `--ift-history-steps [1 2 3 ...]`: optionally restrict the history readout sweep for the `auto` family. Defaults to `1 2 3`.
-- `--ift-self-rollout`: add the ring-/grid-wave IFT2 history model evaluated with self-generated neighbor signals and no future external drives.
-- `--ift-free-rollout`: add the ring-/grid-wave IFT2 history model evaluated with observed neighbor signals but no future external drives. Together with `--ift-self-rollout`, this separates missing forcing from self-generated relational inputs.
+- `--ift-self-rollout`: add the IFT2 history model evaluated with self-generated neighbor signals and no future external drives. Supported for diffusion and wave topologies.
+- `--ift-free-rollout`: add the IFT2 history model evaluated with observed neighbor signals but no future external drives. Supported for diffusion and wave topologies. Together with `--ift-self-rollout`, this separates missing forcing from self-generated relational inputs.
 
 Common training flags:
 
 - `--max-runs N`: cap the number of runs executed after filtering the preset.
 - `--epochs N`: override the preset epoch count.
 - `--rollout-horizon K`: set rollout evaluation horizon for regression tasks.
+- Rollout JSONL records include `rollout_val.rollout_by_step` and `rollout_test.rollout_by_step`, keyed by relative step (`"1"`, `"2"`, …). Each entry contains the per-step regression metrics; the existing aggregate rollout fields are retained for compatibility.
 - `--rollout-train-steps K`: for compatible IFT2 history-readout runs, optimize an average loss over `K` differentiable autoregressive steps before each optimizer update. With `--ift-self-rollout`, regenerated neighbor signals and removed future drives are used during this training unroll too. The default, `1`, is the original one-step trainer.
 - `--use-node-scorer`: force-enable the auxiliary node scorer.
 - `--node-loss-weight W`: weight for the node prediction loss.

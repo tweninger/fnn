@@ -659,7 +659,7 @@ def run_one_experiment(
     base_train_cfg: TrainConfig,
     run: SweepRun,
     build_model_fn: Callable[[Any, ModelConfig], torch.nn.Module],
-    epochs: int = 10,
+    epochs: int = 5,
     objective_metric: Optional[TaskMetricSpec] = None,
     eval_slices: Optional[EvalSlices] = None,
     save_jsonl_path: Optional[str] = None,

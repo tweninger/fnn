@@ -193,6 +193,38 @@ def test_grid_wave_topologies_materialize_distinct_structured_event_sets():
     assert event_counts["wave_swiss_cheese"] < event_counts["wave_grid"]
 
 
+def test_diffusion_topology_selector_materializes_grid_derived_domains():
+    graph_types = {
+        "grid": "grid",
+        "torus": "torus_grid",
+        "doorway": "grid_doorway",
+        "swiss_cheese": "grid_swiss_cheese",
+    }
+    event_counts: dict[str, int] = {}
+    for topology, graph_type in graph_types.items():
+        dataset = SyntheticDataset(
+            SyntheticDatasetConfig(
+                task="diffusion",
+                diffusion_topology=topology,
+                num_nodes=64,
+                num_bins=16,
+                seed=3,
+            )
+        )
+        first_batch = next(iter(dataset.bins("train")))
+        targets = next(iter(dataset.edge_targets("train") or []))
+        assert dataset.spec().extra is not None
+        assert dataset.spec().extra["task_axes"]["graph_type"] == graph_type
+        assert first_batch.features is not None
+        assert first_batch.features.shape[1] == 2
+        assert torch.isfinite(targets.targets).all()
+        event_counts[topology] = first_batch.num_events
+
+    assert event_counts["torus"] > event_counts["grid"]
+    assert event_counts["doorway"] < event_counts["grid"]
+    assert event_counts["swiss_cheese"] < event_counts["grid"]
+
+
 def test_self_generated_grid_wave_events_retain_topology_and_remove_external_drive():
     template = EventBatch(
         src=torch.tensor([0, 1, 0, 1]),

@@ -242,7 +242,10 @@ def test_print_ift_diagnostic_footer_uses_node_metrics_for_node_regression(
                 "val": {"node_r2": 0.61, "persistent_node_r2": 0.42},
                 "test": {"node_r2": 0.57},
                 "rollout_val": {"rollout_node_r2": 0.48},
-                "rollout_test": {"rollout_node_r2": 0.44},
+                "rollout_test": {
+                    "rollout_node_r2": 0.44,
+                    "rollout_persistent_node_r2": 0.42,
+                },
                 "train_step": {
                     "learned_kappa_mean": 1.2,
                     "gamma_mean": 0.1,
