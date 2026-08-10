@@ -875,6 +875,8 @@ def run_one_experiment(
         )
         rollout_val_stats: dict[str, float] = {}
         rollout_test_stats: dict[str, float] = {}
+        rollout_intervention_val_stats: dict[str, float] = {}
+        rollout_intervention_test_stats: dict[str, float] = {}
         if (
             train_edge_targets is not None and train_cfg.edge_target_type == "regression"
         ) or (
@@ -896,6 +898,26 @@ def run_one_experiment(
                 train_cfg,
                 horizon=rollout_horizon,
             )
+            cutoff = getattr(train_cfg, "synthetic_drive_cutoff", None)
+            if cutoff is not None:
+                rollout_intervention_val_stats = evaluate_k_step_rollout(
+                    model,
+                    ds.bins("val"),
+                    val_node_targets,
+                    val_edge_targets,
+                    train_cfg,
+                    horizon=rollout_horizon,
+                    diffusion_drive_cutoff=int(cutoff),
+                )
+                rollout_intervention_test_stats = evaluate_k_step_rollout(
+                    model,
+                    ds.bins("test"),
+                    test_node_targets,
+                    test_edge_targets,
+                    train_cfg,
+                    horizon=rollout_horizon,
+                    diffusion_drive_cutoff=int(cutoff),
+                )
 
         snapshot = {
             "epoch": epoch,
@@ -905,6 +927,8 @@ def run_one_experiment(
             "test": test_stats,
             "rollout_val": rollout_val_stats,
             "rollout_test": rollout_test_stats,
+            "rollout_intervention_val": rollout_intervention_val_stats,
+            "rollout_intervention_test": rollout_intervention_test_stats,
             "readout": _linear_hvf_readout_snapshot(model),
         }
 
@@ -1002,6 +1026,16 @@ def run_one_experiment(
                     f"           rollout@{rollout_horizon}"
                     f" | {' | '.join(rollout_parts)}"
                 )
+        if rollout_intervention_val_stats:
+            intervention_val = format_rollout_metric_bundle(rollout_intervention_val_stats, stem="edge")
+            intervention_test = format_rollout_metric_bundle(rollout_intervention_test_stats, stem="edge")
+            cutoff = getattr(train_cfg, "synthetic_drive_cutoff", None)
+            print(
+                f"           intervention@{rollout_horizon}"
+                f" | drive through step {cutoff}"
+                f" | val edge {intervention_val or 'n/a'}"
+                f" | test edge {intervention_test or 'n/a'}"
+            )
         readout = snapshot.get("readout", {})
         if readout:
             coeff_str = (

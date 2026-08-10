@@ -84,6 +84,15 @@ def _build_common_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of simulated time bins for synthetic datasets.",
     )
+    data_group.add_argument(
+        "--synthetic-drive-cutoff",
+        type=int,
+        default=None,
+        help=(
+            "Test-only diffusion intervention: keep the normal drive for this many "
+            "rollout steps, then evaluate against a counterfactual zero-drive suffix."
+        ),
+    )
     data_group.add_argument("--seed", type=int, default=0, help="Random seed for simulated datasets.")
     data_group.add_argument(
         "--ift-variants",
@@ -924,6 +933,12 @@ def main() -> None:
     base_train_cfg.edge_target_scale = str(args.edge_target_scale)
     base_train_cfg.prediction_mode = _resolve_prediction_mode(str(args.prediction_mode))
     base_train_cfg.rollout_horizon = int(args.rollout_horizon)
+    if args.synthetic_drive_cutoff is not None:
+        if args.dataset != "synthetic" or args.synthetic_task != "diffusion":
+            raise ValueError("--synthetic-drive-cutoff is currently implemented only for synthetic diffusion.")
+        if args.synthetic_drive_cutoff < 1:
+            raise ValueError("--synthetic-drive-cutoff must be at least one rollout step.")
+    base_train_cfg.synthetic_drive_cutoff = args.synthetic_drive_cutoff
     if args.rollout_train_steps < 1:
         raise ValueError("--rollout-train-steps must be at least 1.")
     base_train_cfg.rollout_train_steps = int(args.rollout_train_steps)

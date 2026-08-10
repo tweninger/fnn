@@ -149,6 +149,71 @@ def _remove_wave_drive_events(template: EventBatch) -> EventBatch:
     return EventBatch(src=template.src, dst=template.dst, features=features, t=template.t)
 
 
+def _counterfactual_diffusion_events(
+    template: EventBatch,
+    *,
+    predicted_field: torch.Tensor,
+    drive_enabled: bool,
+) -> EventBatch:
+    """Regenerate diffusion messages from the closed-loop field and optional drive."""
+    if template.features is None or template.features.dim() != 2 or template.features.size(1) < 2:
+        raise ValueError("diffusion intervention rollouts require [signal, is_drive] event features.")
+    features = template.features.clone()
+    src = template.src.to(device=predicted_field.device, dtype=torch.long)
+    is_drive = features[:, 1].to(device=features.device) > 0.5
+    features[~is_drive, 0] = predicted_field[src[~is_drive]].to(
+        device=features.device,
+        dtype=features.dtype,
+    )
+    if not drive_enabled:
+        features[is_drive, 0] = 0.0
+    return EventBatch(src=template.src, dst=template.dst, features=features, t=template.t)
+
+
+def _diffusion_counterfactual_targets(
+    events_seq: list[EventBatch],
+    *,
+    start_idx: int,
+    horizon: int,
+    cutoff: int,
+    initial_field: torch.Tensor,
+) -> dict[int, torch.Tensor]:
+    """Simulate the synthetic first-order diffusion law after an intervention.
+
+    The reference starts at the observed field for each rollout window.  It
+    follows the original external drive for the first ``cutoff`` prediction
+    steps, then sets it to zero while retaining the same graph topology.
+    """
+    field = initial_field.detach().clone()
+    targets: dict[int, torch.Tensor] = {}
+    for relative_step in range(1, horizon + 1):
+        template = events_seq[start_idx + relative_step - 1]
+        if template.features is None or template.features.dim() != 2 or template.features.size(1) < 2:
+            raise ValueError("diffusion intervention rollouts require [signal, is_drive] event features.")
+        features = template.features.to(device=field.device, dtype=field.dtype)
+        src = template.src.to(device=field.device, dtype=torch.long)
+        dst = template.dst.to(device=field.device, dtype=torch.long)
+        is_drive = features[:, 1] > 0.5
+        graph_mask = ~is_drive
+        neighbor_sum = torch.zeros_like(field)
+        degree = torch.zeros_like(field)
+        neighbor_sum.index_add_(0, dst[graph_mask], field[src[graph_mask]])
+        degree.index_add_(0, dst[graph_mask], torch.ones_like(dst[graph_mask], dtype=field.dtype))
+        neighbor_mean = torch.where(degree > 0, neighbor_sum / degree.clamp_min(1.0), torch.zeros_like(field))
+        drive = _extract_rollout_drive(
+            template,
+            num_nodes=field.numel(),
+            drive_feature_idx=0,
+            device=field.device,
+            dtype=field.dtype,
+        )
+        if relative_step > cutoff:
+            drive.zero_()
+        field = torch.clamp(0.58 * field + 0.36 * neighbor_mean + 0.25 * drive, -3.0, 3.0)
+        targets[relative_step] = field.detach().clone()
+    return targets
+
+
 def _print_rollout_trace(
     *,
     coeffs: tuple[float, float, float],
@@ -300,10 +365,13 @@ def evaluate_k_step_rollout(
     cfg,
     *,
     horizon: int = 5,
+    diffusion_drive_cutoff: Optional[int] = None,
 ) -> Dict[str, Any]:
     model.eval()
     device = torch.device(cfg.device)
     horizon = max(1, int(horizon))
+    if diffusion_drive_cutoff is not None and diffusion_drive_cutoff < 1:
+        raise ValueError("diffusion_drive_cutoff must be at least one rollout step.")
 
     events_seq = [events.to(device) for events in bins]
     node_target_seq = None if node_targets is None else [target.to(device) for target in node_targets]
@@ -389,6 +457,17 @@ def evaluate_k_step_rollout(
             continue
         rollout_prev_node = None if node_target_seq is None else node_target_seq[start_idx]
         rollout_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx].targets
+        counterfactual_targets = (
+            None
+            if diffusion_drive_cutoff is None or rollout_prev_edge is None
+            else _diffusion_counterfactual_targets(
+                events_seq,
+                start_idx=start_idx,
+                horizon=horizon,
+                cutoff=diffusion_drive_cutoff,
+                initial_field=rollout_prev_edge,
+            )
+        )
         rollout_prev_prev_prev_node = (
             None if node_target_seq is None or start_idx < 2 else node_target_seq[start_idx - 2]
         )
@@ -441,10 +520,15 @@ def evaluate_k_step_rollout(
                         ],
                     )
                 edge_batch = edge_target_seq[idx]
+                edge_target = (
+                    edge_batch.targets
+                    if counterfactual_targets is None
+                    else counterfactual_targets[idx - start_idx]
+                )
                 edge_pred = model.score(curr_state, edge_batch.events)
-                edge_view = _edge_regression_readout(edge_pred, edge_batch.targets, rollout_prev_edge, cfg)
+                edge_view = _edge_regression_readout(edge_pred, edge_target, rollout_prev_edge, cfg)
                 final_edge_pred_raw = edge_view.raw_preds.detach()
-                final_edge_true_raw = edge_batch.targets
+                final_edge_true_raw = edge_target
                 relative_step = idx - start_idx
                 edge_step_metrics = edge_regression_metrics(final_edge_pred_raw, final_edge_true_raw)
                 edge_step_loss = torch.nn.functional.mse_loss(final_edge_pred_raw, final_edge_true_raw)
@@ -528,7 +612,14 @@ def evaluate_k_step_rollout(
                     ],
                 )
                 step_events = events_seq[idx]
-                if self_generated_rollout and rollout_prev_edge is not None:
+                relative_step = idx - start_idx
+                if diffusion_drive_cutoff is not None and rollout_prev_edge is not None:
+                    step_events = _counterfactual_diffusion_events(
+                        step_events,
+                        predicted_field=rollout_prev_edge,
+                        drive_enabled=relative_step < diffusion_drive_cutoff,
+                    )
+                elif self_generated_rollout and rollout_prev_edge is not None:
                     step_events = _self_generate_grid_wave_events(
                         step_events,
                         predicted_field=rollout_prev_edge,

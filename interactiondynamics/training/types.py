@@ -61,6 +61,9 @@ class TrainConfig:
     update_before_score: bool = True
     debug: bool = False
     rollout_horizon: int = 5
+    # Optional test-only intervention: retain the synthetic diffusion drive for
+    # this many rollout steps, then set it to zero in the counterfactual world.
+    synthetic_drive_cutoff: Optional[int] = None
     # Number of differentiable, autoregressive prediction steps per optimizer
     # update. One preserves the original one-step teacher-forced trainer.
     rollout_train_steps: int = 1

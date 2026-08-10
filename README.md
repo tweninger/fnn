@@ -129,6 +129,7 @@ Common dataset flags:
 - `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand.
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
 - `--synthetic-topology {ring,grid,torus,doorway,swiss_cheese}`: choose the domain for `diffusion`; the default is `ring`.
+- `--synthetic-drive-cutoff T`: retain the regular diffusion drive for the first `T` steps of each evaluation rollout, then compare predictions with a simulator-generated zero-drive suffix. Training data and ordinary rollout metrics are unchanged.
 - `--synthetic-num-nodes N`: override synthetic node count.
 - `--synthetic-events-per-bin N`: override synthetic event count per bin for set-style tasks.
 - `--num-bins N`: override the number of simulated synthetic time bins.
