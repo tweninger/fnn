@@ -149,15 +149,15 @@ def _remove_wave_drive_events(template: EventBatch) -> EventBatch:
     return EventBatch(src=template.src, dst=template.dst, features=features, t=template.t)
 
 
-def _counterfactual_diffusion_events(
+def _counterfactual_field_events(
     template: EventBatch,
     *,
     predicted_field: torch.Tensor,
     drive_enabled: bool,
 ) -> EventBatch:
-    """Regenerate diffusion messages from the closed-loop field and optional drive."""
+    """Regenerate graph messages from the closed-loop field and optional drive."""
     if template.features is None or template.features.dim() != 2 or template.features.size(1) < 2:
-        raise ValueError("diffusion intervention rollouts require [signal, is_drive] event features.")
+        raise ValueError("field intervention rollouts require [signal, is_drive] event features.")
     features = template.features.clone()
     src = template.src.to(device=predicted_field.device, dtype=torch.long)
     is_drive = features[:, 1].to(device=features.device) > 0.5
@@ -170,26 +170,30 @@ def _counterfactual_diffusion_events(
     return EventBatch(src=template.src, dst=template.dst, features=features, t=template.t)
 
 
-def _diffusion_counterfactual_targets(
+def _field_counterfactual_targets(
     events_seq: list[EventBatch],
     *,
     start_idx: int,
     horizon: int,
     cutoff: int,
     initial_field: torch.Tensor,
+    previous_field: Optional[torch.Tensor],
+    dynamics: str,
+    topology: str,
 ) -> dict[int, torch.Tensor]:
-    """Simulate the synthetic first-order diffusion law after an intervention.
+    """Simulate a synthetic field law after an external-drive intervention.
 
     The reference starts at the observed field for each rollout window.  It
     follows the original external drive for the first ``cutoff`` prediction
     steps, then sets it to zero while retaining the same graph topology.
     """
     field = initial_field.detach().clone()
+    field_prev = None if previous_field is None else previous_field.detach().clone()
     targets: dict[int, torch.Tensor] = {}
     for relative_step in range(1, horizon + 1):
         template = events_seq[start_idx + relative_step - 1]
         if template.features is None or template.features.dim() != 2 or template.features.size(1) < 2:
-            raise ValueError("diffusion intervention rollouts require [signal, is_drive] event features.")
+            raise ValueError("field intervention rollouts require [signal, is_drive] event features.")
         features = template.features.to(device=field.device, dtype=field.dtype)
         src = template.src.to(device=field.device, dtype=torch.long)
         dst = template.dst.to(device=field.device, dtype=torch.long)
@@ -209,7 +213,23 @@ def _diffusion_counterfactual_targets(
         )
         if relative_step > cutoff:
             drive.zero_()
-        field = torch.clamp(0.58 * field + 0.36 * neighbor_mean + 0.25 * drive, -3.0, 3.0)
+        if dynamics == "diffusion":
+            field_next = 0.58 * field + 0.36 * neighbor_mean + 0.25 * drive
+            clip = 3.0
+        else:
+            if field_prev is None:
+                raise ValueError("Second-order field intervention requires the preceding observed target.")
+            laplacian = neighbor_sum - degree * field
+            if dynamics == "wave":
+                a, b, coupling, drive_scale = (1.86, -0.92, 0.10, 0.08) if topology == "ring" else (1.88, -0.93, 0.075, 0.17)
+            elif dynamics == "coupled_oscillator":
+                a, b, coupling, drive_scale = 1.66, -0.84, 0.055, 0.12
+            else:
+                raise ValueError(f"Unsupported field dynamic for intervention: {dynamics!r}.")
+            field_next = a * field + b * field_prev + coupling * laplacian + drive_scale * drive
+            field_prev = field
+            clip = 4.0
+        field = torch.clamp(field_next, -clip, clip)
         targets[relative_step] = field.detach().clone()
     return targets
 
@@ -365,13 +385,18 @@ def evaluate_k_step_rollout(
     cfg,
     *,
     horizon: int = 5,
-    diffusion_drive_cutoff: Optional[int] = None,
+    drive_cutoff: Optional[int] = None,
+    field_dynamics: Optional[str] = None,
+    field_topology: str = "ring",
+    teacher_forced_readout: bool = False,
 ) -> Dict[str, Any]:
     model.eval()
     device = torch.device(cfg.device)
     horizon = max(1, int(horizon))
-    if diffusion_drive_cutoff is not None and diffusion_drive_cutoff < 1:
-        raise ValueError("diffusion_drive_cutoff must be at least one rollout step.")
+    if drive_cutoff is not None and drive_cutoff < 1:
+        raise ValueError("drive_cutoff must be at least one rollout step.")
+    if drive_cutoff is not None and field_dynamics not in {"diffusion", "wave", "coupled_oscillator"}:
+        raise ValueError("Drive-cutoff rollouts require a supported synthetic field dynamic.")
 
     events_seq = [events.to(device) for events in bins]
     node_target_seq = None if node_targets is None else [target.to(device) for target in node_targets]
@@ -457,17 +482,6 @@ def evaluate_k_step_rollout(
             continue
         rollout_prev_node = None if node_target_seq is None else node_target_seq[start_idx]
         rollout_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx].targets
-        counterfactual_targets = (
-            None
-            if diffusion_drive_cutoff is None or rollout_prev_edge is None
-            else _diffusion_counterfactual_targets(
-                events_seq,
-                start_idx=start_idx,
-                horizon=horizon,
-                cutoff=diffusion_drive_cutoff,
-                initial_field=rollout_prev_edge,
-            )
-        )
         rollout_prev_prev_prev_node = (
             None if node_target_seq is None or start_idx < 2 else node_target_seq[start_idx - 2]
         )
@@ -476,6 +490,20 @@ def evaluate_k_step_rollout(
         )
         rollout_prev_prev_node = None if node_target_seq is None else node_target_seq[start_idx - 1]
         rollout_prev_prev_edge = None if edge_target_seq is None else edge_target_seq[start_idx - 1].targets
+        counterfactual_targets = (
+            None
+            if drive_cutoff is None or rollout_prev_edge is None
+            else _field_counterfactual_targets(
+                events_seq,
+                start_idx=start_idx,
+                horizon=horizon,
+                cutoff=drive_cutoff,
+                initial_field=rollout_prev_edge,
+                previous_field=rollout_prev_prev_edge,
+                dynamics=cast(str, field_dynamics),
+                topology=field_topology,
+            )
+        )
         persistent_prev_node = rollout_prev_node
         persistent_prev_edge = rollout_prev_edge
         curr_state = rollout_state.clone(detach=True)
@@ -498,36 +526,59 @@ def evaluate_k_step_rollout(
         for idx in range(score_start_idx, end_idx + 1):
             prior_rollout_prev_edge = rollout_prev_edge
             prior_rollout_prev_node = rollout_prev_node
+            relative_step = idx - start_idx
             if edge_target_seq is not None:
+                readout_teacher_forced = teacher_forced_readout and (
+                    drive_cutoff is None or relative_step <= drive_cutoff
+                )
+                if readout_teacher_forced:
+                    observed_current_edge = edge_target_seq[idx - 1].targets
+                    observed_previous_edge = (
+                        None if idx < 2 else edge_target_seq[idx - 2].targets
+                    )
+                    observed_history_edge = [
+                        edge_target_seq[history_idx].targets
+                        for history_idx in range(max(0, idx - 3), idx)
+                    ]
+                    readout_current_edge = observed_current_edge
+                    readout_previous_edge = observed_previous_edge
+                else:
+                    observed_history_edge = [
+                        target
+                        for target in (
+                            rollout_prev_prev_prev_edge,
+                            rollout_prev_prev_edge,
+                            rollout_prev_edge,
+                        )
+                        if target is not None
+                    ]
+                    readout_current_edge = rollout_prev_edge
+                    readout_previous_edge = rollout_prev_prev_edge
                 if (
                     autonomous_readout
                     and curr_state is not None
-                    and rollout_prev_edge is not None
-                    and rollout_prev_prev_edge is not None
+                    and not readout_teacher_forced
+                    and readout_current_edge is not None
+                    and readout_previous_edge is not None
                 ):
                     _set_autonomous_rollout_readout(
                         curr_state,
-                        y_prev=rollout_prev_prev_edge,
-                        y_t=rollout_prev_edge,
+                        y_prev=readout_previous_edge,
+                        y_t=readout_current_edge,
                     )
                 if curr_state is not None:
                     _set_rollout_history(
                         curr_state,
-                        history_values=[
-                            rollout_prev_prev_prev_edge,
-                            rollout_prev_prev_edge,
-                            rollout_prev_edge,
-                        ],
+                        history_values=observed_history_edge,
                     )
                 edge_batch = edge_target_seq[idx]
-                relative_step = idx - start_idx
                 edge_target = (
                     edge_batch.targets
-                    if counterfactual_targets is None or relative_step <= diffusion_drive_cutoff
+                    if counterfactual_targets is None or relative_step <= drive_cutoff
                     else counterfactual_targets[idx - start_idx]
                 )
                 edge_pred = model.score(curr_state, edge_batch.events)
-                edge_view = _edge_regression_readout(edge_pred, edge_target, rollout_prev_edge, cfg)
+                edge_view = _edge_regression_readout(edge_pred, edge_target, readout_current_edge, cfg)
                 final_edge_pred_raw = edge_view.raw_preds.detach()
                 final_edge_true_raw = edge_target
                 edge_step_metrics = edge_regression_metrics(final_edge_pred_raw, final_edge_true_raw)
@@ -569,7 +620,11 @@ def evaluate_k_step_rollout(
                                 "ift_y_next": final_edge_pred_raw.detach().clone(),
                             }
                         )
-                rollout_prev_edge = final_edge_pred_raw
+                # In the driven condition, the next decoder state is the
+                # observed field, just as future event bins are observed.
+                # Once an intervention begins, predictions become the state
+                # that is fed back into the free counterfactual trajectory.
+                rollout_prev_edge = edge_target if readout_teacher_forced else final_edge_pred_raw
 
             if node_target_seq is not None and getattr(model, "node_scorer", None) is not None:
                 node_pred = model.score_nodes(curr_state)
@@ -597,28 +652,42 @@ def evaluate_k_step_rollout(
                 rollout_prev_node = final_node_pred_raw
 
             if idx < end_idx:
-                _stash_observed_history(
-                    curr_state,
-                    current_target=rollout_prev_edge if rollout_prev_edge is not None else rollout_prev_node,
-                    prev_target=rollout_prev_prev_edge if rollout_prev_prev_edge is not None else rollout_prev_prev_node,
-                    history_targets=[
+                retain_observed_history = teacher_forced_readout and (
+                    drive_cutoff is None or relative_step <= drive_cutoff
+                )
+                if retain_observed_history and edge_target_seq is not None:
+                    next_current_edge = edge_target_seq[idx].targets
+                    next_previous_edge = edge_target_seq[idx - 1].targets
+                    next_history_edge = [
+                        edge_target_seq[history_idx].targets
+                        for history_idx in range(max(0, idx - 2), idx + 1)
+                    ]
+                else:
+                    next_current_edge = rollout_prev_edge
+                    next_previous_edge = rollout_prev_prev_edge
+                    next_history_edge = [
                         target
                         for target in (
-                            rollout_prev_prev_prev_edge if rollout_prev_edge is not None else rollout_prev_prev_prev_node,
-                            rollout_prev_prev_edge if rollout_prev_edge is not None else rollout_prev_prev_node,
-                            rollout_prev_edge if rollout_prev_edge is not None else rollout_prev_node,
+                            rollout_prev_prev_prev_edge,
+                            rollout_prev_prev_edge,
+                            rollout_prev_edge,
                         )
                         if target is not None
-                    ],
+                    ]
+                _stash_observed_history(
+                    curr_state,
+                    current_target=next_current_edge if next_current_edge is not None else rollout_prev_node,
+                    prev_target=next_previous_edge if next_current_edge is not None else rollout_prev_prev_node,
+                    history_targets=next_history_edge,
                 )
                 step_events = events_seq[idx]
                 relative_step = idx - start_idx
                 if (
-                    diffusion_drive_cutoff is not None
-                    and relative_step >= diffusion_drive_cutoff
+                    drive_cutoff is not None
+                    and relative_step >= drive_cutoff
                     and rollout_prev_edge is not None
                 ):
-                    step_events = _counterfactual_diffusion_events(
+                    step_events = _counterfactual_field_events(
                         step_events,
                         predicted_field=rollout_prev_edge,
                         drive_enabled=False,

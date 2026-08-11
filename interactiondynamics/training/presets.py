@@ -27,6 +27,7 @@ IFT_VARIANT_CHOICES = ("generic", "linear", "direct", "auto")
 IFT_ORDER_CHOICES = (1, 2)
 IFT_HISTORY_STEP_CHOICES = (1, 2, 3)
 GRID_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
+TOPOLOGY_SELECTABLE_FIELD_TASKS = {"diffusion", "wave", "coupled_oscillator"}
 # Each baseline retains its intended architecture pairing.  In particular,
 # Hopfield aggregation is evaluated with its Hopfield update, while LNN/HNN
 # use the Set Transformer event encoder rather than arbitrary hybrid pairs.
@@ -289,8 +290,8 @@ def build_ift_variant_runs(
                     prediction_mode=cast(PredictionMode, "delta"),
                 )
     if self_rollout or free_rollout:
-        if task_name not in {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
-            raise ValueError("Free and self IFT rollouts are implemented only for diffusion and wave tasks.")
+        if task_name not in {"diffusion", "wave", "coupled_oscillator", "wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
+            raise ValueError("Free and self IFT rollouts are implemented only for diffusion, wave, and coupled_oscillator tasks.")
         if 2 not in selected_orders:
             raise ValueError("Free and self IFT rollouts require including second-order IFT via --ift-orders 2.")
     if free_rollout:
@@ -491,8 +492,8 @@ def build_synthetic_dataset_config(
 ) -> SyntheticDatasetConfig:
     task = str(args.synthetic_task)
     topology = getattr(args, "synthetic_topology", None)
-    if topology is not None and task != "diffusion":
-        raise ValueError("--synthetic-topology is supported only with --synthetic-task diffusion.")
+    if topology is not None and task not in TOPOLOGY_SELECTABLE_FIELD_TASKS:
+        raise ValueError("--synthetic-topology is supported only with diffusion, wave, and coupled_oscillator dynamics.")
     num_nodes, default_bins, default_events = _synthetic_default_sizes(preset)
     dataset_num_bins = int(default_bins if args.num_bins is None else args.num_bins)
     dataset_num_nodes = int(
@@ -503,16 +504,16 @@ def build_synthetic_dataset_config(
         if args.synthetic_events_per_bin is None
         else args.synthetic_events_per_bin
     )
-    if (task in GRID_WAVE_TASKS or (task == "diffusion" and topology not in {None, "ring"})) and args.synthetic_num_nodes is None:
+    if (task in GRID_WAVE_TASKS or (task in TOPOLOGY_SELECTABLE_FIELD_TASKS and topology not in {None, "ring"})) and args.synthetic_num_nodes is None:
         # Keep the default benchmark a square lattice at every preset size.
         dataset_num_nodes = {"smoke": 36, "quick": 64, "sweep": 100}[preset]
     return SyntheticDatasetConfig(
-        name=f"synthetic_{task}_{topology or 'ring'}_{preset}" if task == "diffusion" else f"synthetic_{task}_{preset}",
+        name=f"synthetic_{task}_{topology or 'ring'}_{preset}" if task in TOPOLOGY_SELECTABLE_FIELD_TASKS else f"synthetic_{task}_{preset}",
         task=task,
         num_nodes=dataset_num_nodes,
         num_bins=dataset_num_bins,
         events_per_bin=dataset_events,
-        diffusion_topology=topology,
+        field_topology=topology,
         seed=int(args.seed),
         device=device,
     )

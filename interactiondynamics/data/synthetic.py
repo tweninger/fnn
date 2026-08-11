@@ -70,7 +70,38 @@ class SyntheticTaskSpec:
 
 
 IFT_PAIR = ("ift", "ift_update")
-DIFFUSION_TOPOLOGY_CHOICES = ("ring", "grid", "torus", "doorway", "swisscheese")
+FIELD_TOPOLOGY_CHOICES = ("ring", "grid", "torus", "doorway", "swisscheese")
+# Backward-compatible import name for callers that used the original
+# diffusion-only selector before field dynamics and topology were separated.
+DIFFUSION_TOPOLOGY_CHOICES = FIELD_TOPOLOGY_CHOICES
+
+
+def _second_order_field_task(
+    name: str,
+    *,
+    description: str,
+    focus: str,
+    dynamics_type: str,
+    generator_family: str,
+) -> SyntheticTaskSpec:
+    return SyntheticTaskSpec(
+        name=name,
+        description=description,
+        focus=focus,
+        event_dim=2,
+        recommended_pairs=(IFT_PAIR, ("sum", "hnn"), ("sum", "lnn"), ("sum", "tgn_gru")),
+        metric_family="edge_regression",
+        generator_family=generator_family,
+        graph_type="ring",
+        dynamics_type=dynamics_type,
+        event_structure="topology_neighbor_and_sparse_drive_events",
+        temporal_mode="rollout",
+        feature_schema=("signal", "is_drive"),
+        supported_metrics=("edge_mse", "edge_r2", "persistent_edge_r2", "rollout_edge_r2", "rollout_edge_nrmse", "rollout_persistent_edge_r2"),
+        primary_metric_path="rollout_val.rollout_edge_r2",
+        primary_metric_goal="max",
+        summary_metric_paths=("val.edge_r2", "rollout_val.rollout_edge_r2", "rollout_val.rollout_persistent_edge_r2", "rollout_test.rollout_edge_r2", "rollout_test.rollout_persistent_edge_r2"),
+    )
 
 
 def _grid_wave_task(
@@ -684,6 +715,13 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
             "rollout_test.rollout_persistent_edge_r2",
         ),
     ),
+    "coupled_oscillator": _second_order_field_task(
+        "coupled_oscillator",
+        description="Predict a driven, damped harmonic oscillator field coupled over the selected graph topology.",
+        focus="Second-order local restoring dynamics separated from topology-dependent coupling.",
+        dynamics_type="coupled_oscillator",
+        generator_family="coupled_oscillator_field",
+    ),
     "wave_grid": _grid_wave_task(
         "wave_grid",
         description="Predict a driven second-order wave on a rectangular grid with reflecting outer boundaries.",
@@ -949,6 +987,7 @@ class SyntheticDatasetConfig:
     num_bins: int = 120
     events_per_bin: int = 256
     diffusion_topology: Optional[str] = None
+    field_topology: Optional[str] = None
     split_fracs: tuple[float, float, float] = (0.6, 0.2, 0.2)
     seed: int = 0
     device: Optional[torch.device] = None
@@ -961,12 +1000,15 @@ class SyntheticDataset(EventStreamDataset):
                 f"Unknown synthetic task: {cfg.task}. "
                 f"Available: {', '.join(sorted(SYNTHETIC_TASKS))}"
             )
-        if cfg.diffusion_topology is not None:
-            if cfg.task != "diffusion":
-                raise ValueError("diffusion_topology is supported only for the diffusion task.")
-            if cfg.diffusion_topology not in DIFFUSION_TOPOLOGY_CHOICES:
-                allowed = ", ".join(DIFFUSION_TOPOLOGY_CHOICES)
-                raise ValueError(f"Unknown diffusion topology {cfg.diffusion_topology!r}. Allowed: {allowed}.")
+        if cfg.diffusion_topology is not None and cfg.field_topology is not None:
+            raise ValueError("Specify only field_topology; diffusion_topology is a legacy diffusion-only alias.")
+        selected_topology = cfg.field_topology or cfg.diffusion_topology
+        if selected_topology is not None:
+            if cfg.task not in {"diffusion", "wave", "coupled_oscillator"}:
+                raise ValueError("Topology selection is supported only for diffusion, wave, and coupled_oscillator.")
+            if selected_topology not in FIELD_TOPOLOGY_CHOICES:
+                allowed = ", ".join(FIELD_TOPOLOGY_CHOICES)
+                raise ValueError(f"Unknown field topology {selected_topology!r}. Allowed: {allowed}.")
         self.cfg = cfg
         self._task = SYNTHETIC_TASKS[cfg.task]
         self._rng = np.random.default_rng(int(cfg.seed))
@@ -1022,7 +1064,10 @@ class SyntheticDataset(EventStreamDataset):
             bins, edge_targets = self._materialize_diffusion()
             return bins, None, edge_targets
         if self.cfg.task == "wave":
-            bins, edge_targets = self._materialize_wave()
+            bins, edge_targets = self._materialize_wave_field(self._selected_field_topology())
+            return bins, None, edge_targets
+        if self.cfg.task == "coupled_oscillator":
+            bins, edge_targets = self._materialize_coupled_oscillator_field(self._selected_field_topology())
             return bins, None, edge_targets
         if self.cfg.task in {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
             bins, edge_targets = self._materialize_grid_wave(self.cfg.task)
@@ -1275,10 +1320,22 @@ class SyntheticDataset(EventStreamDataset):
         return bins, edge_targets
 
     def _materialize_diffusion(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
-        topology = self.cfg.diffusion_topology or "ring"
+        topology = self._selected_field_topology()
         if topology == "ring":
             return self._materialize_ring_diffusion()
         return self._materialize_grid_diffusion(topology)
+
+    def _selected_field_topology(self) -> str:
+        return self.cfg.field_topology or self.cfg.diffusion_topology or "ring"
+
+    @staticmethod
+    def _topology_task_name(topology: str) -> str:
+        return {
+            "grid": "wave_grid",
+            "torus": "wave_torus",
+            "doorway": "wave_doorway",
+            "swisscheese": "wave_swisscheese",
+        }[topology]
 
     def _materialize_ring_diffusion(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
         num_nodes = int(self.cfg.num_nodes)
@@ -1327,12 +1384,7 @@ class SyntheticDataset(EventStreamDataset):
         topology: str,
     ) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
         """Materialize first-order diffusion on a grid-derived topology."""
-        topology_task = {
-            "grid": "wave_grid",
-            "torus": "wave_torus",
-            "doorway": "wave_doorway",
-            "swisscheese": "wave_swisscheese",
-        }[topology]
+        topology_task = self._topology_task_name(topology)
         active, edge_src, edge_dst, degree = self._grid_wave_topology(topology_task)
         num_nodes = int(self.cfg.num_nodes)
         active_nodes = np.flatnonzero(active).astype(np.int64)
@@ -1488,6 +1540,57 @@ class SyntheticDataset(EventStreamDataset):
             x_next[~active] = 0.0
             x_prev, x_curr = x_curr, np.clip(x_next, -4.0, 4.0).astype(np.float32)
 
+        return bins, edge_targets
+
+    def _materialize_wave_field(self, topology: str) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+        """Materialize the wave dynamic independently of the chosen topology."""
+        if topology == "ring":
+            return self._materialize_wave()
+        return self._materialize_grid_wave(self._topology_task_name(topology))
+
+    def _field_topology_edges(self, topology: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if topology != "ring":
+            return self._grid_wave_topology(self._topology_task_name(topology))
+        num_nodes = int(self.cfg.num_nodes)
+        nodes = np.arange(num_nodes, dtype=np.int64)
+        edge_src = np.concatenate([nodes, nodes])
+        edge_dst = np.concatenate([(nodes + 1) % num_nodes, (nodes - 1) % num_nodes])
+        return np.ones((num_nodes,), dtype=bool), edge_src, edge_dst, np.full((num_nodes,), 2.0, dtype=np.float32)
+
+    def _materialize_coupled_oscillator_field(self, topology: str) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
+        """Driven damped oscillators with local restoring force and graph coupling."""
+        active, edge_src, edge_dst, degree = self._field_topology_edges(topology)
+        num_nodes = int(self.cfg.num_nodes)
+        active_nodes = np.flatnonzero(active).astype(np.int64)
+        source_count = min(3, active_nodes.size)
+        sources = active_nodes[np.linspace(0, active_nodes.size - 1, source_count, dtype=np.int64)]
+        phases = self._rng.uniform(0.0, 2.0 * np.pi, size=source_count)
+        frequencies = self._rng.uniform(0.045, 0.095, size=source_count)
+        amplitudes = self._rng.uniform(0.70, 1.00, size=source_count)
+        x_prev = np.zeros((num_nodes,), dtype=np.float32)
+        x_curr = np.zeros((num_nodes,), dtype=np.float32)
+        x_curr[active] = self._rng.normal(loc=0.0, scale=0.05, size=active_nodes.size)
+
+        bins: list[EventBatch] = []
+        edge_targets: list[EdgeTargetBatch] = []
+        for t in range(int(self.cfg.num_bins)):
+            drive = np.zeros((num_nodes,), dtype=np.float32)
+            drive[sources] = (amplitudes * np.sin(frequencies * t + phases)).astype(np.float32)
+            src = np.concatenate([edge_src, active_nodes])
+            dst = np.concatenate([edge_dst, active_nodes])
+            signal = np.concatenate([x_curr[edge_src], drive[active_nodes]]).astype(np.float32)
+            is_drive = np.concatenate([np.zeros(edge_src.size, dtype=np.float32), np.ones(active_nodes.size, dtype=np.float32)])
+            bins.append(self._make_event_batch(src, dst, np.stack([signal, is_drive], axis=1), t))
+            edge_targets.append(self._make_edge_target_batch(x_curr, t))
+
+            neighbor_sum = np.zeros((num_nodes,), dtype=np.float32)
+            np.add.at(neighbor_sum, edge_src, x_curr[edge_dst])
+            laplacian = neighbor_sum - degree * x_curr
+            # 1.66 and -0.84 encode damping plus a local harmonic restoring force;
+            # the Laplacian is the independent topology-dependent coupling term.
+            x_next = 1.66 * x_curr - 0.84 * x_prev + 0.055 * laplacian + 0.12 * drive
+            x_next[~active] = 0.0
+            x_prev, x_curr = x_curr, np.clip(x_next, -4.0, 4.0).astype(np.float32)
         return bins, edge_targets
 
     def _materialize_wave(self) -> tuple[list[EventBatch], list[EdgeTargetBatch]]:
@@ -1706,8 +1809,13 @@ class SyntheticDataset(EventStreamDataset):
         dataset_name = self.cfg.name or f"synthetic_{self.cfg.task}"
         task_axes = self._task.axes()
         task_tags = list(self._task.tags())
-        if self.cfg.task == "diffusion" and self.cfg.diffusion_topology not in {None, "ring"}:
-            topology = cast(str, self.cfg.diffusion_topology)
+        topology = self._selected_field_topology()
+        field_dynamic = self.cfg.task in {"diffusion", "wave", "coupled_oscillator"}
+        if field_dynamic:
+            generator_params = {} if task_axes["generator_params"] is None else dict(task_axes["generator_params"])
+            generator_params["topology"] = topology
+            task_axes["generator_params"] = generator_params
+        if field_dynamic and topology != "ring":
             graph_types = {
                 "grid": "grid",
                 "torus": "torus_grid",
@@ -1715,9 +1823,9 @@ class SyntheticDataset(EventStreamDataset):
                 "swisscheese": "grid_swisscheese",
             }
             task_axes["graph_type"] = graph_types[topology]
-            task_axes["generator_family"] = "grid_diffusion"
+            task_axes["generator_family"] = f"grid_{self._task.dynamics_type}"
             task_axes["event_structure"] = "topology_neighbor_and_drive_events"
-            generator_params = {} if task_axes["generator_params"] is None else dict(task_axes["generator_params"])
+            generator_params = dict(task_axes["generator_params"])
             generator_params["topology"] = topology
             task_axes["generator_params"] = generator_params
             task_tags = [
@@ -1725,7 +1833,7 @@ class SyntheticDataset(EventStreamDataset):
                 for tag in task_tags
                 if not tag.startswith(("family:", "graph:", "events:"))
             ]
-            task_tags.append("family:grid_diffusion")
+            task_tags.append(f"family:grid_{self._task.dynamics_type}")
             task_tags.append(f"graph:{graph_types[topology]}")
             task_tags.append("events:topology_neighbor_and_drive_events")
         return DataSpec(
@@ -1742,7 +1850,7 @@ class SyntheticDataset(EventStreamDataset):
                 "task_tags": task_tags,
                 "recommended_pairs": [f"{agg}/{upd}" for agg, upd in self._task.recommended_pairs],
                 "metric_family": self._task.metric_family,
-                "generator_params": None if self._task.generator_params is None else dict(self._task.generator_params),
+                "generator_params": task_axes["generator_params"],
                 "supported_metrics": list(self._task.supported_metrics),
                 "primary_metric": {
                     "path": self._task.primary_metric_path,

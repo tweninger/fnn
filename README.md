@@ -93,8 +93,9 @@ venv/bin/python -m interactiondynamics.train quick \
   --synthetic-topology doorway
 ```
 
-Available diffusion topologies are `ring` (default), `grid`, `torus`,
-`doorway`, and `swisscheese`.
+The field topologies are `ring` (default), `grid`, `torus`, `doorway`, and
+`swisscheese`. They can be paired independently with the topology-aware
+`diffusion`, `wave`, and `coupled_oscillator` synthetic tasks.
 
 #### Second-order — inertia, velocity, and waves
 
@@ -102,13 +103,25 @@ Available diffusion topologies are `ring` (default), `grid`, `torus`,
 | --- | --- | --- |
 | Local driven oscillator | `temporal_memory`, `node_temporal_regression`, `node_temporal_state`, `edge_temporal_state`, `next_dst_temporal_ranking` | Independent self-loop systems with AR(2)-style state, velocity carry-over, and forcing; **not** graph propagation. |
 | Conservative local oscillator | `conservative_oscillator` | Lightly driven, long-memory second-order oscillator. |
-| Ring wave | `wave` | Driven wave propagation with neighbor coupling on a ring. |
-| Topological grid waves | `wave_grid`, `wave_torus`, `wave_doorway`, `wave_swisscheese` | Second-order propagation over bounded, periodic, barrier, and perforated grid topologies. |
+| Graph wave | `wave` | Driven second-order wave propagation; pair with any field topology. |
+| Graph-coupled oscillator | `coupled_oscillator` | Damped harmonic restoring dynamics plus topology-dependent coupling; pair with any field topology. |
+| Legacy topology-specific waves | `wave_grid`, `wave_torus`, `wave_doorway`, `wave_swisscheese` | Backward-compatible aliases for the corresponding wave/topology pairs. |
 
-The grid-wave tasks use sparse local drives and topology-specific neighbor
-events. `wave_grid` has reflecting outer boundaries, `wave_torus` wraps
-both axes, `wave_doorway` adds a wall with a three-node aperture, and
-`wave_swisscheese` removes circular patches of nodes.
+For new experiments, select the dynamic with `--synthetic-task` and the
+domain independently with `--synthetic-topology`. For example:
+
+```bash
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic \
+  --synthetic-task wave --synthetic-topology torus
+
+venv/bin/python -m interactiondynamics.train quick --dataset synthetic \
+  --synthetic-task coupled_oscillator --synthetic-topology doorway
+```
+
+Grid-derived domains use sparse local drives and topology-specific neighbor
+events. `grid` has reflecting outer boundaries, `torus` wraps both axes,
+`doorway` adds a wall with a three-node aperture, and `swisscheese` removes
+circular patches of nodes.
 
 ### CLI reference
 
@@ -128,8 +141,8 @@ Common dataset flags:
 
 - `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand.
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
-- `--synthetic-topology {ring,grid,torus,doorway,swisscheese}`: choose the domain for `diffusion`; the default is `ring`.
-- `--synthetic-drive-cutoff T`: retain the regular diffusion drive for the first `T` steps of each evaluation rollout, then compare predictions with a simulator-generated zero-drive suffix. Training data and ordinary rollout metrics are unchanged.
+- `--synthetic-topology {ring,grid,torus,doorway,swisscheese}`: choose the domain independently for `diffusion`, `wave`, or `coupled_oscillator`; the default is `ring`.
+- `--synthetic-drive-cutoff T`: for `diffusion`, `wave`, or `coupled_oscillator`, retain the regular drive for the first `T` steps of each evaluation rollout, then compare predictions with a simulator-generated zero-drive suffix. Training data and ordinary rollout metrics are unchanged.
 - `--synthetic-num-nodes N`: override synthetic node count.
 - `--synthetic-events-per-bin N`: override synthetic event count per bin for set-style tasks.
 - `--num-bins N`: override the number of simulated synthetic time bins.
@@ -137,8 +150,8 @@ Common dataset flags:
 - `--ift-variants [VARIANT ...]`: on `smoke` or `quick`, replace the default `ift/ift_update` run with an IFT sweep over one or more variant families from `{generic, linear, direct, auto}`. Pass no variant names to sweep them all. Using this flag auto-selects the synthetic dataset.
 - `--ift-orders [1 2 ...]`: optionally restrict the IFT sweep to first-order, second-order, or both. Defaults to `1 2` when IFT variants are selected.
 - `--ift-history-steps [1 2 3 ...]`: optionally restrict the history readout sweep for the `auto` family. Defaults to `1 2 3`.
-- `--ift-self-rollout`: add the IFT2 history model evaluated with self-generated neighbor signals and no future external drives. Supported for diffusion and wave topologies.
-- `--ift-free-rollout`: add the IFT2 history model evaluated with observed neighbor signals but no future external drives. Supported for diffusion and wave topologies. Together with `--ift-self-rollout`, this separates missing forcing from self-generated relational inputs.
+- `--ift-self-rollout`: add the IFT2 history model evaluated with self-generated neighbor signals and no future external drives. Supported for the field dynamics (`diffusion`, `wave`, and `coupled_oscillator`).
+- `--ift-free-rollout`: add the IFT2 history model evaluated with observed neighbor signals but no future external drives. Supported for the field dynamics. Together with `--ift-self-rollout`, this separates missing forcing from self-generated relational inputs.
 
 Common training flags:
 
@@ -150,6 +163,15 @@ Common training flags:
 - `--use-node-scorer`: force-enable the auxiliary node scorer.
 - `--node-loss-weight W`: weight for the node prediction loss.
 - `--node-scorer-hidden H`: hidden width for the node scorer MLP.
+
+For the field benchmarks, ordinary `rollout_*` metrics are **driven
+rollouts**: the model receives the observed event bin and observed prior
+target/readout history at every step. This makes IFT, TGN, and the other
+baselines comparable under the same observed-input forecast condition. A
+`--synthetic-drive-cutoff T` result shares that exact observed prefix through
+step `T`, then switches to closed-loop predicted readout history and
+simulator-generated zero-drive graph messages. Its suffix is therefore a
+genuine free-response intervention rather than another driven forecast.
 
 Target and loss flags:
 

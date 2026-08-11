@@ -10,7 +10,7 @@ import torch
 from interactiondynamics.core.config import ModelConfig
 from interactiondynamics.data.interfaces import EdgeTargetBatch
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
-from interactiondynamics.data.synthetic import DIFFUSION_TOPOLOGY_CHOICES
+from interactiondynamics.data.synthetic import FIELD_TOPOLOGY_CHOICES
 from interactiondynamics.eval.node_metrics import regression_metrics
 from interactiondynamics.models.tgn_model import build_tgn_model
 from interactiondynamics.training.presets import (
@@ -62,9 +62,9 @@ def _build_common_parser() -> argparse.ArgumentParser:
     )
     data_group.add_argument(
         "--synthetic-topology",
-        choices=DIFFUSION_TOPOLOGY_CHOICES,
+        choices=FIELD_TOPOLOGY_CHOICES,
         default=None,
-        help="Topology for the diffusion synthetic task; defaults to ring.",
+        help="Topology for diffusion, wave, or coupled_oscillator; defaults to ring.",
     )
     data_group.add_argument(
         "--synthetic-num-nodes",
@@ -89,7 +89,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Test-only diffusion intervention: keep the normal drive for this many "
+            "Test-only field intervention: keep the normal drive for this many "
             "rollout steps, then evaluate against a counterfactual zero-drive suffix."
         ),
     )
@@ -895,14 +895,48 @@ def _normalize_ift_variant_args(args: argparse.Namespace) -> None:
     if raw_orders not in (None, []) and 2 not in raw_orders:
         if (raw_variants not in (None, []) and "auto" in raw_variants) or raw_history is not None or self_rollout or free_rollout:
             raise ValueError("IFT auto/history/free/self rollout variants require including second-order IFT via --ift-orders 2.")
-    autonomous_tasks = {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
+    autonomous_tasks = {"diffusion", "wave", "coupled_oscillator", "wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
     if (self_rollout or free_rollout) and args.synthetic_task not in autonomous_tasks:
-        raise ValueError("--ift-free-rollout and --ift-self-rollout are implemented only for diffusion and wave tasks.")
+        raise ValueError("--ift-free-rollout and --ift-self-rollout are implemented only for diffusion, wave, and coupled_oscillator tasks.")
     if args.dataset is None:
         args.dataset = "synthetic"
         return
     if args.dataset != "synthetic":
         raise ValueError("IFT variant selection requires the synthetic dataset.")
+
+
+def _validate_rollout_training_selection(runs: Sequence[SweepRun], rollout_train_steps: int) -> None:
+    """Reject rollout-training requests that the trainer would otherwise ignore."""
+    if rollout_train_steps <= 1:
+        return
+
+    compatible = []
+    unsupported_ift = []
+    for run in runs:
+        cfg = run.model_cfg
+        is_ift = cfg.aggregator == "ift" and cfg.update == "ift_update"
+        supports_rollout_training = (
+            is_ift
+            and cfg.ift_update_order == "second"
+            and cfg.ift2_readout_mode == "linear_h_v_force"
+        )
+        if supports_rollout_training:
+            compatible.append(run.name)
+        elif is_ift:
+            unsupported_ift.append(run.name)
+
+    if unsupported_ift:
+        raise ValueError(
+            "--rollout-train-steps > 1 is implemented only for second-order IFT "
+            "runs with the H/V/force readout; unsupported IFT runs: "
+            + ", ".join(unsupported_ift)
+            + ". Run those models separately with --rollout-train-steps 1."
+        )
+    if not compatible:
+        raise ValueError(
+            "--rollout-train-steps > 1 requires a second-order IFT run with the "
+            "H/V/force readout (for example --ift-variants auto --ift-orders 2)."
+        )
 
 
 def main() -> None:
@@ -934,8 +968,9 @@ def main() -> None:
     base_train_cfg.prediction_mode = _resolve_prediction_mode(str(args.prediction_mode))
     base_train_cfg.rollout_horizon = int(args.rollout_horizon)
     if args.synthetic_drive_cutoff is not None:
-        if args.dataset != "synthetic" or args.synthetic_task != "diffusion":
-            raise ValueError("--synthetic-drive-cutoff is currently implemented only for synthetic diffusion.")
+        supported_field_tasks = {"diffusion", "wave", "coupled_oscillator"}
+        if args.dataset != "synthetic" or args.synthetic_task not in supported_field_tasks:
+            raise ValueError("--synthetic-drive-cutoff is supported only for synthetic diffusion, wave, and coupled_oscillator tasks.")
         if args.synthetic_drive_cutoff < 1:
             raise ValueError("--synthetic-drive-cutoff must be at least one rollout step.")
     base_train_cfg.synthetic_drive_cutoff = args.synthetic_drive_cutoff
@@ -967,6 +1002,7 @@ def main() -> None:
 
     if args.max_runs is not None:
         runs = runs[: args.max_runs]
+    _validate_rollout_training_selection(runs, base_train_cfg.rollout_train_steps)
     epochs = suite.epochs if args.epochs is None else args.epochs
 
     print(

@@ -8,6 +8,7 @@ import pytest
 from interactiondynamics.train import (
     _normalize_ift_variant_args,
     _print_ift_diagnostic_footer,
+    _validate_rollout_training_selection,
     parse_args,
 )
 from interactiondynamics.training.runner import short_run_label_from_name
@@ -148,6 +149,35 @@ def test_short_run_label_uses_custom_variant_name_when_present() -> None:
     from interactiondynamics.training.runner import short_run_label
 
     assert short_run_label(run) == "ift2_hist_vel_k2"
+
+
+def test_rollout_training_rejects_first_order_ift() -> None:
+    runs = [
+        SweepRun(
+            name="ift1_generic",
+            model_cfg=ModelConfig(aggregator="ift", update="ift_update", ift_update_order="first"),
+        )
+    ]
+
+    with pytest.raises(ValueError, match="unsupported IFT runs: ift1_generic"):
+        _validate_rollout_training_selection(runs, rollout_train_steps=3)
+
+
+def test_rollout_training_accepts_second_order_history_readout_with_baseline() -> None:
+    runs = [
+        SweepRun(
+            name="ift2_hist_vel_k2",
+            model_cfg=ModelConfig(
+                aggregator="ift",
+                update="ift_update",
+                ift_update_order="second",
+                ift2_readout_mode="linear_h_v_force",
+            ),
+        ),
+        SweepRun(name="sum/tgn_gru", model_cfg=ModelConfig(aggregator="sum", update="tgn_gru")),
+    ]
+
+    _validate_rollout_training_selection(runs, rollout_train_steps=3)
 
 
 def test_print_ift_diagnostic_footer_emits_table_for_variant_runs(capsys: pytest.CaptureFixture[str]) -> None:

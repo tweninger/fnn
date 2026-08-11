@@ -75,7 +75,7 @@ def test_synthetic_dataset_materializes_expected_supervision(task_name: str):
         "conservative_oscillator",
     }:
         expected_events = cfg.num_nodes
-    if task_name in {"diffusion", "wave"}:
+    if task_name in {"diffusion", "wave", "coupled_oscillator"}:
         expected_events = 3 * cfg.num_nodes
     if task_name == "associative_retrieval":
         expected_events = cfg.num_nodes * (max(3, cfg.events_per_bin // cfg.num_nodes) + 1)
@@ -223,6 +223,29 @@ def test_diffusion_topology_selector_materializes_grid_derived_domains():
     assert event_counts["torus"] > event_counts["grid"]
     assert event_counts["doorway"] < event_counts["grid"]
     assert event_counts["swisscheese"] < event_counts["grid"]
+
+
+def test_second_order_dynamics_share_the_field_topology_selector():
+    for dynamic in ("wave", "coupled_oscillator"):
+        for topology in ("ring", "grid", "torus", "doorway", "swisscheese"):
+            dataset = SyntheticDataset(
+                SyntheticDatasetConfig(
+                    task=dynamic,
+                    field_topology=topology,
+                    num_nodes=64,
+                    num_bins=16,
+                    seed=5,
+                )
+            )
+            first_batch = next(iter(dataset.bins("train")))
+            targets = next(iter(dataset.edge_targets("train") or []))
+            assert first_batch.features is not None
+            assert first_batch.features.shape[1] == 2
+            assert torch.isfinite(targets.targets).all()
+            assert dataset.spec().extra is not None
+            axes = dataset.spec().extra["task_axes"]
+            assert axes["dynamics_type"] == dynamic
+            assert axes["generator_params"]["topology"] == topology
 
 
 def test_self_generated_grid_wave_events_retain_topology_and_remove_external_drive():

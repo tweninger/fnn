@@ -840,6 +840,10 @@ def run_one_experiment(
         "rollout_test": {},
         "readout": _linear_hvf_readout_snapshot(model),
     }
+    task_axes = {} if spec.extra is None else dict(spec.extra.get("task_axes", {}))
+    generator_params = task_axes.get("generator_params") or {}
+    field_dynamics = task_axes.get("dynamics_type")
+    field_topology = str(generator_params.get("topology", "ring"))
     for epoch in range(1, epochs + 1):
         train_stats_step = train_one_epoch(
             model,
@@ -892,6 +896,7 @@ def run_one_experiment(
                 val_edge_targets,
                 train_cfg,
                 horizon=rollout_horizon,
+                teacher_forced_readout=True,
             )
             if cutoff is not None:
                 # Begin the intervention from the identical random latent
@@ -906,7 +911,10 @@ def run_one_experiment(
                     val_edge_targets,
                     train_cfg,
                     horizon=rollout_horizon,
-                    diffusion_drive_cutoff=int(cutoff),
+                    drive_cutoff=int(cutoff),
+                    field_dynamics=field_dynamics,
+                    field_topology=field_topology,
+                    teacher_forced_readout=True,
                 )
             test_rng_state = torch.get_rng_state()
             test_cuda_rng_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
@@ -917,6 +925,7 @@ def run_one_experiment(
                 test_edge_targets,
                 train_cfg,
                 horizon=rollout_horizon,
+                teacher_forced_readout=True,
             )
             if cutoff is not None:
                 torch.set_rng_state(test_rng_state)
@@ -929,7 +938,10 @@ def run_one_experiment(
                     test_edge_targets,
                     train_cfg,
                     horizon=rollout_horizon,
-                    diffusion_drive_cutoff=int(cutoff),
+                    drive_cutoff=int(cutoff),
+                    field_dynamics=field_dynamics,
+                    field_topology=field_topology,
+                    teacher_forced_readout=True,
                 )
 
         snapshot = {
