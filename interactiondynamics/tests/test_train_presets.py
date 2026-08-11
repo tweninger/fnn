@@ -8,6 +8,7 @@ import torch
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
 from interactiondynamics.training.presets import (
     DIFFUSION_COMPARISON_PANEL,
+    FIELD_COMPARISON_PANEL,
     build_suite,
     load_dataset,
 )
@@ -43,7 +44,7 @@ def test_quick_synthetic_suite_uses_task_specific_shortlist(task_name: str):
     task_pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
     expected_pairs = (
         {("ift", "ift_update"), *DIFFUSION_COMPARISON_PANEL}
-        if task_name == "diffusion"
+        if task_name in {"diffusion", "wave", "coupled_oscillator"}
         else set(SYNTHETIC_TASKS[task_name].recommended_pairs)
     )
     assert task_pairs == expected_pairs
@@ -90,13 +91,30 @@ def test_quick_synthetic_suite_can_replace_default_ift_run_with_selected_variant
         "ift2_linear",
         "ift2_auto",
         "ift2_hist_vel_k3",
-        "agg=sum|update=tgn_gru|do=0.0|sdo=0.0|time=False",
-        "agg=sum|update=lnn|do=0.0|sdo=0.0|time=False",
-        "agg=sum|update=hnn|do=0.0|sdo=0.0|time=False",
+        "sum/tgn_gru",
+        "deepsets/tgn_gru",
+        "settransformer/tgn_gru",
+        "hopfield/hopfield_update",
+        "settransformer/lnn",
+        "settransformer/hnn",
     ]
     assert suite.runs[3].prediction_mode == "delta"
     assert suite.runs[3].lr == 1e-2
     assert suite.runs[3].model_cfg.ift_history_vel_steps == 3
+
+
+@pytest.mark.parametrize("task_name", ("wave", "coupled_oscillator"))
+def test_second_order_field_tasks_use_the_shared_comparison_panel(task_name: str) -> None:
+    args = _synthetic_args(task_name)
+    suite = build_suite(
+        "quick",
+        torch.device("cpu"),
+        dataset_override="synthetic",
+        args=args,
+    )
+
+    pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
+    assert pairs == {("ift", "ift_update"), *FIELD_COMPARISON_PANEL}
 
 
 def test_quick_synthetic_suite_expands_empty_ift_variant_selection_to_task_defaults() -> None:

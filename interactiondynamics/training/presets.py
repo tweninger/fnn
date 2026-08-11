@@ -31,7 +31,7 @@ TOPOLOGY_SELECTABLE_FIELD_TASKS = {"diffusion", "wave", "coupled_oscillator"}
 # Each baseline retains its intended architecture pairing.  In particular,
 # Hopfield aggregation is evaluated with its Hopfield update, while LNN/HNN
 # use the Set Transformer event encoder rather than arbitrary hybrid pairs.
-DIFFUSION_COMPARISON_PANEL = (
+FIELD_COMPARISON_PANEL = (
     ("sum", "tgn_gru"),
     ("deepsets", "tgn_gru"),
     ("settransformer", "tgn_gru"),
@@ -39,6 +39,10 @@ DIFFUSION_COMPARISON_PANEL = (
     ("settransformer", "lnn"),
     ("settransformer", "hnn"),
 )
+# Backward-compatible name for callers that still refer to the original
+# first-order diffusion panel.  The same architecture-paired baselines are
+# now used for every topology-aware field dynamic.
+DIFFUSION_COMPARISON_PANEL = FIELD_COMPARISON_PANEL
 
 
 def _shortlist_run_grid() -> dict[str, Any]:
@@ -464,7 +468,14 @@ def _diffusion_runs(model_cfg: ModelConfig, *, seed: int) -> list[SweepRun]:
         orders=(1,),
         variants=("generic", "linear", "direct"),
     )
-    for aggregator, update in DIFFUSION_COMPARISON_PANEL:
+    runs.extend(_field_baseline_runs(model_cfg, seed=seed))
+    return runs
+
+
+def _field_baseline_runs(model_cfg: ModelConfig, *, seed: int) -> list[SweepRun]:
+    """Build the architecture-paired baseline panel for field dynamics."""
+    runs: list[SweepRun] = []
+    for aggregator, update in FIELD_COMPARISON_PANEL:
         cfg = ModelConfig(**asdict(model_cfg))
         cfg.aggregator = aggregator  # type: ignore[assignment]
         cfg.update = update  # type: ignore[assignment]
@@ -539,6 +550,31 @@ def _build_synthetic_suite(
 
     if preset in {"smoke", "quick"} and synthetic_cfg.task == "diffusion":
         runs = _diffusion_runs(model_cfg, seed=int(args.seed))
+        if _ift_selector_requested(args):
+            selected_ift_runs = _resolve_selected_ift_variant_runs(
+                model_cfg,
+                task_name=synthetic_cfg.task,
+                feature_schema=task_spec.feature_schema,
+                args=args,
+            )
+            runs = _replace_ift_shortlist_run(runs, replacement_runs=selected_ift_runs)
+        epochs = 1 if preset == "smoke" else 4
+        early_steps = 5 if preset == "smoke" else 10
+    elif preset in {"smoke", "quick"} and synthetic_cfg.task in {"wave", "coupled_oscillator"}:
+        # Keep second-order field dynamics on the same robust comparison
+        # panel as diffusion.  The default IFT candidate is an H/V/force
+        # second-order readout; --ift-variants can replace it with the full
+        # requested ablation set below.
+        runs = build_ift_variant_runs(
+            model_cfg,
+            task_name=synthetic_cfg.task,
+            drive_feature_idx=_infer_ift_drive_feature_idx(task_spec.feature_schema),
+            seed=int(args.seed),
+            orders=(2,),
+            variants=("auto",),
+            history_steps=(1,),
+        )
+        runs.extend(_field_baseline_runs(model_cfg, seed=int(args.seed)))
         if _ift_selector_requested(args):
             selected_ift_runs = _resolve_selected_ift_variant_runs(
                 model_cfg,
