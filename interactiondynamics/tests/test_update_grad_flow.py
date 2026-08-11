@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from interactiondynamics.core.config import ModelConfig, UpdateType
+from interactiondynamics.core.interfaces import ModelState
 from interactiondynamics.data.synthetic import SyntheticDataset, SyntheticDatasetConfig
 from interactiondynamics.models.tgn_model import build_tgn_model
 from interactiondynamics.training.targets import edge_regression_loss
@@ -101,3 +102,30 @@ def test_build_tgn_model_passes_ift_kappa_cap_and_max() -> None:
     assert isinstance(model.update, IFTDiffusionUpdate)
     assert model.update.kappa_cap is True
     assert model.update.kappa_max == 2.5
+
+
+def test_first_order_ift_force_mask_suppresses_learned_forcing() -> None:
+    update = IFTDiffusionUpdate(
+        node_dim=1,
+        msg_dim=1,
+        dt=1.0,
+        gamma=0.0,
+        kappa=0.0,
+        learn_kappa=False,
+        inj_clip=None,
+        forcing_mode="generic_mlp",
+    )
+    with torch.no_grad():
+        update.force_encoder.msg_proj.weight.zero_()
+        update.force_encoder.msg_proj.bias.fill_(2.0)
+
+    messages = torch.zeros((2, 1))
+    driven_state = ModelState(node=torch.zeros((2, 1)), aux={})
+    free_state = ModelState(node=torch.zeros((2, 1)), aux={"ift_force_mask": torch.tensor(0.0)})
+
+    driven_next, _ = update(driven_state, messages)
+    free_next, _ = update(free_state, messages)
+
+    assert driven_next is not None and free_next is not None
+    assert torch.allclose(driven_next.node, torch.full((2, 1), 2.0))
+    assert torch.allclose(free_next.node, torch.zeros((2, 1)))

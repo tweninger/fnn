@@ -94,7 +94,7 @@ venv/bin/python -m interactiondynamics.train quick \
 ```
 
 Available diffusion topologies are `ring` (default), `grid`, `torus`,
-`doorway`, and `swiss_cheese`.
+`doorway`, and `swisscheese`.
 
 #### Second-order — inertia, velocity, and waves
 
@@ -103,12 +103,12 @@ Available diffusion topologies are `ring` (default), `grid`, `torus`,
 | Local driven oscillator | `temporal_memory`, `node_temporal_regression`, `node_temporal_state`, `edge_temporal_state`, `next_dst_temporal_ranking` | Independent self-loop systems with AR(2)-style state, velocity carry-over, and forcing; **not** graph propagation. |
 | Conservative local oscillator | `conservative_oscillator` | Lightly driven, long-memory second-order oscillator. |
 | Ring wave | `wave` | Driven wave propagation with neighbor coupling on a ring. |
-| Topological grid waves | `wave_grid`, `wave_torus`, `wave_doorway`, `wave_swiss_cheese` | Second-order propagation over bounded, periodic, barrier, and perforated grid topologies. |
+| Topological grid waves | `wave_grid`, `wave_torus`, `wave_doorway`, `wave_swisscheese` | Second-order propagation over bounded, periodic, barrier, and perforated grid topologies. |
 
 The grid-wave tasks use sparse local drives and topology-specific neighbor
 events. `wave_grid` has reflecting outer boundaries, `wave_torus` wraps
 both axes, `wave_doorway` adds a wall with a three-node aperture, and
-`wave_swiss_cheese` removes circular patches of nodes.
+`wave_swisscheese` removes circular patches of nodes.
 
 ### CLI reference
 
@@ -128,7 +128,7 @@ Common dataset flags:
 
 - `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand.
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
-- `--synthetic-topology {ring,grid,torus,doorway,swiss_cheese}`: choose the domain for `diffusion`; the default is `ring`.
+- `--synthetic-topology {ring,grid,torus,doorway,swisscheese}`: choose the domain for `diffusion`; the default is `ring`.
 - `--synthetic-drive-cutoff T`: retain the regular diffusion drive for the first `T` steps of each evaluation rollout, then compare predictions with a simulator-generated zero-drive suffix. Training data and ordinary rollout metrics are unchanged.
 - `--synthetic-num-nodes N`: override synthetic node count.
 - `--synthetic-events-per-bin N`: override synthetic event count per bin for set-style tasks.

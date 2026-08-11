@@ -79,7 +79,7 @@ def test_synthetic_dataset_materializes_expected_supervision(task_name: str):
         expected_events = 3 * cfg.num_nodes
     if task_name == "associative_retrieval":
         expected_events = cfg.num_nodes * (max(3, cfg.events_per_bin // cfg.num_nodes) + 1)
-    if task_name in {"wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
+    if task_name in {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
         assert first_batch.num_events > 0
     else:
         assert first_batch.num_events == expected_events
@@ -179,7 +179,7 @@ def test_synthetic_task_query_helpers_group_related_benchmarks():
 
 def test_grid_wave_topologies_materialize_distinct_structured_event_sets():
     event_counts: dict[str, int] = {}
-    for task_name in ("wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"):
+    for task_name in ("wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"):
         dataset = SyntheticDataset(SyntheticDatasetConfig(task=task_name, num_nodes=64, num_bins=16, seed=3))
         first_batch = next(iter(dataset.bins("train")))
         targets = next(iter(dataset.edge_targets("train") or []))
@@ -190,7 +190,7 @@ def test_grid_wave_topologies_materialize_distinct_structured_event_sets():
 
     assert event_counts["wave_torus"] > event_counts["wave_grid"]
     assert event_counts["wave_doorway"] < event_counts["wave_grid"]
-    assert event_counts["wave_swiss_cheese"] < event_counts["wave_grid"]
+    assert event_counts["wave_swisscheese"] < event_counts["wave_grid"]
 
 
 def test_diffusion_topology_selector_materializes_grid_derived_domains():
@@ -198,7 +198,7 @@ def test_diffusion_topology_selector_materializes_grid_derived_domains():
         "grid": "grid",
         "torus": "torus_grid",
         "doorway": "grid_doorway",
-        "swiss_cheese": "grid_swiss_cheese",
+        "swisscheese": "grid_swisscheese",
     }
     event_counts: dict[str, int] = {}
     for topology, graph_type in graph_types.items():
@@ -222,7 +222,7 @@ def test_diffusion_topology_selector_materializes_grid_derived_domains():
 
     assert event_counts["torus"] > event_counts["grid"]
     assert event_counts["doorway"] < event_counts["grid"]
-    assert event_counts["swiss_cheese"] < event_counts["grid"]
+    assert event_counts["swisscheese"] < event_counts["grid"]
 
 
 def test_self_generated_grid_wave_events_retain_topology_and_remove_external_drive():

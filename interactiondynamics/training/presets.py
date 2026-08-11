@@ -26,7 +26,7 @@ IFT_RUN_PAIR = ("ift", "ift_update")
 IFT_VARIANT_CHOICES = ("generic", "linear", "direct", "auto")
 IFT_ORDER_CHOICES = (1, 2)
 IFT_HISTORY_STEP_CHOICES = (1, 2, 3)
-GRID_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}
+GRID_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
 # Each baseline retains its intended architecture pairing.  In particular,
 # Hopfield aggregation is evaluated with its Hopfield update, while LNN/HNN
 # use the Set Transformer event encoder rather than arbitrary hybrid pairs.
@@ -289,7 +289,7 @@ def build_ift_variant_runs(
                     prediction_mode=cast(PredictionMode, "delta"),
                 )
     if self_rollout or free_rollout:
-        if task_name not in {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
+        if task_name not in {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
             raise ValueError("Free and self IFT rollouts are implemented only for diffusion and wave tasks.")
         if 2 not in selected_orders:
             raise ValueError("Free and self IFT rollouts require including second-order IFT via --ift-orders 2.")

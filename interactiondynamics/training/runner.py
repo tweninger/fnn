@@ -882,6 +882,9 @@ def run_one_experiment(
         ) or (
             train_node_targets is not None and train_cfg.node_target_type == "regression"
         ):
+            cutoff = getattr(train_cfg, "synthetic_drive_cutoff", None)
+            val_rng_state = torch.get_rng_state()
+            val_cuda_rng_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
             rollout_val_stats = evaluate_k_step_rollout(
                 model,
                 ds.bins("val"),
@@ -890,16 +893,12 @@ def run_one_experiment(
                 train_cfg,
                 horizon=rollout_horizon,
             )
-            rollout_test_stats = evaluate_k_step_rollout(
-                model,
-                ds.bins("test"),
-                test_node_targets,
-                test_edge_targets,
-                train_cfg,
-                horizon=rollout_horizon,
-            )
-            cutoff = getattr(train_cfg, "synthetic_drive_cutoff", None)
             if cutoff is not None:
+                # Begin the intervention from the identical random latent
+                # initialization, so the two trajectories match pre-cutoff.
+                torch.set_rng_state(val_rng_state)
+                if val_cuda_rng_state is not None:
+                    torch.cuda.set_rng_state(val_cuda_rng_state, device)
                 rollout_intervention_val_stats = evaluate_k_step_rollout(
                     model,
                     ds.bins("val"),
@@ -909,6 +908,20 @@ def run_one_experiment(
                     horizon=rollout_horizon,
                     diffusion_drive_cutoff=int(cutoff),
                 )
+            test_rng_state = torch.get_rng_state()
+            test_cuda_rng_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+            rollout_test_stats = evaluate_k_step_rollout(
+                model,
+                ds.bins("test"),
+                test_node_targets,
+                test_edge_targets,
+                train_cfg,
+                horizon=rollout_horizon,
+            )
+            if cutoff is not None:
+                torch.set_rng_state(test_rng_state)
+                if test_cuda_rng_state is not None:
+                    torch.cuda.set_rng_state(test_cuda_rng_state, device)
                 rollout_intervention_test_stats = evaluate_k_step_rollout(
                     model,
                     ds.bins("test"),

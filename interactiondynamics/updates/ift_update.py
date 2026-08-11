@@ -287,6 +287,11 @@ class IFTDiffusionUpdate(UpdateLaw):
             force = force * (float(self.inj_clip) / force_norm).clamp(max=1.0)
         if self.zero_injection:
             force = torch.zeros_like(force)
+        # Evaluation interventions may explicitly suppress the learned forcing
+        # while retaining the latent state and graph coupling.
+        force_mask = None if state.aux is None else state.aux.get("ift_force_mask")
+        if force_mask is not None:
+            force = force * torch.as_tensor(force_mask, device=force.device, dtype=force.dtype)
 
         diffusion = kappa * Lh
         decay = self.gamma * h

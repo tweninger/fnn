@@ -70,7 +70,7 @@ class SyntheticTaskSpec:
 
 
 IFT_PAIR = ("ift", "ift_update")
-DIFFUSION_TOPOLOGY_CHOICES = ("ring", "grid", "torus", "doorway", "swiss_cheese")
+DIFFUSION_TOPOLOGY_CHOICES = ("ring", "grid", "torus", "doorway", "swisscheese")
 
 
 def _grid_wave_task(
@@ -705,12 +705,12 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
         graph_type="grid_doorway",
         topology="doorway_barrier",
     ),
-    "wave_swiss_cheese": _grid_wave_task(
-        "wave_swiss_cheese",
+    "wave_swisscheese": _grid_wave_task(
+        "wave_swisscheese",
         description="Predict a driven wave on a grid containing multiple circular node holes.",
         focus="Propagation around disconnected obstacles in a perforated lattice.",
-        graph_type="grid_swiss_cheese",
-        topology="swiss_cheese",
+        graph_type="grid_swisscheese",
+        topology="swisscheese",
     ),
     "edge_ranking_sum_shift": SyntheticTaskSpec(
         name="edge_ranking_sum_shift",
@@ -1024,7 +1024,7 @@ class SyntheticDataset(EventStreamDataset):
         if self.cfg.task == "wave":
             bins, edge_targets = self._materialize_wave()
             return bins, None, edge_targets
-        if self.cfg.task in {"wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}:
+        if self.cfg.task in {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
             bins, edge_targets = self._materialize_grid_wave(self.cfg.task)
             return bins, None, edge_targets
         if self.cfg.task in {"edge_ranking_sum_shift", "next_dst_ranking"}:
@@ -1331,7 +1331,7 @@ class SyntheticDataset(EventStreamDataset):
             "grid": "wave_grid",
             "torus": "wave_torus",
             "doorway": "wave_doorway",
-            "swiss_cheese": "wave_swiss_cheese",
+            "swisscheese": "wave_swisscheese",
         }[topology]
         active, edge_src, edge_dst, degree = self._grid_wave_topology(topology_task)
         num_nodes = int(self.cfg.num_nodes)
@@ -1389,7 +1389,7 @@ class SyntheticDataset(EventStreamDataset):
                 f"got {self.cfg.num_nodes}."
             )
         active = np.ones((height, width), dtype=bool)
-        if task_name == "wave_swiss_cheese":
+        if task_name == "wave_swisscheese":
             radius = max(1.15, 0.115 * min(height, width))
             rows, cols = np.ogrid[:height, :width]
             for row_fraction, col_fraction in ((0.28, 0.30), (0.72, 0.32), (0.50, 0.72)):
@@ -1712,7 +1712,7 @@ class SyntheticDataset(EventStreamDataset):
                 "grid": "grid",
                 "torus": "torus_grid",
                 "doorway": "grid_doorway",
-                "swiss_cheese": "grid_swiss_cheese",
+                "swisscheese": "grid_swisscheese",
             }
             task_axes["graph_type"] = graph_types[topology]
             task_axes["generator_family"] = "grid_diffusion"

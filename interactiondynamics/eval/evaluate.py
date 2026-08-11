@@ -520,16 +520,16 @@ def evaluate_k_step_rollout(
                         ],
                     )
                 edge_batch = edge_target_seq[idx]
+                relative_step = idx - start_idx
                 edge_target = (
                     edge_batch.targets
-                    if counterfactual_targets is None
+                    if counterfactual_targets is None or relative_step <= diffusion_drive_cutoff
                     else counterfactual_targets[idx - start_idx]
                 )
                 edge_pred = model.score(curr_state, edge_batch.events)
                 edge_view = _edge_regression_readout(edge_pred, edge_target, rollout_prev_edge, cfg)
                 final_edge_pred_raw = edge_view.raw_preds.detach()
                 final_edge_true_raw = edge_target
-                relative_step = idx - start_idx
                 edge_step_metrics = edge_regression_metrics(final_edge_pred_raw, final_edge_true_raw)
                 edge_step_loss = torch.nn.functional.mse_loss(final_edge_pred_raw, final_edge_true_raw)
                 _acc_update(
@@ -613,12 +613,20 @@ def evaluate_k_step_rollout(
                 )
                 step_events = events_seq[idx]
                 relative_step = idx - start_idx
-                if diffusion_drive_cutoff is not None and rollout_prev_edge is not None:
+                if (
+                    diffusion_drive_cutoff is not None
+                    and relative_step >= diffusion_drive_cutoff
+                    and rollout_prev_edge is not None
+                ):
                     step_events = _counterfactual_diffusion_events(
                         step_events,
                         predicted_field=rollout_prev_edge,
-                        drive_enabled=relative_step < diffusion_drive_cutoff,
+                        drive_enabled=False,
                     )
+                    if curr_state is not None:
+                        aux = {} if curr_state.aux is None else dict(curr_state.aux)
+                        aux["ift_force_mask"] = torch.zeros((), device=device, dtype=rollout_prev_edge.dtype)
+                        curr_state.aux = aux
                 elif self_generated_rollout and rollout_prev_edge is not None:
                     step_events = _self_generate_grid_wave_events(
                         step_events,

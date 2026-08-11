@@ -895,7 +895,7 @@ def _normalize_ift_variant_args(args: argparse.Namespace) -> None:
     if raw_orders not in (None, []) and 2 not in raw_orders:
         if (raw_variants not in (None, []) and "auto" in raw_variants) or raw_history is not None or self_rollout or free_rollout:
             raise ValueError("IFT auto/history/free/self rollout variants require including second-order IFT via --ift-orders 2.")
-    autonomous_tasks = {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swiss_cheese"}
+    autonomous_tasks = {"diffusion", "wave", "wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
     if (self_rollout or free_rollout) and args.synthetic_task not in autonomous_tasks:
         raise ValueError("--ift-free-rollout and --ift-self-rollout are implemented only for diffusion and wave tasks.")
     if args.dataset is None:
