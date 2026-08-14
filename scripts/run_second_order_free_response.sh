@@ -22,7 +22,9 @@ CUTOFF="${CUTOFF:-5}"
 DYNAMICS=(wave coupled_oscillator)
 TOPOLOGIES=(ring grid torus doorway swisscheese)
 SEEDS=(0 1 2 3 4)
-FREE_TRAIN_PERCENTS=(25 50 75)
+# Include 0% as the matched rollout-training control for the mixed free
+# conditions. Existing 25/50/75 result files are skipped automatically.
+FREE_TRAIN_PERCENTS=(0 25 50 75)
 
 mkdir -p "$RESULTS_DIR" "$LOG_DIR"
 
