@@ -143,6 +143,9 @@ Common dataset flags:
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
 - `--synthetic-topology {ring,grid,torus,doorway,swisscheese}`: choose the domain independently for `diffusion`, `wave`, or `coupled_oscillator`; the default is `ring`.
 - `--synthetic-drive-cutoff T`: for `diffusion`, `wave`, or `coupled_oscillator`, retain the regular drive for the first `T` steps of each evaluation rollout, then compare predictions with a simulator-generated zero-drive suffix. Training data and ordinary rollout metrics are unchanged.
+- `--synthetic-free-rollout`: additionally report the shared **free / oracle-neighbor** zero-drive intervention. Every model receives neighbor signals constructed from the counterfactual simulator state; this isolates removal of external forcing without claiming autonomous inference.
+- `--synthetic-self-free-rollout`: additionally save the shared **self-free** intervention result. Every model receives the same fixed topology, but its neighbor event signals are regenerated from its own predicted field and all post-cutoff drives are zero. This is the closed-loop condition.
+- `--synthetic-free-train-percent P`: with second-order differentiable rollout training, convert exactly `P` percent of eligible training chunks per epoch into self-generated zero-drive suffixes. Pair with `--synthetic-free-train-cutoff K`, which retains `K` driven prediction steps at the start of each selected chunk.
 - `--synthetic-num-nodes N`: override synthetic node count.
 - `--synthetic-events-per-bin N`: override synthetic event count per bin for set-style tasks.
 - `--num-bins N`: override the number of simulated synthetic time bins.
@@ -172,6 +175,13 @@ baselines comparable under the same observed-input forecast condition. A
 step `T`, then switches to closed-loop predicted readout history and
 simulator-generated zero-drive graph messages. Its suffix is therefore a
 genuine free-response intervention rather than another driven forecast.
+
+The extra intervention blocks make the input protocol explicit: `rollout_free_*`
+uses counterfactual simulator neighbor signals (an oracle-relational condition),
+whereas `rollout_self_free_*` regenerates neighbor signals from each model's own
+prediction. Both are evaluated against the same zero-drive simulator target, so
+IFT, GRU, Deep Sets, Set Transformer, Hopfield, LNN, and HNN receive the same
+condition-specific event stream.
 
 Target and loss flags:
 

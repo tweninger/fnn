@@ -15,6 +15,8 @@ from interactiondynamics.core.events import EventBatch
 from interactiondynamics.data.interfaces import EdgeTargetBatch
 from interactiondynamics.eval.evaluate import (
     EvalSlices,
+    _counterfactual_field_events,
+    _field_counterfactual_targets,
     _remove_wave_drive_events,
     _self_generate_grid_wave_events,
     evaluate_k_step_rollout,
@@ -191,6 +193,10 @@ def _train_one_epoch_rollout(
     horizon = int(cfg.rollout_train_steps)
     self_generated = bool(getattr(cfg, "ift_rollout_self_generated", False))
     free_drive = bool(getattr(cfg, "ift_rollout_free_drive", False))
+    free_train_percent = float(getattr(cfg, "synthetic_free_train_percent", 0.0))
+    free_train_cutoff = int(getattr(cfg, "synthetic_free_train_cutoff", 1))
+    field_dynamics = getattr(cfg, "synthetic_field_dynamics", None)
+    field_topology = str(getattr(cfg, "synthetic_field_topology", "ring"))
     state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
     loss_sum = 0.0
     metric_sums: dict[str, float] = {}
@@ -199,7 +205,17 @@ def _train_one_epoch_rollout(
     prediction_steps = 0
 
     # At chunk i, event bin i - 1 advances the state and target i is scored.
-    for chunk_start in range(1, len(events_seq), horizon):
+    chunk_starts = list(range(1, len(events_seq), horizon))
+    # Second-order counterfactuals need y_{t-1}; the first chunk has only one
+    # observed target and is therefore always driven.
+    eligible_free_indices = list(range(1, len(chunk_starts)))
+    free_chunk_count = round(len(eligible_free_indices) * free_train_percent / 100.0)
+    # Even spacing makes the requested fraction exact per epoch while avoiding
+    # a front-loaded curriculum artefact.
+    free_chunk_indices = set(
+        [eligible_free_indices[index] for index in np.linspace(0, len(eligible_free_indices) - 1, num=free_chunk_count, dtype=int)]
+    ) if free_chunk_count else set()
+    for chunk_number, chunk_start in enumerate(chunk_starts):
         chunk_end = min(chunk_start + horizon, len(events_seq))
         if state is not None:
             state.detach_()
@@ -208,11 +224,31 @@ def _train_one_epoch_rollout(
         previous = target_seq[chunk_start - 1].targets
         two_back = target_seq[chunk_start - 2].targets if chunk_start >= 2 else None
         three_back = target_seq[chunk_start - 3].targets if chunk_start >= 3 else None
+        free_chunk = chunk_number in free_chunk_indices
+        counterfactual_targets = None
+        if free_chunk:
+            if field_dynamics not in {"diffusion", "wave", "coupled_oscillator"}:
+                raise ValueError("Free-response rollout training requires a supported synthetic field dynamic.")
+            counterfactual_targets = _field_counterfactual_targets(
+                events_seq,
+                start_idx=chunk_start - 1,
+                horizon=chunk_end - chunk_start,
+                cutoff=free_train_cutoff,
+                initial_field=previous,
+                previous_field=two_back,
+                dynamics=field_dynamics,
+                topology=field_topology,
+            )
         step_losses: list[torch.Tensor] = []
 
         for idx in range(chunk_start, chunk_end):
             step_events = events_seq[idx - 1]
-            if self_generated:
+            relative_step = idx - chunk_start + 1
+            if free_chunk and relative_step > free_train_cutoff:
+                step_events = _counterfactual_field_events(
+                    step_events, predicted_field=previous, drive_enabled=False
+                )
+            elif self_generated:
                 step_events = _self_generate_grid_wave_events(step_events, predicted_field=previous)
             elif free_drive:
                 step_events = _remove_wave_drive_events(step_events)
@@ -226,6 +262,9 @@ def _train_one_epoch_rollout(
             )
             state, _ = model.step(state, step_events)
             edge_target = target_seq[idx]
+            if free_chunk and relative_step > free_train_cutoff:
+                assert counterfactual_targets is not None
+                edge_target = EdgeTargetBatch(events=edge_target.events, targets=counterfactual_targets[relative_step])
             edge_preds = model.score(state, edge_target.events)
             edge_view = edge_regression_readout(edge_preds, edge_target.targets, previous, cfg)
             loss = edge_regression_loss(edge_view.loss_preds, edge_view.loss_targets, cfg)
@@ -844,6 +883,8 @@ def run_one_experiment(
     generator_params = task_axes.get("generator_params") or {}
     field_dynamics = task_axes.get("dynamics_type")
     field_topology = str(generator_params.get("topology", "ring"))
+    setattr(train_cfg, "synthetic_field_dynamics", field_dynamics)
+    setattr(train_cfg, "synthetic_field_topology", field_topology)
     for epoch in range(1, epochs + 1):
         train_stats_step = train_one_epoch(
             model,
@@ -881,6 +922,10 @@ def run_one_experiment(
         rollout_test_stats: dict[str, float] = {}
         rollout_intervention_val_stats: dict[str, float] = {}
         rollout_intervention_test_stats: dict[str, float] = {}
+        rollout_free_val_stats: dict[str, float] = {}
+        rollout_free_test_stats: dict[str, float] = {}
+        rollout_self_free_val_stats: dict[str, float] = {}
+        rollout_self_free_test_stats: dict[str, float] = {}
         if (
             train_edge_targets is not None and train_cfg.edge_target_type == "regression"
         ) or (
@@ -916,6 +961,18 @@ def run_one_experiment(
                     field_topology=field_topology,
                     teacher_forced_readout=True,
                 )
+                if bool(getattr(train_cfg, "synthetic_free_rollout", False)):
+                    torch.set_rng_state(val_rng_state)
+                    if val_cuda_rng_state is not None:
+                        torch.cuda.set_rng_state(val_cuda_rng_state, device)
+                    rollout_free_val_stats = evaluate_k_step_rollout(
+                        model, ds.bins("val"), val_node_targets, val_edge_targets, train_cfg,
+                        horizon=rollout_horizon, drive_cutoff=int(cutoff),
+                        field_dynamics=field_dynamics, field_topology=field_topology,
+                        teacher_forced_readout=True, post_cutoff_event_mode="oracle",
+                    )
+                if bool(getattr(train_cfg, "synthetic_self_free_rollout", False)):
+                    rollout_self_free_val_stats = rollout_intervention_val_stats
             test_rng_state = torch.get_rng_state()
             test_cuda_rng_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
             rollout_test_stats = evaluate_k_step_rollout(
@@ -943,6 +1000,18 @@ def run_one_experiment(
                     field_topology=field_topology,
                     teacher_forced_readout=True,
                 )
+                if bool(getattr(train_cfg, "synthetic_free_rollout", False)):
+                    torch.set_rng_state(test_rng_state)
+                    if test_cuda_rng_state is not None:
+                        torch.cuda.set_rng_state(test_cuda_rng_state, device)
+                    rollout_free_test_stats = evaluate_k_step_rollout(
+                        model, ds.bins("test"), test_node_targets, test_edge_targets, train_cfg,
+                        horizon=rollout_horizon, drive_cutoff=int(cutoff),
+                        field_dynamics=field_dynamics, field_topology=field_topology,
+                        teacher_forced_readout=True, post_cutoff_event_mode="oracle",
+                    )
+                if bool(getattr(train_cfg, "synthetic_self_free_rollout", False)):
+                    rollout_self_free_test_stats = rollout_intervention_test_stats
 
         snapshot = {
             "epoch": epoch,
@@ -954,6 +1023,10 @@ def run_one_experiment(
             "rollout_test": rollout_test_stats,
             "rollout_intervention_val": rollout_intervention_val_stats,
             "rollout_intervention_test": rollout_intervention_test_stats,
+            "rollout_free_val": rollout_free_val_stats,
+            "rollout_free_test": rollout_free_test_stats,
+            "rollout_self_free_val": rollout_self_free_val_stats,
+            "rollout_self_free_test": rollout_self_free_test_stats,
             "readout": _linear_hvf_readout_snapshot(model),
         }
 

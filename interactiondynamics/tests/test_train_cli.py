@@ -38,6 +38,27 @@ def test_parse_args_supports_subcommands_and_common_flags() -> None:
     assert args.prediction_mode == "delta"
 
 
+def test_parse_args_supports_shared_free_response_flags() -> None:
+    args = parse_args(
+        [
+            "quick",
+            "--dataset", "synthetic",
+            "--synthetic-task", "wave",
+            "--synthetic-drive-cutoff", "5",
+            "--synthetic-free-rollout",
+            "--synthetic-self-free-rollout",
+            "--synthetic-free-train-percent", "25",
+            "--synthetic-free-train-cutoff", "1",
+        ]
+    )
+
+    assert args.synthetic_drive_cutoff == 5
+    assert args.synthetic_free_rollout is True
+    assert args.synthetic_self_free_rollout is True
+    assert args.synthetic_free_train_percent == 25
+    assert args.synthetic_free_train_cutoff == 1
+
+
 def test_parse_args_supports_ift_variant_selection() -> None:
     args = parse_args(
         [

@@ -389,6 +389,7 @@ def evaluate_k_step_rollout(
     field_dynamics: Optional[str] = None,
     field_topology: str = "ring",
     teacher_forced_readout: bool = False,
+    post_cutoff_event_mode: str = "self",
 ) -> Dict[str, Any]:
     model.eval()
     device = torch.device(cfg.device)
@@ -397,6 +398,8 @@ def evaluate_k_step_rollout(
         raise ValueError("drive_cutoff must be at least one rollout step.")
     if drive_cutoff is not None and field_dynamics not in {"diffusion", "wave", "coupled_oscillator"}:
         raise ValueError("Drive-cutoff rollouts require a supported synthetic field dynamic.")
+    if post_cutoff_event_mode not in {"self", "oracle"}:
+        raise ValueError("post_cutoff_event_mode must be 'self' or 'oracle'.")
 
     events_seq = [events.to(device) for events in bins]
     node_target_seq = None if node_targets is None else [target.to(device) for target in node_targets]
@@ -687,9 +690,14 @@ def evaluate_k_step_rollout(
                     and relative_step >= drive_cutoff
                     and rollout_prev_edge is not None
                 ):
+                    if post_cutoff_event_mode == "oracle":
+                        assert counterfactual_targets is not None
+                        event_field = counterfactual_targets[relative_step]
+                    else:
+                        event_field = rollout_prev_edge
                     step_events = _counterfactual_field_events(
                         step_events,
-                        predicted_field=rollout_prev_edge,
+                        predicted_field=event_field,
                         drive_enabled=False,
                     )
                     if curr_state is not None:

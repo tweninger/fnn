@@ -93,6 +93,39 @@ def _build_common_parser() -> argparse.ArgumentParser:
             "rollout steps, then evaluate against a counterfactual zero-drive suffix."
         ),
     )
+    data_group.add_argument(
+        "--synthetic-free-rollout",
+        action="store_true",
+        help=(
+            "Additionally report a fair zero-drive intervention in which every "
+            "model receives oracle neighbor signals from the counterfactual simulator. "
+            "Requires --synthetic-drive-cutoff."
+        ),
+    )
+    data_group.add_argument(
+        "--synthetic-self-free-rollout",
+        action="store_true",
+        help=(
+            "Additionally label the shared closed-loop zero-drive intervention, in "
+            "which every model receives graph signals regenerated from its own prediction. "
+            "Requires --synthetic-drive-cutoff."
+        ),
+    )
+    data_group.add_argument(
+        "--synthetic-free-train-percent",
+        type=float,
+        default=0.0,
+        help=(
+            "Percent of second-order rollout-training chunks that use a "
+            "self-generated zero-drive suffix. Requires --rollout-train-steps > 1."
+        ),
+    )
+    data_group.add_argument(
+        "--synthetic-free-train-cutoff",
+        type=int,
+        default=1,
+        help="Number of driven prediction steps retained before each free-training suffix.",
+    )
     data_group.add_argument("--seed", type=int, default=0, help="Random seed for simulated datasets.")
     data_group.add_argument(
         "--ift-variants",
@@ -973,7 +1006,28 @@ def main() -> None:
             raise ValueError("--synthetic-drive-cutoff is supported only for synthetic diffusion, wave, and coupled_oscillator tasks.")
         if args.synthetic_drive_cutoff < 1:
             raise ValueError("--synthetic-drive-cutoff must be at least one rollout step.")
+    if args.synthetic_free_rollout or args.synthetic_self_free_rollout:
+        if args.synthetic_drive_cutoff is None:
+            raise ValueError(
+                "--synthetic-free-rollout and --synthetic-self-free-rollout require "
+                "--synthetic-drive-cutoff."
+            )
+    if not 0.0 <= args.synthetic_free_train_percent <= 100.0:
+        raise ValueError("--synthetic-free-train-percent must lie in [0, 100].")
+    if args.synthetic_free_train_percent > 0.0:
+        if args.dataset != "synthetic" or args.synthetic_task not in {"diffusion", "wave", "coupled_oscillator"}:
+            raise ValueError("--synthetic-free-train-percent is supported only for synthetic field dynamics.")
+        if args.rollout_train_steps <= 1:
+            raise ValueError("--synthetic-free-train-percent requires --rollout-train-steps > 1.")
+        if args.synthetic_free_train_cutoff < 1 or args.synthetic_free_train_cutoff >= args.rollout_train_steps:
+            raise ValueError(
+                "--synthetic-free-train-cutoff must be at least one and smaller than --rollout-train-steps."
+            )
     base_train_cfg.synthetic_drive_cutoff = args.synthetic_drive_cutoff
+    base_train_cfg.synthetic_free_rollout = bool(args.synthetic_free_rollout)
+    base_train_cfg.synthetic_self_free_rollout = bool(args.synthetic_self_free_rollout)
+    base_train_cfg.synthetic_free_train_percent = float(args.synthetic_free_train_percent)
+    base_train_cfg.synthetic_free_train_cutoff = int(args.synthetic_free_train_cutoff)
     if args.rollout_train_steps < 1:
         raise ValueError("--rollout-train-steps must be at least 1.")
     base_train_cfg.rollout_train_steps = int(args.rollout_train_steps)

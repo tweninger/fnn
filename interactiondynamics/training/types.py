@@ -64,6 +64,15 @@ class TrainConfig:
     # Optional test-only intervention: retain the synthetic diffusion drive for
     # this many rollout steps, then set it to zero in the counterfactual world.
     synthetic_drive_cutoff: Optional[int] = None
+    # Optional field-intervention reports.  ``free`` retains oracle graph
+    # signals from the counterfactual simulator, whereas ``self_free``
+    # regenerates those signals from the model's own rollout prediction.
+    synthetic_free_rollout: bool = False
+    synthetic_self_free_rollout: bool = False
+    # Percent of autoregressive training chunks converted into a zero-drive,
+    # self-generated suffix.  This is meaningful only for rollout training.
+    synthetic_free_train_percent: float = 0.0
+    synthetic_free_train_cutoff: int = 1
     # Number of differentiable, autoregressive prediction steps per optimizer
     # update. One preserves the original one-step teacher-forced trainer.
     rollout_train_steps: int = 1
