@@ -19,6 +19,7 @@ from interactiondynamics.eval.evaluate import (
     _field_counterfactual_targets,
     _remove_wave_drive_events,
     _self_generate_grid_wave_events,
+    evaluate_physical_force_rollout,
     evaluate_k_step_rollout,
     evaluate_stream_sliced,
 )
@@ -106,6 +107,11 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
     cfg = ModelConfig(**asdict(model_cfg))
     cfg.use_node_scorer = bool(args.use_node_scorer) or bool(cfg.use_node_scorer)
     cfg.node_scorer_hidden = int(args.node_scorer_hidden)
+    if getattr(args, "fnn_force_decoder", None) is not None:
+        cfg.fnn_force_decoder = str(args.fnn_force_decoder)
+    cfg.fnn_learn_physical_params = bool(
+        getattr(args, "fnn_learn_physical_params", False)
+    ) or bool(cfg.fnn_learn_physical_params)
     return cfg
 
 
@@ -162,6 +168,132 @@ def _supports_rollout_training(model, cfg: TrainConfig, edge_targets) -> bool:
         and isinstance(getattr(model, "update", None), IFTSecondOrderUpdate)
         and getattr(model.update, "readout_mode", "default") == "linear_h_v_force"
     )
+
+
+def _supports_physical_rollout_training(model, cfg: TrainConfig, edge_targets) -> bool:
+    """Physical event rollouts have force events, not revealed edge targets."""
+    return bool(
+        edge_targets is None
+        and callable(getattr(model, "predict_event_features", None))
+    )
+
+
+def _train_one_epoch_physical_rollout(
+    model,
+    bins: Iterable[EventBatch],
+    optimizer: torch.optim.Optimizer,
+    cfg: TrainConfig,
+) -> dict[str, float]:
+    """Differentiable truncated force rollout with oracle pair queries.
+
+    Each chunk begins from a no-gradient, teacher-forced history.  It then
+    predicts the next ``K`` force bins, consumes its generated force events,
+    and accumulates the ordinary ranking-plus-force objective at every step.
+    Source/destination query schedules remain observed evaluation structure;
+    this is not an event-count/source generator.
+    """
+    model.train()
+    device = torch.device(cfg.device)
+    events_seq = [batch.to(device) for batch in bins]
+    horizon = int(cfg.rollout_train_steps)
+    if len(events_seq) < 2:
+        return {"loss": 0.0, "steps": 0}
+
+    episode_ranges: list[tuple[int, int]] = []
+    begin = 0
+    while begin < len(events_seq):
+        episode = None if events_seq[begin].episode is None else int(events_seq[begin].episode[0].item())
+        end = begin + 1
+        while end < len(events_seq):
+            candidate_episode = None if events_seq[end].episode is None else int(events_seq[end].episode[0].item())
+            if candidate_episode != episode:
+                break
+            end += 1
+        episode_ranges.append((begin, end))
+        begin = end
+
+    loss_sum = 0.0
+    metric_sums: dict[str, float] = {}
+    metric_counts: dict[str, int] = {}
+    updates = 0
+    prediction_steps = 0
+    for episode_begin, episode_end in episode_ranges:
+        # Chunks are independent after their observed burn-in.  This is a
+        # truncated rollout objective, not backpropagation through an entire
+        # episode, and keeps memory proportional to the requested horizon.
+        for start_idx in range(episode_begin, episode_end - 1, horizon):
+            end_idx = min(start_idx + horizon, episode_end - 1)
+            optimizer.zero_grad(set_to_none=True)
+            state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
+            with torch.no_grad():
+                for observed_idx in range(episode_begin, start_idx + 1):
+                    state, _ = model.step(state, events_seq[observed_idx])
+                if state is not None:
+                    state.detach_()
+
+            step_losses: list[torch.Tensor] = []
+            for target_idx in range(start_idx + 1, end_idx + 1):
+                target = events_seq[target_idx]
+                if target.features is None:
+                    continue
+                loss, metrics = ranking_loss_and_metrics(
+                    model=model,
+                    state=state,
+                    next_events=target,
+                    num_nodes=cfg.num_nodes,
+                    num_neg=cfg.num_neg,
+                )
+                step_losses.append(loss)
+                for key, value in metrics.items():
+                    metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
+                    metric_counts[key] = metric_counts.get(key, 0) + 1
+                prediction_steps += 1
+
+                query = EventBatch(
+                    src=target.src,
+                    dst=target.dst,
+                    t=target.t,
+                    episode=target.episode,
+                    is_external=target.is_external,
+                )
+                predicted_force = model.predict_event_features(state, query)
+                # Raindrops are observed interventions: carry their true force
+                # into the recurrent state while keeping only endogenous force
+                # responses in the loss above.
+                generated_features = predicted_force.clone()
+                if target.is_external is not None and bool(target.is_external.any()):
+                    external = target.is_external.to(dtype=torch.bool)
+                    generated_features[external] = target.features[external]
+                generated = EventBatch(
+                    src=target.src,
+                    dst=target.dst,
+                    features=generated_features,
+                    t=target.t,
+                    episode=target.episode,
+                    is_external=target.is_external,
+                )
+                state, _ = model.step(state, generated)
+
+            if not step_losses:
+                continue
+            chunk_loss = torch.stack(step_losses).mean()
+            # A sufficiently high observation threshold can make an entire
+            # chunk externally driven or quiet. There is then no endogenous
+            # supervision and consequently no graph-connected loss to
+            # differentiate; simply advance to the next chunk.
+            if not chunk_loss.requires_grad:
+                continue
+            chunk_loss.backward()
+            if cfg.grad_clip and cfg.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            optimizer.step()
+            loss_sum += float(chunk_loss.detach().item())
+            updates += 1
+
+    out = {"loss": loss_sum / max(updates, 1), "steps": prediction_steps}
+    for key, value in metric_sums.items():
+        out[key] = value / metric_counts[key]
+    return out
 
 
 def _train_one_epoch_rollout(
@@ -307,6 +439,8 @@ def train_one_epoch(
     if _supports_rollout_training(model, cfg, edge_targets):
         assert edge_targets is not None
         return _train_one_epoch_rollout(model, bins, edge_targets, optimizer, cfg)
+    if _supports_physical_rollout_training(model, cfg, edge_targets):
+        return _train_one_epoch_physical_rollout(model, bins, optimizer, cfg)
     model.train()
     device = torch.device(cfg.device)
     state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
@@ -351,7 +485,23 @@ def train_one_epoch(
         curr = curr.to(device)
         curr_node_target = None if target_iter is None else next(target_iter).to(device)
         curr_edge_target = None if edge_target_iter is None else next(edge_target_iter)
-        if prev is None:
+        episode_changed = (
+            prev is not None
+            and prev.episode is not None
+            and curr.episode is not None
+            and int(prev.episode[0].item()) != int(curr.episode[0].item())
+        )
+        if prev is None or episode_changed:
+            if episode_changed:
+                # Episodes are independent physical trajectories.  Their ID
+                # is sequence bookkeeping only; it is never passed to model.step.
+                state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
+                prev_node_target = None
+                prev_prev_node_target = None
+                prev_prev_prev_node_target = None
+                prev_edge_target = None
+                prev_prev_edge_target = None
+                prev_prev_prev_edge_target = None
             prev = curr
             if curr_node_target is not None:
                 prev_node_target = curr_node_target.detach().to(device)
@@ -746,6 +896,55 @@ def run_one_experiment(
         train_cfg.prediction_mode = run.prediction_mode
 
     model = build_model_fn(spec, run.model_cfg).to(device)
+    # Calibrate force supervision exactly once from *training* target forces.
+    # External impulses start episodes and are not next internal interactions,
+    # so exclude them from the target distribution.  The calibration is used
+    # only by the loss, never passed to a model as an observation.
+    configure_force_objective = getattr(model, "configure_event_feature_objective", None)
+    if callable(configure_force_objective) and bool(getattr(run.model_cfg, "predict_event_features", False) or getattr(run.model_cfg, "fnn", False)):
+        train_forces = []
+        for batch in ds.bins("train"):
+            if batch.features is None or batch.num_events == 0:
+                continue
+            keep = torch.ones(batch.num_events, dtype=torch.bool)
+            if batch.is_external is not None:
+                keep &= ~batch.is_external.detach().cpu()
+            if bool(keep.any()):
+                train_forces.append(batch.features.detach().cpu()[keep])
+        if train_forces:
+            forces = torch.cat(train_forces, dim=0).float()
+            raw_target_std = forces.std(dim=0, unbiased=False)
+            # Some physical tasks intentionally excite only a subspace (for
+            # example a vertical raindrop).  A zero-variance channel cannot
+            # define its own z-score; give it the typical *nonzero* channel
+            # scale so decoder noise is penalized without exploding the loss.
+            nonzero_scales = raw_target_std[raw_target_std > 1e-8]
+            fallback_scale = (
+                nonzero_scales.median()
+                if nonzero_scales.numel() > 0
+                else torch.tensor(1.0, dtype=raw_target_std.dtype)
+            )
+            target_std = torch.where(
+                raw_target_std > 1e-8,
+                raw_target_std,
+                fallback_scale.expand_as(raw_target_std),
+            ).clamp_min(1e-8)
+            magnitudes = forces.norm(dim=-1)
+            active_threshold = float(torch.quantile(magnitudes, 0.75).item())
+            magnitude_q90 = float(torch.quantile(magnitudes, 0.90).item())
+            configure_force_objective(
+                target_std=target_std,
+                active_threshold=active_threshold,
+                magnitude_q90=magnitude_q90,
+                magnitude_weight=float(getattr(run.model_cfg, "event_feature_magnitude_weight", 2.0)),
+            )
+            print(
+                "  force supervision"
+                f" | normalized by train std={target_std.tolist()}"
+                f" | active>=q75={active_threshold:.4g}"
+                f" | magnitude q90={magnitude_q90:.4g}"
+                f" | large-force weight={getattr(model, 'event_feature_magnitude_weight', 2.0):.3g}"
+            )
     optimizer = torch.optim.Adam(
         model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
     )
@@ -918,6 +1117,18 @@ def run_one_experiment(
             train_cfg,
             slices=eval_slices,
         )
+        recovery_stats: dict[str, float] = {}
+        hidden_truth_fn = getattr(ds, "hidden_truth", None)
+        recovery_fn = getattr(model, "recovery_metrics", None)
+        if callable(hidden_truth_fn) and callable(recovery_fn):
+            hidden_truth = hidden_truth_fn()
+            if hidden_truth is not None:
+                recovery_stats = recovery_fn(
+                    hidden_truth["adjacency"].to(device), hidden_truth["params"]
+                )
+                # Keep evaluation-only recovery quantities alongside test
+                # metrics so normal JSONL summaries can select them.
+                test_stats.update(recovery_stats)
         rollout_val_stats: dict[str, float] = {}
         rollout_test_stats: dict[str, float] = {}
         rollout_intervention_val_stats: dict[str, float] = {}
@@ -1012,6 +1223,20 @@ def run_one_experiment(
                     )
                 if bool(getattr(train_cfg, "synthetic_self_free_rollout", False)):
                     rollout_self_free_test_stats = rollout_intervention_test_stats
+        elif (
+            train_edge_targets is None
+            and train_node_targets is None
+            and callable(getattr(model, "predict_event_features", None))
+        ):
+            # Event-only physical tasks have no revealed scalar field target.
+            # Their rollout is closed-loop in predicted forces while retaining
+            # the future pair-query schedule as an explicit oracle condition.
+            rollout_val_stats = evaluate_physical_force_rollout(
+                model, ds.bins("val"), train_cfg, horizon=rollout_horizon
+            )
+            rollout_test_stats = evaluate_physical_force_rollout(
+                model, ds.bins("test"), train_cfg, horizon=rollout_horizon
+            )
 
         snapshot = {
             "epoch": epoch,
@@ -1019,6 +1244,7 @@ def run_one_experiment(
             "train_eval": train_eval,
             "val": val_stats,
             "test": test_stats,
+            "recovery": recovery_stats,
             "rollout_val": rollout_val_stats,
             "rollout_test": rollout_test_stats,
             "rollout_intervention_val": rollout_intervention_val_stats,

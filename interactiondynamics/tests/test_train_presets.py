@@ -9,6 +9,7 @@ from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
 from interactiondynamics.training.presets import (
     DIFFUSION_COMPARISON_PANEL,
     FIELD_COMPARISON_PANEL,
+    PHYSICAL_EVENT_COMPARISON_PANEL,
     build_suite,
     load_dataset,
 )
@@ -43,7 +44,7 @@ def test_quick_synthetic_suite_uses_task_specific_shortlist(task_name: str):
 
     task_pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
     expected_pairs = (
-        {("ift", "ift_update"), *DIFFUSION_COMPARISON_PANEL}
+        set(PHYSICAL_EVENT_COMPARISON_PANEL)
         if task_name in {"diffusion", "wave", "coupled_oscillator"}
         else set(SYNTHETIC_TASKS[task_name].recommended_pairs)
     )
@@ -55,29 +56,8 @@ def test_quick_synthetic_suite_uses_task_specific_shortlist(task_name: str):
     assert ds.spec().num_nodes == 20
 
 
-def test_diffusion_task_uses_the_fixed_first_order_comparison_panel() -> None:
-    args = _synthetic_args("diffusion")
-    suite = build_suite(
-        "quick",
-        torch.device("cpu"),
-        dataset_override="synthetic",
-        args=args,
-    )
-
-    assert [run.name for run in suite.runs[:3]] == [
-        "ift1_generic",
-        "ift1_linear",
-        "ift1_direct",
-    ]
-    pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
-    assert pairs == {("ift", "ift_update"), *DIFFUSION_COMPARISON_PANEL}
-    assert len(suite.runs) == 3 + len(DIFFUSION_COMPARISON_PANEL)
-
-
-def test_quick_synthetic_suite_can_replace_default_ift_run_with_selected_variants() -> None:
+def test_physical_tasks_use_the_shared_event_prediction_panel() -> None:
     args = _synthetic_args("wave")
-    args.ift_variants = ["linear", "auto"]
-    args.ift_history_steps = [3]
     suite = build_suite(
         "quick",
         torch.device("cpu"),
@@ -85,26 +65,21 @@ def test_quick_synthetic_suite_can_replace_default_ift_run_with_selected_variant
         args=args,
     )
 
-    run_names = [run.name for run in suite.runs]
-    assert run_names == [
-        "ift1_linear",
-        "ift2_linear",
-        "ift2_auto",
-        "ift2_hist_vel_k3",
+    assert [run.name for run in suite.runs] == [
+        "fnn",
         "sum/tgn_gru",
         "deepsets/tgn_gru",
         "settransformer/tgn_gru",
         "hopfield/hopfield_update",
-        "settransformer/lnn",
-        "settransformer/hnn",
     ]
-    assert suite.runs[3].prediction_mode == "delta"
-    assert suite.runs[3].lr == 1e-2
-    assert suite.runs[3].model_cfg.ift_history_vel_steps == 3
+    pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
+    assert pairs == set(PHYSICAL_EVENT_COMPARISON_PANEL)
+    assert all(run.model_cfg.predict_event_features for run in suite.runs)
+    assert suite.runs[0].model_cfg.fnn
 
 
-@pytest.mark.parametrize("task_name", ("wave", "coupled_oscillator"))
-def test_second_order_field_tasks_use_the_shared_comparison_panel(task_name: str) -> None:
+def test_wave_uses_the_shared_event_panel() -> None:
+    task_name = "wave"
     args = _synthetic_args(task_name)
     suite = build_suite(
         "quick",
@@ -114,31 +89,7 @@ def test_second_order_field_tasks_use_the_shared_comparison_panel(task_name: str
     )
 
     pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
-    assert pairs == {("ift", "ift_update"), *FIELD_COMPARISON_PANEL}
-
-
-def test_quick_synthetic_suite_expands_empty_ift_variant_selection_to_task_defaults() -> None:
-    args = _synthetic_args("diffusion")
-    args.ift_variants = []
-    suite = build_suite(
-        "quick",
-        torch.device("cpu"),
-        dataset_override="synthetic",
-        args=args,
-    )
-
-    assert [run.name for run in suite.runs[:10]] == [
-        "ift1_generic",
-        "ift1_linear",
-        "ift1_direct",
-        "ift2_generic",
-        "ift2_linear",
-        "ift2_direct",
-        "ift2_auto",
-        "ift2_hist_vel_k1",
-        "ift2_hist_vel_k2",
-        "ift2_hist_vel_k3",
-    ]
+    assert pairs == set(PHYSICAL_EVENT_COMPARISON_PANEL)
 
 
 def test_grid_wave_suite_can_add_a_closed_loop_self_rollout() -> None:
@@ -158,64 +109,6 @@ def test_grid_wave_suite_can_add_a_closed_loop_self_rollout() -> None:
     assert self_run.prediction_mode == "delta"
     assert self_run.model_cfg.ift_rollout_self_generated
     assert self_run.model_cfg.ift_history_vel_steps == 1
-
-
-def test_ring_wave_suite_can_add_drive_free_and_self_rollouts() -> None:
-    args = _synthetic_args("wave")
-    args.ift_variants = ["auto"]
-    args.ift_orders = [2]
-    args.ift_history_steps = [1]
-    args.ift_free_rollout = True
-    args.ift_self_rollout = True
-    suite = build_suite(
-        "quick",
-        torch.device("cpu"),
-        dataset_override="synthetic",
-        args=args,
-    )
-
-    free_run = next(run for run in suite.runs if run.name == "ift2_free_hist_vel_k1")
-    self_run = next(run for run in suite.runs if run.name == "ift2_self_hist_vel_k1")
-    assert free_run.model_cfg.ift_rollout_free_drive
-    assert not free_run.model_cfg.ift_rollout_self_generated
-    assert self_run.model_cfg.ift_rollout_self_generated
-
-
-def test_diffusion_suite_can_add_drive_free_and_self_rollouts() -> None:
-    args = _synthetic_args("diffusion")
-    args.ift_variants = ["auto"]
-    args.ift_orders = [2]
-    args.ift_history_steps = [1]
-    args.ift_free_rollout = True
-    args.ift_self_rollout = True
-    suite = build_suite(
-        "quick",
-        torch.device("cpu"),
-        dataset_override="synthetic",
-        args=args,
-    )
-
-    run_names = {run.name for run in suite.runs}
-    assert "ift2_free_hist_vel_k1" in run_names
-    assert "ift2_self_hist_vel_k1" in run_names
-    free_run = next(run for run in suite.runs if run.name == "ift2_free_hist_vel_k1")
-    self_run = next(run for run in suite.runs if run.name == "ift2_self_hist_vel_k1")
-    assert free_run.model_cfg.ift_rollout_free_drive
-    assert self_run.model_cfg.ift_rollout_self_generated
-
-
-def test_quick_synthetic_suite_rejects_auto_without_second_order() -> None:
-    args = _synthetic_args("diffusion")
-    args.ift_variants = ["auto"]
-    args.ift_orders = [1]
-
-    with pytest.raises(ValueError, match="require including second-order IFT"):
-        build_suite(
-            "quick",
-            torch.device("cpu"),
-            dataset_override="synthetic",
-            args=args,
-        )
 
 
 def test_quick_synthetic_suite_allows_variant_selection_on_non_ift_task() -> None:

@@ -44,6 +44,16 @@ class ModelConfig:
     scorer_dropout: float = 0.1 
     use_node_scorer: bool = False
 
+    # Event-only physical prediction.  When enabled, the model must predict
+    # the measured force vector for the *next* positive event.  Ranking heads
+    # are deliberately denied that vector as an input, avoiding target leak.
+    predict_event_features: bool = False
+    event_feature_loss_weight: float = 1.0
+    # Force targets are calibrated from the training split before fitting.
+    # This controls the extra emphasis placed on large, informative forces;
+    # it never changes the observed event inputs.
+    event_feature_magnitude_weight: float = 2.0
+
     # Time features (binned for now)
     use_time_features: bool = False
     time_emb_dim: int = 32  # used only if use_time_features=True
@@ -124,3 +134,22 @@ class ModelConfig:
     ift2_readout_trainable: bool = True
     ift_rollout_self_generated: bool = False
     ift_rollout_free_drive: bool = False
+
+    # ---- Field neural network (FNN) knobs ----
+    # The FNN learns a persistent operator rather than reconstructing one from
+    # the observed event pairs in the current bin.
+    fnn: bool = False
+    fnn_state_dim: int = 4
+    fnn_order: int = 2
+    fnn_topology_init: float = 0.0
+    fnn_gamma_init: float = 0.12
+    fnn_omega_init: float = 0.70
+    fnn_force_scale_init: float = 1.0
+    fnn_dt: float = 0.10
+    # Keep the physical update law fixed unless an experiment explicitly
+    # studies parameter recovery.  The topology and force readout remain
+    # trainable in either mode.
+    fnn_learn_physical_params: bool = False
+    # ``field_difference`` is the mechanism-constrained readout
+    # f(i -> j) = c * (h_i - h_j); ``linear`` is a small generic ablation.
+    fnn_force_decoder: str = "mlp"

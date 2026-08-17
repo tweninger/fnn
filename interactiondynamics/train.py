@@ -12,14 +12,8 @@ from interactiondynamics.data.interfaces import EdgeTargetBatch
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
 from interactiondynamics.data.synthetic import FIELD_TOPOLOGY_CHOICES
 from interactiondynamics.eval.node_metrics import regression_metrics
-from interactiondynamics.models.tgn_model import build_tgn_model
-from interactiondynamics.training.presets import (
-    IFT_HISTORY_STEP_CHOICES,
-    IFT_ORDER_CHOICES,
-    IFT_VARIANT_CHOICES,
-    build_suite,
-    load_dataset,
-)
+from interactiondynamics.models.model_factory import build_model
+from interactiondynamics.training.presets import build_suite, load_dataset
 from interactiondynamics.training.reporting import (
     infer_primary_metric,
 )
@@ -43,6 +37,10 @@ EDGE_TARGET_SCALE_CHOICES = ("raw", "zscore")
 PREDICTION_MODE_CHOICES = ("state", "delta", "state_plus_delta")
 DATASET_CHOICES = ("toy", "jodie", "synthetic")
 PRESET_CHOICES = ("smoke", "quick", "full")
+LEGACY_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
+PUBLIC_SYNTHETIC_TASKS = tuple(
+    name for name in SYNTHETIC_TASKS if name not in LEGACY_WAVE_TASKS
+)
 
 
 def _build_common_parser() -> argparse.ArgumentParser:
@@ -56,7 +54,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
     )
     data_group.add_argument(
         "--synthetic-task",
-        choices=tuple(SYNTHETIC_TASKS.keys()),
+        choices=PUBLIC_SYNTHETIC_TASKS,
         default="deepsets_sum",
         help="Synthetic benchmark task to use when --dataset synthetic.",
     )
@@ -76,7 +74,31 @@ def _build_common_parser() -> argparse.ArgumentParser:
         "--synthetic-events-per-bin",
         type=int,
         default=None,
-        help="Optional event-count override for set-based synthetic datasets.",
+        help="Optional observed-event count per synthetic bin; physical tasks subsample force-pair measurements.",
+    )
+    data_group.add_argument(
+        "--synthetic-num-episodes",
+        type=int,
+        default=None,
+        help="Independent trajectories for episodic physical synthetic tasks.",
+    )
+    data_group.add_argument(
+        "--synthetic-raindrop-interval",
+        type=int,
+        default=None,
+        help=(
+            "Observed external raindrop cadence within each physical episode; "
+            "omitted keeps one drop at the episode start."
+        ),
+    )
+    data_group.add_argument(
+        "--synthetic-event-threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "Absolute endogenous force magnitude required to emit an event, "
+            "in nominal raindrop-force units [0, 1]."
+        ),
     )
     data_group.add_argument(
         "--num-bins",
@@ -84,86 +106,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of simulated time bins for synthetic datasets.",
     )
-    data_group.add_argument(
-        "--synthetic-drive-cutoff",
-        type=int,
-        default=None,
-        help=(
-            "Test-only field intervention: keep the normal drive for this many "
-            "rollout steps, then evaluate against a counterfactual zero-drive suffix."
-        ),
-    )
-    data_group.add_argument(
-        "--synthetic-free-rollout",
-        action="store_true",
-        help=(
-            "Additionally report a fair zero-drive intervention in which every "
-            "model receives oracle neighbor signals from the counterfactual simulator. "
-            "Requires --synthetic-drive-cutoff."
-        ),
-    )
-    data_group.add_argument(
-        "--synthetic-self-free-rollout",
-        action="store_true",
-        help=(
-            "Additionally label the shared closed-loop zero-drive intervention, in "
-            "which every model receives graph signals regenerated from its own prediction. "
-            "Requires --synthetic-drive-cutoff."
-        ),
-    )
-    data_group.add_argument(
-        "--synthetic-free-train-percent",
-        type=float,
-        default=0.0,
-        help=(
-            "Percent of second-order rollout-training chunks that use a "
-            "self-generated zero-drive suffix. Requires --rollout-train-steps > 1."
-        ),
-    )
-    data_group.add_argument(
-        "--synthetic-free-train-cutoff",
-        type=int,
-        default=1,
-        help="Number of driven prediction steps retained before each free-training suffix.",
-    )
     data_group.add_argument("--seed", type=int, default=0, help="Random seed for simulated datasets.")
-    data_group.add_argument(
-        "--ift-variants",
-        nargs="*",
-        choices=IFT_VARIANT_CHOICES,
-        default=None,
-        help=(
-            "Replace the default quick/smoke IFT run with an IFT variant sweep over "
-            f"{IFT_VARIANT_CHOICES}. Pass no variant names to sweep them all."
-        ),
-    )
-    data_group.add_argument(
-        "--ift-orders",
-        nargs="*",
-        type=int,
-        choices=IFT_ORDER_CHOICES,
-        default=None,
-        help="Optional subset of IFT orders to sweep when --ift-variants is active. Defaults to 1 and 2.",
-    )
-    data_group.add_argument(
-        "--ift-history-steps",
-        nargs="*",
-        type=int,
-        choices=IFT_HISTORY_STEP_CHOICES,
-        default=None,
-        help="Optional subset of history readout steps to sweep for the IFT auto variant. Defaults to 1, 2, and 3.",
-    )
-    data_group.add_argument(
-        "--ift-self-rollout",
-        action="store_true",
-        help="Add a deterministic closed-loop self-field rollout for ring- and grid-wave tasks.",
-    )
-    data_group.add_argument(
-        "--ift-free-rollout",
-        action="store_true",
-        help="Add a drive-free IFT2 rollout for ring- and grid-wave tasks.",
-    )
-
     train_group = common.add_argument_group("training")
     train_group.add_argument(
         "--max-runs",
@@ -181,7 +124,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
         "--rollout-horizon",
         type=int,
         default=5,
-        help="Evaluate k-step target rollout with this horizon for regression datasets.",
+        help="Evaluate closed-loop rollouts up to this horizon where supported.",
     )
     train_group.add_argument(
         "--rollout-train-steps",
@@ -189,7 +132,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
         default=1,
         help=(
             "Number of differentiable autoregressive steps per optimizer update for compatible "
-            "IFT2 history-readout runs. One keeps ordinary one-step training."
+            "physical force models. One keeps ordinary one-step training."
         ),
     )
     train_group.add_argument(
@@ -209,31 +152,49 @@ def _build_common_parser() -> argparse.ArgumentParser:
         default=128,
         help="Hidden size for the auxiliary node scorer MLP.",
     )
+    train_group.add_argument(
+        "--fnn-force-decoder",
+        choices=("mlp", "linear", "field_difference"),
+        default=None,
+        help=(
+            "FNN force readout: current MLP default, bias-free linear ablation, "
+            "or constrained shared field difference."
+        ),
+    )
+    train_group.add_argument(
+        "--fnn-learn-physical-params",
+        action="store_true",
+        help=(
+            "Allow FNN to optimize gamma, omega (for second-order dynamics), and "
+            "the field-difference force scale when applicable. "
+            "By default these remain fixed at their model-preset values."
+        ),
+    )
 
     target_group = common.add_argument_group("targets")
     target_group.add_argument(
         "--node-target-mode",
         choices=TARGET_MODE_CHOICES,
         default="raw",
-        help="Train the node head on raw next-step node values or residuals relative to the previous step.",
+        help="Revealed-node-target tasks only: train on raw next-step values or residuals.",
     )
     target_group.add_argument(
         "--edge-target-mode",
         choices=TARGET_MODE_CHOICES,
         default="raw",
-        help="Train the edge head on raw next-step magnitudes or residuals relative to the previous step.",
+        help="Revealed-edge-target tasks only: train on raw next-step values or residuals.",
     )
     target_group.add_argument(
         "--edge-target-scale",
         choices=EDGE_TARGET_SCALE_CHOICES,
         default="raw",
-        help="Use raw edge MSE or scale edge regression loss by the train-split target std.",
+        help="Revealed-edge-regression tasks only: use raw or train-std-scaled MSE.",
     )
     target_group.add_argument(
         "--prediction-mode",
         choices=PREDICTION_MODE_CHOICES,
         default="state",
-        help="Train regression heads on next-state targets, delta targets, or reconstructed state from predicted deltas.",
+        help="Revealed regression tasks only: predict state, delta, or state-plus-delta.",
     )
 
     output_group = common.add_argument_group("output")
@@ -953,7 +914,10 @@ def _validate_rollout_training_selection(runs: Sequence[SweepRun], rollout_train
             and cfg.ift_update_order == "second"
             and cfg.ift2_readout_mode == "linear_h_v_force"
         )
-        if supports_rollout_training:
+        supports_physical_rollout_training = bool(
+            getattr(cfg, "fnn", False) or getattr(cfg, "predict_event_features", False)
+        )
+        if supports_rollout_training or supports_physical_rollout_training:
             compatible.append(run.name)
         elif is_ift:
             unsupported_ift.append(run.name)
@@ -967,8 +931,8 @@ def _validate_rollout_training_selection(runs: Sequence[SweepRun], rollout_train
         )
     if not compatible:
         raise ValueError(
-            "--rollout-train-steps > 1 requires a second-order IFT run with the "
-            "H/V/force readout (for example --ift-variants auto --ift-orders 2)."
+            "--rollout-train-steps > 1 requires a physical event model with a force "
+            "decoder, or a second-order IFT run with the H/V/force readout."
         )
 
 
@@ -1000,34 +964,47 @@ def main() -> None:
     base_train_cfg.edge_target_scale = str(args.edge_target_scale)
     base_train_cfg.prediction_mode = _resolve_prediction_mode(str(args.prediction_mode))
     base_train_cfg.rollout_horizon = int(args.rollout_horizon)
-    if args.synthetic_drive_cutoff is not None:
+    if args.synthetic_raindrop_interval is not None:
         supported_field_tasks = {"diffusion", "wave", "coupled_oscillator"}
         if args.dataset != "synthetic" or args.synthetic_task not in supported_field_tasks:
-            raise ValueError("--synthetic-drive-cutoff is supported only for synthetic diffusion, wave, and coupled_oscillator tasks.")
-        if args.synthetic_drive_cutoff < 1:
-            raise ValueError("--synthetic-drive-cutoff must be at least one rollout step.")
-    if args.synthetic_free_rollout or args.synthetic_self_free_rollout:
-        if args.synthetic_drive_cutoff is None:
             raise ValueError(
-                "--synthetic-free-rollout and --synthetic-self-free-rollout require "
-                "--synthetic-drive-cutoff."
+                "--synthetic-raindrop-interval is supported only for synthetic "
+                "diffusion, wave, and coupled_oscillator tasks."
             )
-    if not 0.0 <= args.synthetic_free_train_percent <= 100.0:
-        raise ValueError("--synthetic-free-train-percent must lie in [0, 100].")
-    if args.synthetic_free_train_percent > 0.0:
+        if args.synthetic_raindrop_interval < 1:
+            raise ValueError("--synthetic-raindrop-interval must be at least one local episode step.")
+    if args.synthetic_event_threshold < 0.0 or args.synthetic_event_threshold > 1.0:
+        raise ValueError("--synthetic-event-threshold must lie in [0, 1] nominal raindrop-force units.")
+    if args.synthetic_event_threshold != 0.0 and not (
+        args.dataset == "synthetic" and args.synthetic_task in {"diffusion", "wave", "coupled_oscillator"}
+    ):
+        raise ValueError("--synthetic-event-threshold is supported only for event-only physical synthetic tasks.")
+    if args.synthetic_num_episodes is not None:
         if args.dataset != "synthetic" or args.synthetic_task not in {"diffusion", "wave", "coupled_oscillator"}:
-            raise ValueError("--synthetic-free-train-percent is supported only for synthetic field dynamics.")
-        if args.rollout_train_steps <= 1:
-            raise ValueError("--synthetic-free-train-percent requires --rollout-train-steps > 1.")
-        if args.synthetic_free_train_cutoff < 1 or args.synthetic_free_train_cutoff >= args.rollout_train_steps:
             raise ValueError(
-                "--synthetic-free-train-cutoff must be at least one and smaller than --rollout-train-steps."
+                "--synthetic-num-episodes is supported only for episodic synthetic "
+                "diffusion, wave, and coupled_oscillator tasks."
             )
-    base_train_cfg.synthetic_drive_cutoff = args.synthetic_drive_cutoff
-    base_train_cfg.synthetic_free_rollout = bool(args.synthetic_free_rollout)
-    base_train_cfg.synthetic_self_free_rollout = bool(args.synthetic_self_free_rollout)
-    base_train_cfg.synthetic_free_train_percent = float(args.synthetic_free_train_percent)
-    base_train_cfg.synthetic_free_train_cutoff = int(args.synthetic_free_train_cutoff)
+        if args.synthetic_num_episodes < 3:
+            raise ValueError("--synthetic-num-episodes must be at least three so train/val/test receive whole episodes.")
+    physical_synthetic_task = args.dataset == "synthetic" and args.synthetic_task in {
+        "diffusion", "wave", "coupled_oscillator"
+    }
+    if (args.fnn_force_decoder is not None or args.fnn_learn_physical_params) and not physical_synthetic_task:
+        raise ValueError(
+            "--fnn-force-decoder and --fnn-learn-physical-params are supported only "
+            "for event-only synthetic diffusion, wave, and coupled_oscillator tasks."
+        )
+    if physical_synthetic_task:
+        if args.use_node_scorer or args.node_loss_weight != 1.0 or args.node_scorer_hidden != 128:
+            raise ValueError("Node-scorer flags do not apply to event-only physical force tasks.")
+        if (
+            args.node_target_mode != "raw"
+            or args.edge_target_mode != "raw"
+            or args.edge_target_scale != "raw"
+            or args.prediction_mode != "state"
+        ):
+            raise ValueError("Target-transform flags do not apply to event-only physical force tasks.")
     if args.rollout_train_steps < 1:
         raise ValueError("--rollout-train-steps must be at least 1.")
     base_train_cfg.rollout_train_steps = int(args.rollout_train_steps)
@@ -1100,7 +1077,11 @@ def main() -> None:
     results: list[RunResult] = []
     for run in runs:
         print(f"run {short_run_label(run)} | seed={run.seed}")
-        if run.model_cfg.aggregator == "ift" and spec.extra is not None:
+        if (
+            run.model_cfg.aggregator == "ift"
+            and not bool(getattr(run.model_cfg, "fnn", False))
+            and spec.extra is not None
+        ):
             feature_schema = list(spec.extra.get("task_axes", {}).get("feature_schema", []))
             print(
                 "  ift config"
@@ -1116,7 +1097,7 @@ def main() -> None:
                 spec=spec,
                 base_train_cfg=base_train_cfg,
                 run=run,
-                build_model_fn=build_tgn_model,  # type: ignore[arg-type]
+                build_model_fn=build_model,  # type: ignore[arg-type]
                 epochs=epochs,
                 objective_metric=objective_metric,
                 eval_slices=suite.eval_slices,

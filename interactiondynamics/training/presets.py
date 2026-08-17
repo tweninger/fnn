@@ -39,6 +39,17 @@ FIELD_COMPARISON_PANEL = (
     ("settransformer", "lnn"),
     ("settransformer", "hnn"),
 )
+
+# The canonical physical-event benchmark has a single input/output contract:
+# observed force events in, next pair plus next force vector out.  IFT, LNN,
+# and HNN are intentionally not part of this panel: they belong to the retired
+# revealed-state experiments rather than this event-only comparison.
+PHYSICAL_EVENT_COMPARISON_PANEL = (
+    ("sum", "tgn_gru"),
+    ("deepsets", "tgn_gru"),
+    ("settransformer", "tgn_gru"),
+    ("hopfield", "hopfield_update"),
+)
 # Backward-compatible name for callers that still refer to the original
 # first-order diffusion panel.  The same architecture-paired baselines are
 # now used for every topology-aware field dynamic.
@@ -483,6 +494,25 @@ def _field_baseline_runs(model_cfg: ModelConfig, *, seed: int) -> list[SweepRun]
     return runs
 
 
+def _physical_event_runs(model_cfg: ModelConfig, *, seed: int) -> list[SweepRun]:
+    """FNN plus neural baselines under the same event/force objective."""
+    runs: list[SweepRun] = []
+
+    fnn_cfg = ModelConfig(**asdict(model_cfg))
+    fnn_cfg.fnn = True
+    fnn_cfg.fnn_state_dim = int(model_cfg.event_dim or 1)
+    fnn_cfg.predict_event_features = True
+    runs.append(SweepRun(name="fnn", model_cfg=fnn_cfg, lr=3e-3, seed=seed))
+
+    for aggregator, update in PHYSICAL_EVENT_COMPARISON_PANEL:
+        cfg = ModelConfig(**asdict(model_cfg))
+        cfg.aggregator = aggregator  # type: ignore[assignment]
+        cfg.update = update  # type: ignore[assignment]
+        cfg.predict_event_features = True
+        runs.append(SweepRun(name=f"{aggregator}/{update}", model_cfg=cfg, seed=seed))
+    return runs
+
+
 def _full_runs(model_cfg: ModelConfig) -> list[SweepRun]:
     return make_runs(model_cfg, **_full_run_grid())
 
@@ -524,6 +554,9 @@ def build_synthetic_dataset_config(
         num_nodes=dataset_num_nodes,
         num_bins=dataset_num_bins,
         events_per_bin=dataset_events,
+        num_episodes=int(10 if getattr(args, "synthetic_num_episodes", None) is None else args.synthetic_num_episodes),
+        raindrop_interval=getattr(args, "synthetic_raindrop_interval", None),
+        event_threshold=float(getattr(args, "synthetic_event_threshold", 0.0)),
         field_topology=topology,
         seed=int(args.seed),
         device=device,
@@ -548,7 +581,13 @@ def _build_synthetic_suite(
     model_cfg.event_dim = task_spec.event_dim
     model_cfg.use_node_scorer = task_spec.requires_node_scorer
 
-    if preset in {"smoke", "quick"} and synthetic_cfg.task == "diffusion":
+    if synthetic_cfg.task in {"diffusion", "wave", "coupled_oscillator"}:
+        model_cfg.predict_event_features = True
+        model_cfg.fnn_order = 1 if synthetic_cfg.task == "diffusion" else 2
+        runs = _physical_event_runs(model_cfg, seed=int(args.seed))
+        epochs = 2 if preset == "smoke" else 20
+        early_steps = 5 if preset == "smoke" else 10
+    elif preset in {"smoke", "quick"} and synthetic_cfg.task == "diffusion":
         runs = _diffusion_runs(model_cfg, seed=int(args.seed))
         if _ift_selector_requested(args):
             selected_ift_runs = _resolve_selected_ift_variant_runs(

@@ -68,11 +68,12 @@ controls, but they are not evidence for a first- or second-order field claim.
 
 | Task | Domain and mechanism | Recommended use |
 | --- | --- | --- |
-| `diffusion` | Driven diffusion over a selected interaction topology: ring by default, or grid-derived domains. | Main first-order mechanism test. |
+| `diffusion` | Episodic first-order diffusion from one observed impulse over a hidden selected topology. | Main first-order mechanism test. |
 
-The normal `diffusion` shortlist is its first-order comparison panel: three
-FNN forcing variants; Sum, Deep Sets, and Set Transformer with GRU; Hopfield
-with its Hopfield update; and Set Transformer with LNN and HNN updates. For a
+The event-only `wave` shortlist is: the proposed
+FNN; Sum, Deep Sets, and Set Transformer with a TGN/GRU update; and Hopfield
+with its Hopfield update. Every model sees only prior force events and predicts
+the next interaction pair and its force vector. For a
 longer pilot, run:
 
 ```bash
@@ -95,7 +96,9 @@ venv/bin/python -m interactiondynamics.train quick \
 
 The field topologies are `ring` (default), `grid`, `torus`, `doorway`, and
 `swisscheese`. They can be paired independently with the topology-aware
-`diffusion`, `wave`, and `coupled_oscillator` synthetic tasks.
+`diffusion`, `wave`, and `coupled_oscillator` synthetic tasks. All three use
+the event-only episodic generator: an observed impulse starts a trajectory and
+the subsequent directed force events are the model's only observations.
 
 #### Second-order — inertia, velocity, and waves
 
@@ -103,9 +106,8 @@ The field topologies are `ring` (default), `grid`, `torus`, `doorway`, and
 | --- | --- | --- |
 | Local driven oscillator | `temporal_memory`, `node_temporal_regression`, `node_temporal_state`, `edge_temporal_state`, `next_dst_temporal_ranking` | Independent self-loop systems with AR(2)-style state, velocity carry-over, and forcing; **not** graph propagation. |
 | Conservative local oscillator | `conservative_oscillator` | Lightly driven, long-memory second-order oscillator. |
-| Graph wave | `wave` | Driven second-order wave propagation; pair with any field topology. |
-| Graph-coupled oscillator | `coupled_oscillator` | Damped harmonic restoring dynamics plus topology-dependent coupling; pair with any field topology. |
-| Legacy topology-specific waves | `wave_grid`, `wave_torus`, `wave_doorway`, `wave_swisscheese` | Backward-compatible aliases for the corresponding wave/topology pairs. |
+| Graph wave | `wave` | A hidden fixed topology and vector-valued damped wave field emit directed force events. An observed raindrop starts each episode, with optional later observed drops into the same field. |
+| Graph-coupled oscillator | `coupled_oscillator` | A hidden fixed topology with coupled oscillator dynamics emits directed force events. |
 
 For new experiments, select the dynamic with `--synthetic-task` and the
 domain independently with `--synthetic-topology`. For example:
@@ -118,10 +120,10 @@ venv/bin/python -m interactiondynamics.train quick --dataset synthetic \
   --synthetic-task coupled_oscillator --synthetic-topology doorway
 ```
 
-Grid-derived domains use sparse local drives and topology-specific neighbor
-events. `grid` has reflecting outer boundaries, `torus` wraps both axes,
-`doorway` adds a wall with a three-node aperture, and `swisscheese` removes
-circular patches of nodes.
+The hidden topology controls which directed force interactions are emitted.
+`grid` has reflecting outer boundaries, `torus` wraps both axes, `doorway`
+adds a wall with a three-node aperture, and `swisscheese` removes circular
+patches of nodes.
 
 ### CLI reference
 
@@ -142,53 +144,50 @@ Common dataset flags:
 - `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand.
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
 - `--synthetic-topology {ring,grid,torus,doorway,swisscheese}`: choose the domain independently for `diffusion`, `wave`, or `coupled_oscillator`; the default is `ring`.
-- `--synthetic-drive-cutoff T`: for `diffusion`, `wave`, or `coupled_oscillator`, retain the regular drive for the first `T` steps of each evaluation rollout, then compare predictions with a simulator-generated zero-drive suffix. Training data and ordinary rollout metrics are unchanged.
-- `--synthetic-free-rollout`: additionally report the shared **free / oracle-neighbor** zero-drive intervention. Every model receives neighbor signals constructed from the counterfactual simulator state; this isolates removal of external forcing without claiming autonomous inference.
-- `--synthetic-self-free-rollout`: additionally save the shared **self-free** intervention result. Every model receives the same fixed topology, but its neighbor event signals are regenerated from its own predicted field and all post-cutoff drives are zero. This is the closed-loop condition.
-- `--synthetic-free-train-percent P`: with second-order differentiable rollout training, convert exactly `P` percent of eligible training chunks per epoch into self-generated zero-drive suffixes. Pair with `--synthetic-free-train-cutoff K`, which retains `K` driven prediction steps at the start of each selected chunk.
 - `--synthetic-num-nodes N`: override synthetic node count.
-- `--synthetic-events-per-bin N`: override synthetic event count per bin for set-style tasks.
+- `--synthetic-events-per-bin N`: override observed event count per bin. For physical tasks this subsamples directed internal force measurements; observed raindrops are retained.
+- `--synthetic-num-episodes N`: number of independent trajectories for episodic physical dynamics; splits preserve whole trajectories.
+- `--synthetic-raindrop-interval K`: for physical dynamics, inject an observed external raindrop every `K` local steps within an episode (in addition to step 0). Drops update all model states but are excluded from prediction loss because their time, node, and amplitude are exogenous.
+- `--synthetic-event-threshold TAU`: emit an endogenous physical interaction only when its force-vector magnitude exceeds `TAU`, in fixed nominal-raindrop-force units from `0` to `1`. `0` retains every nonzero physical interaction.
 - `--num-bins N`: override the number of simulated synthetic time bins.
 - `--seed N`: set the synthetic-data random seed.
-- `--ift-variants [VARIANT ...]`: on `smoke` or `quick`, replace the default `ift/ift_update` run with an IFT sweep over one or more variant families from `{generic, linear, direct, auto}`. Pass no variant names to sweep them all. Using this flag auto-selects the synthetic dataset.
-- `--ift-orders [1 2 ...]`: optionally restrict the IFT sweep to first-order, second-order, or both. Defaults to `1 2` when IFT variants are selected.
-- `--ift-history-steps [1 2 3 ...]`: optionally restrict the history readout sweep for the `auto` family. Defaults to `1 2 3`.
-- `--ift-self-rollout`: add the IFT2 history model evaluated with self-generated neighbor signals and no future external drives. Supported for the field dynamics (`diffusion`, `wave`, and `coupled_oscillator`).
-- `--ift-free-rollout`: add the IFT2 history model evaluated with observed neighbor signals but no future external drives. Supported for the field dynamics. Together with `--ift-self-rollout`, this separates missing forcing from self-generated relational inputs.
+
+Physical rollout JSONL records include both `rollout_by_step` (distance from
+the rollout start) and `rollout_by_steps_since_external` (distance from the
+most recent observed raindrop). The latter isolates the predicted response at
+`+1`, `+2`, and later bins after each intervention. Matching
+`rollout_persistent_*` aggregates and per-step curves freeze the model state
+at the observed rollout start; they receive the same future pair queries but
+no later generated forces or observed raindrops update that state.
+
+For the event-only physical tasks, force supervision is calibrated once from
+the training split: each force channel is normalized by its training standard
+deviation, while events in the upper force-magnitude range receive extra loss
+weight. Reports retain raw `force_mse` for the physical error, and add
+`force_nrmse`, `force_weighted_nrmse`, and `active_force_mse` (the upper 25% of
+training-force magnitudes). These quantities are loss/evaluation calibration
+only—not inputs available to any model.
 
 Common training flags:
 
 - `--max-runs N`: cap the number of runs executed after filtering the preset.
 - `--epochs N`: override the preset epoch count.
-- `--rollout-horizon K`: set rollout evaluation horizon for regression tasks.
-- Rollout JSONL records include `rollout_val.rollout_by_step` and `rollout_test.rollout_by_step`, keyed by relative step (`"1"`, `"2"`, …). Each entry contains the per-step regression metrics; the existing aggregate rollout fields are retained for compatibility.
-- `--rollout-train-steps K`: for compatible IFT2 history-readout runs, optimize an average loss over `K` differentiable autoregressive steps before each optimizer update. With `--ift-self-rollout`, regenerated neighbor signals and removed future drives are used during this training unroll too. The default, `1`, is the original one-step trainer.
+- `--rollout-horizon K`: set the maximum closed-loop rollout horizon where supported.
+- Physical rollout JSONL records include both distance-from-start and distance-from-raindrop curves; aggregate metrics are retained as `rollout_*` fields.
+- `--rollout-train-steps K`: optimize an average loss over `K` differentiable autoregressive event-prediction steps before each optimizer update. The default, `1`, is ordinary one-step training.
 - `--use-node-scorer`: force-enable the auxiliary node scorer.
 - `--node-loss-weight W`: weight for the node prediction loss.
 - `--node-scorer-hidden H`: hidden width for the node scorer MLP.
 
-For the field benchmarks, ordinary `rollout_*` metrics are **driven
-rollouts**: the model receives the observed event bin and observed prior
-target/readout history at every step. This makes IFT, TGN, and the other
-baselines comparable under the same observed-input forecast condition. A
-`--synthetic-drive-cutoff T` result shares that exact observed prefix through
-step `T`, then switches to closed-loop predicted readout history and
-simulator-generated zero-drive graph messages. Its suffix is therefore a
-genuine free-response intervention rather than another driven forecast.
-
-The extra intervention blocks make the input protocol explicit: `rollout_free_*`
-uses counterfactual simulator neighbor signals (an oracle-relational condition),
-whereas `rollout_self_free_*` regenerates neighbor signals from each model's own
-prediction. Both are evaluated against the same zero-drive simulator target, so
-IFT, GRU, Deep Sets, Set Transformer, Hopfield, LNN, and HNN receive the same
-condition-specific event stream.
+For event-only physical benchmarks, rollouts begin from observed history,
+then feed each model's predicted internal force events back into its state.
+The future source/destination measurement schedule remains an explicit oracle
+condition; random external raindrops are instead supplied as observed
+interventions to every model.
 
 Target and loss flags:
 
-- `--node-target-mode {raw,residual}`: train node targets directly or as deltas from the previous step.
-- `--edge-target-mode {raw,residual}`: train edge targets directly or as deltas from the previous step.
-- `--edge-target-scale {raw,zscore}`: use raw edge regression loss or z-score scaled loss.
-- `--prediction-mode {state,delta,state_plus_delta}`: predict next state directly, predict deltas, or reconstruct state from predicted deltas.
+- These flags apply only to legacy revealed-target benchmarks: `--node-target-mode`, `--edge-target-mode`, `--edge-target-scale`, and `--prediction-mode`.
 
 Output flags:
 
@@ -198,158 +197,6 @@ Compatibility note:
 
 - The hidden legacy form `venv/bin/python -m interactiondynamics.train --preset {smoke,quick,full}` is still supported, with `full` mapping to `sweep`.
 - Classification tasks require `--node-target-mode raw` and `--edge-target-mode raw`.
-
-## IFT variants
-
-The `ift` path supports both first-order diffusion-style updates and second-order oscillator-style variants without leaving the event-bin architecture.
-
-- First-order IFT:
-  - aggregator builds a graph/Laplacian from event bins
-  - update uses diffusion, damping, and forcing
-- Second-order IFT:
-  - carries explicit velocity memory
-  - supports scalar `h/v/force` readout for AR(2)-style diagnostics
-  - supports teacher-forced or autonomous rollout evaluation
-
-For synthetic quick/smoke runs, the shortlist normally includes one default `ift` + `ift_update` run when the task recommends it.
-Passing `--ift-variants` replaces that one default IFT run with a sweep over the selected IFT axes while leaving the other quick baseline models in place.
-
-The selector is available on all synthetic tasks.
-
-The sweep axes are:
-
-- order: `1`, `2`
-- variant family: `generic`, `linear`, `direct`, `auto`
-- history steps: `1`, `2`, `3`
-
-How the sweep expands:
-
-- `generic`, `linear`, and `direct` create `ift1_*` and/or `ift2_*` runs depending on `--ift-orders`
-- `auto` creates `ift2_auto`
-- `--ift-history-steps` adds `ift2_hist_vel_k1`, `ift2_hist_vel_k2`, and `ift2_hist_vel_k3` style runs for the `auto` family
-- tasks with event features can sweep all four variant families
-- zero-event tasks currently support `generic` only
-- `--ift-history-steps` requires `auto`
-- `auto` and history sweeps require second-order IFT, so `--ift-orders` must include `2`
-
-Useful commands:
-
-```bash
-venv/bin/python -m interactiondynamics.train quick --synthetic-task diffusion --ift-variants linear --ift-orders 1
-venv/bin/python -m interactiondynamics.train quick --synthetic-task wave --ift-variants auto --ift-history-steps 1 2 3
-venv/bin/python -m interactiondynamics.train quick --synthetic-task conservative_oscillator --ift-variants --ift-orders 1 2
-venv/bin/python -m interactiondynamics.train quick --synthetic-task wave --ift-variants linear auto --ift-orders 2 --ift-history-steps 3 --num-bins 40 --rollout-horizon 5
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task edge_temporal_state --epochs 5 --num-bins 96 --synthetic-num-nodes 50 --synthetic-events-per-bin 48 --rollout-horizon 6 --ift-variants linear auto --ift-orders 2 --ift-history-steps 2
-venv/bin/python -m interactiondynamics.train quick --synthetic-task deepsets_sum --ift-variants direct --ift-orders 1
-venv/bin/python -m interactiondynamics.train quick --synthetic-task node_count_threshold --ift-variants
-```
-
-These runs go through the normal training/eval loop, so the output stays the standard per-run quick preset summary instead of a separate diagnostic table.
-When `--ift-variants` is active, the CLI also prints an IFT diagnostic footer at the end with rollout/state metrics, learned dynamics stats, and any active linear `h/v/force` readout coefficients.
-
-### Worked example: `edge_temporal_state`
-
-Command:
-
-```bash
-venv/bin/python -m interactiondynamics.train quick --dataset synthetic --synthetic-task edge_temporal_state --epochs 5 --num-bins 96 --synthetic-num-nodes 50 --synthetic-events-per-bin 48 --rollout-horizon 6 --ift-variants linear auto --ift-orders 2 --ift-history-steps 2
-```
-
-Example output:
-
-```text
-=== Sweep summary (sorted by val.edge_auroc) ===
-method                   seed   kind    objective          val.edge_f1      test.edge_auroc         test.edge_f1
------------------------------------------------------------------------------------------------------------------
-ift2_auto                   0   edge       0.9993               0.9774               0.9987               0.9776
-ift2_hist_vel_k2            0   edge       0.9987               0.9733               0.9978               0.9736
-ift2_linear                 0   edge       0.9163               0.5106               0.8885               0.4676
-sum/tgn_gru                 0   edge       0.7841               0.6427               0.7583               0.6654
-sum/hnn                     0   edge       0.6818                0.622               0.6294               0.6514
-sum/lnn                     0   edge       0.5862             0.009881               0.6022               0.1094
-
-=== IFT diagnostic table: edge_temporal_state ===
-run                  target   auc_v   auc_t    f1_v    f1_t  state_v  state_t   roll_v   roll_t     pers   d_pers delta_r2 delta_mae   vel_r2   kappa   gamma     dt   alpha    force     diff    rel_d    rel_u   vel_f   for_f   d_corr  vel_mse
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-ift2_auto              edge   0.999   0.999   0.977   0.978        -        -        -        -        -        -        -         -   -0.029   0.693   0.000  1.409   0.781    0.914    0.000    0.000    0.265   0.716   0.284        -    0.051
-  coeffs | w_y=1.2855 w_v=0.6353 w_drive=1.4387 bias=-0.5171
-ift2_hist_vel_k2       edge   0.999   0.998   0.973   0.974        -        -        -        -        -        -        -         -   -0.034   0.853   0.000  0.130   0.739    0.828    0.000    0.000    0.075   0.680   0.320        -    0.051
-  coeffs | w_y=0.5542 w_v=0.4326 w_drive=0.5414 bias=-0.0893
-ift2_linear            edge   0.916   0.889   0.511   0.468        -        -        -        -        -        -        -         -   -0.094   0.983   0.000  0.102   0.997    0.929    0.000    0.000    0.076   0.875   0.125        -    0.054
-  coeffs | w_y=0.2185 w_v=0.2558 w_drive=0.2747 bias=0.0460
-```
-
-Interpretation:
-
-- The autonomous second-order IFT variants dominate this task. `ift2_auto` is best on both validation and test AUROC/F1, and `ift2_hist_vel_k2` is a very close second.
-- `ift2_linear` is much weaker than the autonomous variants, which suggests this task benefits from the richer second-order autonomous readout rather than a simpler linear forcing path alone.
-- The non-IFT baselines are clearly behind here, especially on AUROC, which is the main sign that the temporal-state classification target is aligned with the IFT inductive bias.
-- The blank `state_*`, `roll_*`, and delta columns are expected for classification tasks. Those diagnostics are only defined for regression targets, while classification tasks surface `auc_*` and `f1_*` instead.
-- In the footer, both strong IFT runs learn positive `w_y`, `w_v`, and `w_drive`, so the classifier is using current state, velocity, and drive together. `ift2_auto` leans harder on the drive term and ends up slightly ahead of the history-based variant.
-
-### What the field quantities mean
-
-The IFT models maintain a latent node state over the graph induced by each event bin.
-
-- `h_t in R^(N x d)` is the latent node state at time bin `t`, one `d`-dimensional state per node.
-- The events in the current bin induce an adjacency `A_t`. In the default IFT aggregator, that adjacency is made undirected and can be built from just the current bin or from an EMA-smoothed history of previous bins.
-- The normalized graph Laplacian is
-
-```text
-L_t = I - D_t^(-1/2) A_t D_t^(-1/2)
-```
-
-- `L_t h_t` is the diffusion term. If neighboring nodes have similar state, this term is small. If a node disagrees with its neighbors, this term pushes it back toward local smoothness.
-- `force_t` is the externally driven part of the dynamics, built from event embeddings or structured event features such as a direct drive scalar.
-
-First-order IFT is a damped driven diffusion update:
-
-```text
-h_(t+1) = h_t + dt * (-gamma * h_t - kappa * L_t h_t + force_t)
-```
-
-- `dt`: integration step size.
-- `gamma`: decay or damping on the current state.
-- `kappa`: coupling strength on the Laplacian term. Larger `kappa` means stronger smoothing / diffusion across the graph.
-- `force_t`: input-driven excitation from the current event bin.
-
-This is the right mental model for diffusion-like tasks: the state wants to smooth over the graph, decay a bit, and respond to new input.
-
-Second-order IFT adds an explicit velocity-like latent state `v_t`:
-
-```text
-v_(t+1) = alpha * v_t - dt * (gamma * v_t + kappa * L_t h_t) + dt * force_t
-h_(t+1) = h_t + dt * v_(t+1)
-```
-
-- `v_t`: latent velocity or momentum.
-- `alpha`: velocity carry-over. Larger `alpha` means more inertia from the previous step.
-- `gamma`: damping on velocity.
-- `kappa`: restoring / coupling strength from the Laplacian field.
-
-This is the right mental model for wave-like and oscillator-like tasks: the model is not only smoothing a state, it is carrying momentum forward while the graph field and external drive push on that motion.
-
-For the `auto` and `hist_vel` variants, the second-order scorer exposes a simple scalar readout:
-
-```text
-score_t = w_y * y_t + w_v * v_t + w_drive * u_t + b
-```
-
-- `y_t`: current scalar state readout for the destination node.
-- `v_t`: velocity scalar. In `auto`, this is the internal second-order velocity; in `hist_vel_k*`, it is replaced by a short history-based velocity estimate from the last `k` readout deltas.
-- `u_t`: scalar drive / force readout from the current event bin.
-- `w_y`, `w_v`, `w_drive`, `b`: the learned linear coefficients printed in the footer.
-
-So when the footer shows positive `w_y`, `w_v`, and `w_drive`, it means larger state, velocity, and drive all push the output upward. On classification tasks like `edge_temporal_state`, that scalar is the logit for the positive class.
-
-The other footer columns summarize the internal dynamics:
-
-- `kappa`, `gamma`, `dt`, `alpha`: the learned physical-style parameters above.
-- `force`, `diff`: average magnitudes of the forcing and Laplacian terms.
-- `rel_d`: diffusion magnitude relative to forcing magnitude.
-- `rel_u`: update magnitude relative to current state magnitude.
-- `vel_f`, `for_f`: how much of the second-order update comes from carried velocity versus fresh forcing.
-- `vel_r2`, `vel_mse`: how well the internal velocity aligns with the observed finite-difference velocity proxy when that proxy is available.
 
 ## Synthetic benchmarks
 
@@ -375,8 +222,8 @@ Synthetic tasks now cover the full node/edge supervision matrix plus an explicit
 | `associative_retrieval` | Value whose key best matches a query event in the same node-local set. | `val.edge_r2` | `val.edge_r2`, `val.edge_corr`, `test.edge_r2`, `test.edge_corr` | `hopfield/tgn_gru`, `settransformer/tgn_gru`, `deepsets/tgn_gru`, `ift/ift_update` |
 | `temporal_memory` | Damped latent trajectory driven by per-node self events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `val.persistent_edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_test.rollout_edge_r2` | `sum/tgn_gru`, `sum/lnn`, `sum/hnn`, `ift/ift_update` |
 | `conservative_oscillator` | Lightly driven second-order oscillator with long rollout memory. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `val.persistent_edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_test.rollout_edge_r2` | `sum/hnn`, `sum/lnn`, `sum/tgn_gru`, `ift/ift_update` |
-| `diffusion` | Ring-graph diffusion with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/lnn`, `sum/tgn_gru` |
-| `wave` | Ring-coupled second-order wave dynamics with per-node drives carried through edge events. | `rollout_val.rollout_edge_r2` | `val.edge_r2`, `rollout_val.rollout_edge_r2`, `rollout_val.rollout_persistent_edge_r2`, `rollout_test.rollout_edge_r2`, `rollout_test.rollout_persistent_edge_r2` | `ift/ift_update`, `sum/hnn`, `sum/lnn`, `sum/tgn_gru` |
+| `diffusion` | Event-only first-order response from one external impulse. | `val.force_mse` | `val.force_mse`, `test.force_mse`, `test.topology_auc`, `test.topology_f1` | `fnn`, TGN/GRU encoder panel |
+| `wave` | Event-only second-order wave response from one external impulse. | `val.force_mse` | `val.force_mse`, `test.force_mse`, `test.topology_auc`, `test.topology_f1` | `fnn`, TGN/GRU encoder panel |
 
 #### Node regression
 
@@ -409,6 +256,7 @@ Synthetic tasks now cover the full node/edge supervision matrix plus an explicit
 | `next_dst_ranking` | Next-step destination shift induced by the signed sum of per-node event values. | `val.mrr` | `val.mrr`, `val.hits@1`, `test.mrr`, `test.hits@10` | `sum/tgn_gru`, `deepsets/tgn_gru`, `settransformer/tgn_gru`, `ift/ift_update` |
 | `edge_retrieval` | Correct next destination retrieved from a keyed event set. | `val.mrr` | `val.mrr`, `val.hits@1`, `test.mrr`, `test.hits@10` | `deepsets/tgn_gru`, `settransformer/tgn_gru`, `hopfield/tgn_gru`, `ift/ift_update` |
 | `next_dst_temporal_ranking` | Next-step destination bucket induced by a driven latent node state. | `val.mrr` | `val.mrr`, `val.hits@1`, `test.mrr`, `test.hits@10` | `sum/tgn_gru`, `sum/lnn`, `sum/hnn`, `ift/ift_update` |
+| `coupled_oscillator` | Event-only coupled-oscillator response from one external impulse. | `val.force_mse` | `val.force_mse`, `test.force_mse`, `test.topology_auc`, `test.topology_f1` | `fnn`, TGN/GRU encoder panel |
 
 The synthetic `edge_*` regression and classification tasks use the edge scorer on one candidate self-edge per node. They are edge-head benchmarks rather than dense all-pairs link-prediction tasks.
 Legacy aliases remain supported for the older names: `edge_count_threshold`, `edge_keyed_trigger`, `edge_ranking_sum_shift`, `edge_ranking_keyed_shift`, and `edge_ranking_temporal`.

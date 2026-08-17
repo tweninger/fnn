@@ -1,4 +1,4 @@
-# models/tgn_model.py
+# Model factory for the FNN and neural event baselines.
 from interactiondynamics.aggregators.deepsets import DeepSetsAggregator
 from interactiondynamics.aggregators.hopfield import HopfieldAggregator
 from interactiondynamics.aggregators.ift import IFTLaplacianAggregator
@@ -19,10 +19,29 @@ from interactiondynamics.updates.hopfield_update import HopfieldUpdate
 from interactiondynamics.updates.ift_update import IFTDiffusionUpdate, IFTSecondOrderUpdate
 from interactiondynamics.updates.lnn import LNNUpdate
 from interactiondynamics.updates.tgn_gru import TGNGRUUpdate
+from interactiondynamics.models.fnn import FieldNeuralNetwork
 
-def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
+def build_model(spec: DataSpec, cfg: ModelConfig):
     num_nodes = spec.num_nodes
     event_dim = spec.event_dim if cfg.event_dim is None else cfg.event_dim
+
+    if cfg.fnn:
+        model = FieldNeuralNetwork(
+            num_nodes=num_nodes,
+            force_dim=event_dim,
+            state_dim=cfg.fnn_state_dim,
+            gamma_init=cfg.fnn_gamma_init,
+            omega_init=cfg.fnn_omega_init,
+            dt=cfg.fnn_dt,
+            topology_init=cfg.fnn_topology_init,
+            order=cfg.fnn_order,
+            force_decoder=cfg.fnn_force_decoder,
+            learn_physical_params=cfg.fnn_learn_physical_params,
+            force_scale_init=cfg.fnn_force_scale_init,
+        )
+        model.event_feature_loss_weight = float(cfg.event_feature_loss_weight)
+        model.event_feature_magnitude_weight = float(cfg.event_feature_magnitude_weight)
+        return model
 
     encoder = TGNEventEncoder(
         node_dim=cfg.node_dim,
@@ -174,11 +193,15 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
     update = upd_fn(cfg)
 
     # --- Scorer registry ---
+    # On event-only physical tasks, the force vector is a target.  Passing it
+    # to the ranking head would let a baseline identify the answer from the
+    # thing it is supposed to predict.
+    scorer_event_dim = 0 if cfg.predict_event_features else event_dim
     SCORER_BUILDERS = {
         "dot": lambda c: DotProductScorer(),
         "mlp": lambda c: MLPEdgeScorer(
             node_dim=c.node_dim,
-            event_dim=event_dim,
+            event_dim=scorer_event_dim,
             hidden_dim=c.scorer_hidden,
             use_time=c.use_time_features,
             time_emb_dim=c.time_emb_dim,
@@ -220,11 +243,16 @@ def build_tgn_model(spec: DataSpec, cfg: ModelConfig):
             dropout=cfg.scorer_dropout,
         )
 
-    return ComposedInteractionModel(
+    model = ComposedInteractionModel(
         encoder=encoder,
         aggregator=aggregator,
         update=update,
         scorer=scorer,
         num_nodes=num_nodes,
         node_scorer=node_scorer,
+        event_feature_dim=event_dim if cfg.predict_event_features else 0,
+        event_feature_hidden=cfg.scorer_hidden,
     )
+    model.event_feature_loss_weight = float(cfg.event_feature_loss_weight)
+    model.event_feature_magnitude_weight = float(cfg.event_feature_magnitude_weight)
+    return model

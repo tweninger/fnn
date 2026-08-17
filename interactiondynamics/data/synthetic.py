@@ -104,6 +104,42 @@ def _second_order_field_task(
     )
 
 
+def _physical_force_task(
+    name: str,
+    *,
+    description: str,
+    focus: str,
+    dynamics_type: str,
+    generator_family: str,
+) -> SyntheticTaskSpec:
+    """Metadata for an episodic, event-only physical field benchmark."""
+    return SyntheticTaskSpec(
+        name=name,
+        description=description,
+        focus=focus,
+        event_dim=4,
+        recommended_pairs=(("sum", "tgn_gru"),),
+        metric_family="edge_ranking",
+        generator_family=generator_family,
+        graph_type="ring",
+        dynamics_type=dynamics_type,
+        event_structure="directed_physical_force_events",
+        temporal_mode="episodic",
+        feature_schema=("force_x", "force_y", "force_z", "force_w"),
+        supported_metrics=(
+            "mrr", "hits@1", "filtered_mrr", "filtered_hits@1", "filtered_hits@10",
+            "force_mse", "topology_auc", "topology_f1",
+        ),
+        primary_metric_path="val.force_mse",
+        primary_metric_goal="min",
+        summary_metric_paths=(
+            "val.force_mse", "test.force_mse", "test.active_force_mse",
+            "test.filtered_mrr", "test.filtered_hits@1",
+            "rollout_test.rollout_force_mse", "rollout_test.rollout_persistent_force_mse",
+        ),
+    )
+
+
 def _grid_wave_task(
     name: str,
     *,
@@ -631,96 +667,26 @@ SYNTHETIC_TASKS: Dict[str, SyntheticTaskSpec] = {
             "rollout_test.rollout_edge_r2",
         ),
     ),
-    "diffusion": SyntheticTaskSpec(
-        name="diffusion",
-        description="Predict graph diffusion over a ring with per-node drives carried through edge events.",
-        focus="Topology-aware diffusion and smoothing over repeated interaction structure.",
-        event_dim=2,
-        recommended_pairs=(
-            IFT_PAIR,
-            ("sum", "lnn"),
-            ("sum", "tgn_gru"),
-        ),
-        metric_family="edge_regression",
-        generator_family="ring_diffusion",
-        graph_type="ring",
-        dynamics_type="diffusion",
-        event_structure="ring_neighbor_and_self_events",
-        temporal_mode="rollout",
-        feature_schema=("signal", "is_drive"),
-        generator_params={"self": 0.58, "nbr": 0.18, "drive": 0.25},
-        supported_metrics=(
-            "edge_mse",
-            "edge_r2",
-            "persistent_edge_r2",
-            "rollout_edge_r2",
-            "rollout_edge_nrmse",
-            "rollout_persistent_edge_r2",
-        ),
-        primary_metric_path="rollout_val.rollout_edge_r2",
-        primary_metric_goal="max",
-        summary_metric_paths=(
-            "val.edge_r2",
-            "rollout_val.rollout_edge_r2",
-            "rollout_val.rollout_persistent_edge_r2",
-            "rollout_test.rollout_edge_r2",
-            "rollout_test.rollout_persistent_edge_r2",
-        ),
+    "diffusion": _physical_force_task(
+        "diffusion",
+        description="Event-only first-order diffusion from one observed raindrop impulse over hidden topology.",
+        focus="Recover a persistent interaction operator and first-order dissipative dynamics from force events alone.",
+        dynamics_type="first_order_force_field",
+        generator_family="hidden_force_diffusion",
     ),
-    "wave": SyntheticTaskSpec(
-        name="wave",
-        description="Predict driven wave-like propagation over a ring with neighbor coupling and second-order rollout memory.",
-        focus="Topology-aware second-order dynamics for graph-coupled wave propagation.",
-        event_dim=2,
-        recommended_pairs=(
-            IFT_PAIR,
-            ("sum", "hnn"),
-            ("sum", "lnn"),
-            ("sum", "tgn_gru"),
-        ),
-        metric_family="edge_regression",
-        generator_family="ring_wave",
-        graph_type="ring",
-        dynamics_type="wave",
-        event_structure="ring_neighbor_and_self_events",
-        temporal_mode="rollout",
-        feature_schema=("signal", "is_drive"),
-        generator_params={
-            "a": 1.86,
-            "b": -0.92,
-            "c": 0.08,
-            "lap": 0.10,
-            "drive": 0.08,
-            "alpha": 1.0,
-            "gamma": 0.0,
-            "freq_min": 0.04,
-            "freq_max": 0.12,
-            "graph": "fixed_ring",
-        },
-        supported_metrics=(
-            "edge_mse",
-            "edge_r2",
-            "persistent_edge_r2",
-            "rollout_edge_r2",
-            "rollout_edge_nrmse",
-            "rollout_persistent_edge_r2",
-        ),
-        primary_metric_path="rollout_val.rollout_edge_r2",
-        primary_metric_goal="max",
-        summary_metric_paths=(
-            "val.edge_r2",
-            "rollout_val.rollout_edge_r2",
-            "rollout_val.rollout_persistent_edge_r2",
-            "rollout_test.rollout_edge_r2",
-            "rollout_test.rollout_persistent_edge_r2",
-        ),
-    ),
-    "coupled_oscillator": _second_order_field_task(
+    "coupled_oscillator": _physical_force_task(
         "coupled_oscillator",
-        description="Predict a driven, damped harmonic oscillator field coupled over the selected graph topology.",
-        focus="Second-order local restoring dynamics separated from topology-dependent coupling.",
-        dynamics_type="coupled_oscillator",
-        generator_family="coupled_oscillator_field",
+        description="Event-only coupled oscillator response from one observed raindrop impulse over hidden topology.",
+        focus="Recover persistent topology and second-order local restoring dynamics from force events alone.",
+        dynamics_type="second_order_coupled_oscillator",
+        generator_family="hidden_force_coupled_oscillator",
+    ),
+    "wave": _physical_force_task(
+        "wave",
+        description="Event-only damped wave response from one observed raindrop impulse over hidden topology.",
+        focus="Recover a persistent interaction operator and damped wave dynamics from force events alone.",
+        dynamics_type="second_order_force_field",
+        generator_family="hidden_force_wave",
     ),
     "wave_grid": _grid_wave_task(
         "wave_grid",
@@ -986,6 +952,9 @@ class SyntheticDatasetConfig:
     num_nodes: int = 64
     num_bins: int = 120
     events_per_bin: int = 256
+    num_episodes: int = 10
+    raindrop_interval: Optional[int] = None
+    event_threshold: float = 0.0
     diffusion_topology: Optional[str] = None
     field_topology: Optional[str] = None
     split_fracs: tuple[float, float, float] = (0.6, 0.2, 0.2)
@@ -1003,17 +972,29 @@ class SyntheticDataset(EventStreamDataset):
         if cfg.diffusion_topology is not None and cfg.field_topology is not None:
             raise ValueError("Specify only field_topology; diffusion_topology is a legacy diffusion-only alias.")
         selected_topology = cfg.field_topology or cfg.diffusion_topology
+        if cfg.raindrop_interval is not None:
+            if cfg.task not in {"diffusion", "wave", "coupled_oscillator"}:
+                raise ValueError("raindrop_interval is supported only for physical field-dynamics synthetic tasks.")
+            if int(cfg.raindrop_interval) < 1:
+                raise ValueError("raindrop_interval must be at least one local episode step.")
+        if cfg.event_threshold < 0.0 or cfg.event_threshold > 1.0:
+            raise ValueError("event_threshold must lie in [0, 1], in nominal raindrop-force units.")
         if selected_topology is not None:
             if cfg.task not in {"diffusion", "wave", "coupled_oscillator"}:
-                raise ValueError("Topology selection is supported only for diffusion, wave, and coupled_oscillator.")
+                raise ValueError("Topology selection is supported only for field-dynamics synthetic tasks.")
             if selected_topology not in FIELD_TOPOLOGY_CHOICES:
                 allowed = ", ".join(FIELD_TOPOLOGY_CHOICES)
                 raise ValueError(f"Unknown field topology {selected_topology!r}. Allowed: {allowed}.")
         self.cfg = cfg
         self._task = SYNTHETIC_TASKS[cfg.task]
         self._rng = np.random.default_rng(int(cfg.seed))
+        self._hidden_truth: Optional[dict[str, Any]] = None
         self._bins_all, self._node_targets_all, self._edge_targets_all = self._materialize()
-        self._split_bins = self._compute_splits(len(self._bins_all))
+        self._split_bins = (
+            self._compute_episode_splits()
+            if cfg.task in {"diffusion", "wave", "coupled_oscillator"}
+            else self._compute_splits(len(self._bins_all))
+        )
 
     def _materialize(
         self,
@@ -1060,15 +1041,10 @@ class SyntheticDataset(EventStreamDataset):
         if self.cfg.task == "conservative_oscillator":
             bins, edge_targets = self._materialize_conservative_oscillator()
             return bins, None, edge_targets
-        if self.cfg.task == "diffusion":
-            bins, edge_targets = self._materialize_diffusion()
-            return bins, None, edge_targets
-        if self.cfg.task == "wave":
-            bins, edge_targets = self._materialize_wave_field(self._selected_field_topology())
-            return bins, None, edge_targets
-        if self.cfg.task == "coupled_oscillator":
-            bins, edge_targets = self._materialize_coupled_oscillator_field(self._selected_field_topology())
-            return bins, None, edge_targets
+        if self.cfg.task in {"diffusion", "wave", "coupled_oscillator"}:
+            return self._materialize_physical_force_events(
+                self._selected_field_topology(), dynamics=self.cfg.task
+            ), None, None
         if self.cfg.task in {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
             bins, edge_targets = self._materialize_grid_wave(self.cfg.task)
             return bins, None, edge_targets
@@ -1548,6 +1524,114 @@ class SyntheticDataset(EventStreamDataset):
             return self._materialize_wave()
         return self._materialize_grid_wave(self._topology_task_name(topology))
 
+    def _materialize_physical_force_events(self, topology: str, *, dynamics: str) -> list[EventBatch]:
+        """Hidden physical simulator whose only public output is force events.
+
+        ``force[i -> j]`` is the actual vector force exerted on target ``j`` by
+        source ``i``. At the beginning of each episode, one self-event
+        ``j -> j`` is a raindrop impulse applied at ``j``. The fixed support
+        that generates pair forces, hidden node fields, and physical parameters
+        stay outside the model pathway.
+        """
+        active, edge_src, edge_dst, _degree = self._field_topology_edges(topology)
+        num_nodes = int(self.cfg.num_nodes)
+        force_dim = int(self._task.event_dim)
+        episodes = max(3, int(self.cfg.num_episodes))
+        steps = int(self.cfg.num_bins)
+        if dynamics == "diffusion":
+            dt, gamma, omega, force_scale = 0.10, 0.18, 0.0, 0.80
+        elif dynamics == "wave":
+            dt, gamma, omega, force_scale = 0.10, 0.15, 0.80, 0.80
+        elif dynamics == "coupled_oscillator":
+            dt, gamma, omega, force_scale = 0.10, 0.10, 1.15, 0.65
+        else:
+            raise ValueError(f"Unknown physical dynamic {dynamics!r}.")
+        adjacency = np.zeros((num_nodes, num_nodes), dtype=np.float32)
+        adjacency[edge_src, edge_dst] = 1.0
+        active_nodes = np.flatnonzero(active)
+        # A single physical rain direction, shared by every drop.  The first
+        # two channels are interpreted as a planar field, so this is downward.
+        drop_direction = np.zeros((force_dim,), dtype=np.float32)
+        drop_direction[min(1, force_dim - 1)] = -1.0
+        bins: list[EventBatch] = []
+
+        for episode in range(episodes):
+            h = np.zeros((num_nodes, force_dim), dtype=np.float32)
+            v = np.zeros_like(h)
+            # A quiet field: all energy is introduced by observed raindrop
+            # impulses rather than hidden randomized initial conditions.
+            for local_t in range(steps):
+                # This is the physical interaction measurement.  It is not a
+                # noisy encoding of a hidden state and no drive marker is sent.
+                full_force = force_scale * (h[edge_src] - h[edge_dst])
+                # Each episode starts from a quiet field.  Optional later drops
+                # are observed exogenous interventions into that same evolving
+                # field, rather than episode resets.
+                interval = self.cfg.raindrop_interval
+                has_drop = local_t == 0 or (
+                    interval is not None and local_t % int(interval) == 0
+                )
+                force_magnitude = np.linalg.norm(full_force, axis=1)
+                active_pairs = np.flatnonzero(force_magnitude > float(self.cfg.event_threshold))
+                pair_budget = max(0, int(self.cfg.events_per_bin) - int(has_drop))
+                if pair_budget == 0:
+                    chosen = np.empty((0,), dtype=np.int64)
+                elif active_pairs.size > pair_budget:
+                    # A measurement budget should retain the strongest active
+                    # interactions, not randomly discard the visible wavefront.
+                    chosen = active_pairs[np.argsort(force_magnitude[active_pairs])[-pair_budget:]]
+                else:
+                    chosen = active_pairs
+                bin_src, bin_dst = edge_src[chosen], edge_dst[chosen]
+                force = full_force[chosen]
+                if has_drop:
+                    drop_node = int(self._rng.choice(active_nodes))
+                    amplitude = float(self._rng.uniform(0.9, 1.3))
+                    drop_force = (amplitude * drop_direction).reshape(1, force_dim)
+                    bin_src = np.concatenate([bin_src, np.array([drop_node], dtype=np.int64)])
+                    bin_dst = np.concatenate([bin_dst, np.array([drop_node], dtype=np.int64)])
+                    force = np.concatenate([force, drop_force], axis=0)
+                    is_external = np.zeros((force.shape[0],), dtype=bool)
+                    is_external[-1] = True
+                else:
+                    drop_node = None
+                    drop_force = None
+                    is_external = np.zeros((force.shape[0],), dtype=bool)
+                global_t = episode * steps + local_t
+                bins.append(self._make_event_batch(
+                    bin_src,
+                    bin_dst,
+                    force,
+                    global_t,
+                    episode=episode,
+                    is_external=is_external,
+                ))
+                incoming = np.zeros_like(h)
+                np.add.at(incoming, edge_dst, full_force)
+                if drop_node is not None and drop_force is not None:
+                    incoming[drop_node] += drop_force[0]
+                if dynamics == "diffusion":
+                    h = (1.0 - gamma * dt) * h + dt * incoming
+                    v.fill(0.0)
+                else:
+                    v = (1.0 - gamma * dt) * v + dt * (incoming - (omega ** 2) * h)
+                    h = h + dt * v
+                h[~active] = 0.0
+                v[~active] = 0.0
+
+        self._hidden_truth = {
+            "adjacency": torch.from_numpy(adjacency),
+            "params": {
+                "gamma": gamma,
+                "dt": dt,
+                "force_scale": force_scale,
+                **({"omega": omega} if dynamics != "diffusion" else {}),
+            },
+            "raindrop_interval": self.cfg.raindrop_interval,
+            "event_threshold": float(self.cfg.event_threshold),
+        }
+        return bins
+
     def _field_topology_edges(self, topology: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if topology != "ring":
             return self._grid_wave_topology(self._topology_task_name(topology))
@@ -1764,12 +1848,27 @@ class SyntheticDataset(EventStreamDataset):
         dst: np.ndarray,
         features: Optional[np.ndarray],
         t: int,
+        episode: Optional[int] = None,
+        is_external: Optional[np.ndarray] = None,
     ) -> EventBatch:
         batch = EventBatch(
             src=cast(torch.LongTensor, torch.from_numpy(src.astype(np.int64, copy=False))),
             dst=cast(torch.LongTensor, torch.from_numpy(dst.astype(np.int64, copy=False))),
             features=None if features is None else torch.from_numpy(features.astype(np.float32, copy=False)),
-            t=cast(torch.LongTensor, torch.full((src.size,), int(t), dtype=torch.long)),
+            # Empty physical bins still carry sequence bookkeeping.  The
+            # scalar metadata is never sent to a model, but lets trainers
+            # preserve independent-episode boundaries through quiet periods.
+            t=cast(torch.LongTensor, torch.full((max(1, src.size),), int(t), dtype=torch.long)),
+            episode=(
+                None
+                if episode is None
+                else cast(torch.LongTensor, torch.full((max(1, src.size),), int(episode), dtype=torch.long))
+            ),
+            is_external=(
+                None
+                if is_external is None
+                else cast(torch.BoolTensor, torch.from_numpy(is_external.astype(bool, copy=False)))
+            ),
         )
         if self.cfg.device is not None:
             batch = batch.to(self.cfg.device)
@@ -1805,6 +1904,23 @@ class SyntheticDataset(EventStreamDataset):
             "test": (val_end, num_bins - 1),
         }
 
+    def _compute_episode_splits(self) -> Dict[str, tuple[int, int]]:
+        """Keep independently simulated trajectories intact across splits."""
+        episodes = max(3, int(self.cfg.num_episodes))
+        steps = int(self.cfg.num_bins)
+        train_eps = max(1, int(episodes * self.cfg.split_fracs[0]))
+        val_eps = max(1, int(episodes * self.cfg.split_fracs[1]))
+        if train_eps + val_eps >= episodes:
+            val_eps = 1
+            train_eps = episodes - 2
+        train_end = train_eps * steps - 1
+        val_end = (train_eps + val_eps) * steps - 1
+        return {
+            "train": (0, train_end),
+            "val": (train_end + 1, val_end),
+            "test": (val_end + 1, episodes * steps - 1),
+        }
+
     def spec(self) -> DataSpec:
         dataset_name = self.cfg.name or f"synthetic_{self.cfg.task}"
         task_axes = self._task.axes()
@@ -1814,6 +1930,7 @@ class SyntheticDataset(EventStreamDataset):
         if field_dynamic:
             generator_params = {} if task_axes["generator_params"] is None else dict(task_axes["generator_params"])
             generator_params["topology"] = topology
+            generator_params["event_threshold"] = float(self.cfg.event_threshold)
             task_axes["generator_params"] = generator_params
         if field_dynamic and topology != "ring":
             graph_types = {
@@ -1858,8 +1975,13 @@ class SyntheticDataset(EventStreamDataset):
                 },
                 "summary_metrics": list(self._task.summary_metric_paths),
                 "requires_node_scorer": self._task.requires_node_scorer,
+                "num_episodes": int(self.cfg.num_episodes) if self.cfg.task in {"diffusion", "wave", "coupled_oscillator"} else None,
             },
         )
+
+    def hidden_truth(self) -> Optional[dict[str, Any]]:
+        """Synthetic evaluation truth; never consumed by a model or trainer."""
+        return self._hidden_truth
 
     def bins(self, split: str = "train") -> Iterable[EventBatch]:
         start, end = self._split_bins[split]

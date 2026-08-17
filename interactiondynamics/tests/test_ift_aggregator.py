@@ -9,7 +9,7 @@ from interactiondynamics.core.config import ModelConfig
 from interactiondynamics.core.events import EventBatch
 from interactiondynamics.core.interfaces import ModelState
 from interactiondynamics.data.interfaces import DataSpec
-from interactiondynamics.models.tgn_model import build_tgn_model
+from interactiondynamics.models.model_factory import build_model
 from interactiondynamics.scorers.event_scorer import IFTSecondOrderLinearHVForceScorer
 from interactiondynamics.training.targets import edge_regression_readout
 from interactiondynamics.training.types import TrainConfig
@@ -83,7 +83,7 @@ def test_ift_ema_mode_blends_previous_and_current_adjacency() -> None:
 
 def test_build_tgn_model_passes_ift_laplacian_mode_and_beta() -> None:
     spec = DataSpec(name="tiny", num_nodes=4, event_dim=0)
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             aggregator="ift",
@@ -100,7 +100,7 @@ def test_build_tgn_model_passes_ift_laplacian_mode_and_beta() -> None:
 
 def test_build_tgn_model_passes_ift_diagnostic_knobs() -> None:
     spec = DataSpec(name="tiny", num_nodes=4, event_dim=2)
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             aggregator="ift",
@@ -129,7 +129,7 @@ def test_build_tgn_model_passes_ift_diagnostic_knobs() -> None:
 
 def test_build_tgn_model_passes_structured_forcing_and_second_order() -> None:
     spec = DataSpec(name="tiny", num_nodes=4, event_dim=2)
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             aggregator="ift",
@@ -226,7 +226,7 @@ def test_ift_force_feature_summary_is_stashed_in_aux() -> None:
 
 def test_model_step_preserves_ema_history_for_tgn_gru() -> None:
     spec = DataSpec(name="tiny", num_nodes=3, event_dim=0)
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             node_dim=8,
@@ -263,7 +263,7 @@ def test_model_step_preserves_ema_history_for_tgn_gru() -> None:
 
 def test_model_step_preserves_ema_history_for_ift_update() -> None:
     spec = DataSpec(name="tiny", num_nodes=3, event_dim=0)
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             node_dim=8,
@@ -304,7 +304,7 @@ def test_model_step_preserves_ema_history_for_ift_update() -> None:
 
 def test_second_order_ift_keeps_velocity_in_node_prev() -> None:
     spec = DataSpec(name="tiny", num_nodes=3, event_dim=1)
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             node_dim=8,
@@ -385,7 +385,7 @@ def test_build_tgn_model_uses_linear_h_v_force_scorer_for_second_order_ift() -> 
         event_dim=1,
         extra={"generator_params": {"a": 1.92, "b": -0.96, "c": 0.08}},
     )
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             aggregator="ift",
@@ -445,7 +445,7 @@ def test_build_tgn_model_allows_trainable_oracle_initialized_linear_readout() ->
         event_dim=1,
         extra={"generator_params": {"a": 1.92, "b": -0.96, "c": 0.08}},
     )
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             aggregator="ift",

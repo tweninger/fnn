@@ -225,6 +225,8 @@ class ComposedInteractionModel(InteractionModel):
         scorer: ScoringHead,
         num_nodes: int,
         node_scorer: Optional[NodeScoringHead] = None,
+        event_feature_dim: int = 0,
+        event_feature_hidden: int = 128,
     ):
         super().__init__()
         self.encoder = encoder
@@ -233,6 +235,30 @@ class ComposedInteractionModel(InteractionModel):
         self.scorer = scorer
         self.node_scorer = node_scorer
         self.num_nodes = num_nodes
+        self.event_feature_dim = int(event_feature_dim)
+        self.event_feature_decoder: Optional[nn.Module]
+        if self.event_feature_dim > 0:
+            self.event_feature_decoder = nn.Sequential(
+                nn.Linear(2 * self._node_dim(), event_feature_hidden),
+                nn.ReLU(),
+                nn.Linear(event_feature_hidden, self.event_feature_dim),
+            )
+        else:
+            self.event_feature_decoder = None
+        # Runner-filled, training-split calibration for optional physical
+        # force prediction.  These are not event inputs.
+        calibration_dim = max(self.event_feature_dim, 1)
+        self.register_buffer("event_feature_target_std", torch.ones(calibration_dim))
+        self.register_buffer("event_feature_active_threshold", torch.tensor(0.0))
+        self.register_buffer("event_feature_magnitude_q90", torch.tensor(1.0))
+        self.event_feature_magnitude_weight = 2.0
+
+    def _node_dim(self) -> int:
+        """Infer the shared state width from the scoring head's configuration."""
+        node_dim = getattr(self.scorer, "node_dim", None)
+        if node_dim is None:
+            raise ValueError("Event feature decoding requires a scorer with node_dim.")
+        return int(node_dim)
 
     def init_state(self, batch_size, num_nodes, device):
         return self.update.init_state(batch_size, num_nodes, device)
@@ -264,3 +290,28 @@ class ComposedInteractionModel(InteractionModel):
         if self.node_scorer is None:
             raise RuntimeError("Model was built without a node_scorer")
         return self.node_scorer(state)
+
+    def predict_event_features(self, state, events: EventBatch) -> torch.Tensor:
+        """Predict a physical force vector from state and an event pair only."""
+        if self.event_feature_decoder is None:
+            raise RuntimeError("Model was built without an event-feature decoder")
+        if state is None or state.node is None:
+            raise ValueError("Event feature decoding requires node state.")
+        h = state.node
+        src = events.src.to(device=h.device, dtype=torch.long)
+        dst = events.dst.to(device=h.device, dtype=torch.long)
+        return self.event_feature_decoder(torch.cat([h[src], h[dst]], dim=-1))
+
+    @torch.no_grad()
+    def configure_event_feature_objective(
+        self,
+        *,
+        target_std: torch.Tensor,
+        active_threshold: float,
+        magnitude_q90: float,
+        magnitude_weight: float,
+    ) -> None:
+        self.event_feature_target_std.copy_(target_std.to(self.event_feature_target_std).clamp_min(1e-8))
+        self.event_feature_active_threshold.fill_(float(active_threshold))
+        self.event_feature_magnitude_q90.fill_(max(float(magnitude_q90), 1e-8))
+        self.event_feature_magnitude_weight = float(magnitude_weight)

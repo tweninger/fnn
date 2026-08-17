@@ -75,11 +75,16 @@ def test_synthetic_dataset_materializes_expected_supervision(task_name: str):
         "conservative_oscillator",
     }:
         expected_events = cfg.num_nodes
-    if task_name in {"diffusion", "wave", "coupled_oscillator"}:
-        expected_events = 3 * cfg.num_nodes
     if task_name == "associative_retrieval":
         expected_events = cfg.num_nodes * (max(3, cfg.events_per_bin // cfg.num_nodes) + 1)
-    if task_name in {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
+    if task_name in {"diffusion", "wave", "coupled_oscillator"}:
+        # Physical episodes begin at rest, so their first observed bin contains
+        # only the externally observed raindrop. Endogenous force events begin
+        # after that impulse has propagated.
+        assert first_batch.num_events == 1
+        assert first_batch.is_external is not None
+        assert bool(first_batch.is_external.all())
+    elif task_name in {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}:
         assert first_batch.num_events > 0
     else:
         assert first_batch.num_events == expected_events
@@ -127,33 +132,34 @@ def test_synthetic_task_metric_metadata_no_longer_uses_skill_wording():
         assert all("skill" not in path for path in task.summary_metric_paths)
 
 
-def test_every_synthetic_task_shortlist_includes_ift_update():
+def test_every_legacy_synthetic_task_has_a_recommended_baseline():
     for task in SYNTHETIC_TASKS.values():
-        assert IFT_PAIR in task.recommended_pairs
+        assert task.recommended_pairs
+    assert IFT_PAIR not in SYNTHETIC_TASKS["wave"].recommended_pairs
 
 
 def test_synthetic_task_axes_capture_graph_dynamics_and_supervision():
     ift_axes = synthetic_task_axes("diffusion")
     assert ift_axes["graph_type"] == "ring"
-    assert ift_axes["dynamics_type"] == "diffusion"
+    assert ift_axes["dynamics_type"] == "first_order_force_field"
     assert ift_axes["supervision_level"] == "edge"
-    assert ift_axes["supervision_type"] == "regression"
-    assert ift_axes["temporal_mode"] == "rollout"
+    assert ift_axes["supervision_type"] == "ranking"
+    assert ift_axes["temporal_mode"] == "episodic"
 
     tags = synthetic_task_tags("diffusion")
     assert "graph:ring" in tags
-    assert "dynamics:diffusion" in tags
-    assert "target:edge_regression" in tags
+    assert "dynamics:first_order_force_field" in tags
+    assert "target:edge_ranking" in tags
 
     wave_axes = synthetic_task_axes("wave")
     assert wave_axes["graph_type"] == "ring"
-    assert wave_axes["dynamics_type"] == "wave"
-    assert wave_axes["temporal_mode"] == "rollout"
+    assert wave_axes["dynamics_type"] == "second_order_force_field"
+    assert wave_axes["temporal_mode"] == "episodic"
 
     wave_tags = synthetic_task_tags("wave")
     assert "graph:ring" in wave_tags
-    assert "dynamics:wave" in wave_tags
-    assert "features:signal+is_drive" in wave_tags
+    assert "dynamics:second_order_force_field" in wave_tags
+    assert "events:directed_physical_force_events" in wave_tags
 
 
 def test_synthetic_task_query_helpers_group_related_benchmarks():
@@ -181,7 +187,9 @@ def test_grid_wave_topologies_materialize_distinct_structured_event_sets():
     event_counts: dict[str, int] = {}
     for task_name in ("wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"):
         dataset = SyntheticDataset(SyntheticDatasetConfig(task=task_name, num_nodes=64, num_bins=16, seed=3))
-        first_batch = next(iter(dataset.bins("train")))
+        # The first bin is deliberately quiet except for its raindrop. Inspect
+        # the next bin to compare visible endogenous interactions by topology.
+        first_batch = list(dataset.bins("train"))[1]
         targets = next(iter(dataset.edge_targets("train") or []))
         assert first_batch.features is not None
         assert first_batch.features.shape[1] == 2
@@ -200,7 +208,7 @@ def test_diffusion_topology_selector_materializes_grid_derived_domains():
         "doorway": "grid_doorway",
         "swisscheese": "grid_swisscheese",
     }
-    event_counts: dict[str, int] = {}
+    topology_edge_counts: dict[str, int] = {}
     for topology, graph_type in graph_types.items():
         dataset = SyntheticDataset(
             SyntheticDatasetConfig(
@@ -211,22 +219,50 @@ def test_diffusion_topology_selector_materializes_grid_derived_domains():
                 seed=3,
             )
         )
-        first_batch = next(iter(dataset.bins("train")))
-        targets = next(iter(dataset.edge_targets("train") or []))
+        # The first bin is deliberately quiet except for its raindrop. Inspect
+        # the next bin to compare visible endogenous interactions by topology.
+        first_batch = list(dataset.bins("train"))[1]
         assert dataset.spec().extra is not None
         assert dataset.spec().extra["task_axes"]["graph_type"] == graph_type
         assert first_batch.features is not None
-        assert first_batch.features.shape[1] == 2
-        assert torch.isfinite(targets.targets).all()
-        event_counts[topology] = first_batch.num_events
+        assert first_batch.features.shape[1] == 4
+        assert first_batch.is_external is not None
+        assert torch.isfinite(first_batch.features).all()
+        # The observation budget may cap all topologies at the same number of
+        # emitted events. Check the hidden simulator support instead.
+        topology_edge_counts[topology] = int(dataset._field_topology_edges(topology)[1].size)
 
-    assert event_counts["torus"] > event_counts["grid"]
-    assert event_counts["doorway"] < event_counts["grid"]
-    assert event_counts["swisscheese"] < event_counts["grid"]
+    assert topology_edge_counts["torus"] > topology_edge_counts["grid"]
+    assert topology_edge_counts["doorway"] < topology_edge_counts["grid"]
+    assert topology_edge_counts["swisscheese"] < topology_edge_counts["grid"]
 
 
-def test_second_order_dynamics_share_the_field_topology_selector():
-    for dynamic in ("wave", "coupled_oscillator"):
+def test_physical_event_threshold_filters_only_observed_endogenous_events():
+    common = dict(
+        task="wave",
+        num_nodes=16,
+        num_bins=12,
+        num_episodes=3,
+        events_per_bin=32,
+        raindrop_interval=4,
+        seed=11,
+    )
+    unthresholded = SyntheticDataset(SyntheticDatasetConfig(**common, event_threshold=0.0))
+    thresholded = SyntheticDataset(SyntheticDatasetConfig(**common, event_threshold=1.0))
+
+    assert sum(batch.num_events for batch in thresholded._bins_all) <= sum(
+        batch.num_events for batch in unthresholded._bins_all
+    )
+    for batch in thresholded._bins_all:
+        assert batch.is_external is not None
+        internal = ~batch.is_external
+        if bool(internal.any()):
+            assert batch.features is not None
+            assert bool((torch.linalg.vector_norm(batch.features[internal], dim=1) > 1.0).all())
+
+
+def test_physical_dynamics_support_every_field_topology():
+    for dynamic in ("diffusion", "wave", "coupled_oscillator"):
         for topology in ("ring", "grid", "torus", "doorway", "swisscheese"):
             dataset = SyntheticDataset(
                 SyntheticDatasetConfig(
@@ -238,13 +274,18 @@ def test_second_order_dynamics_share_the_field_topology_selector():
                 )
             )
             first_batch = next(iter(dataset.bins("train")))
-            targets = next(iter(dataset.edge_targets("train") or []))
             assert first_batch.features is not None
-            assert first_batch.features.shape[1] == 2
-            assert torch.isfinite(targets.targets).all()
+            assert first_batch.features.shape[1] == 4
+            assert first_batch.is_external is not None
+            assert torch.isfinite(first_batch.features).all()
             assert dataset.spec().extra is not None
             axes = dataset.spec().extra["task_axes"]
-            assert axes["dynamics_type"] == dynamic
+            expected_dynamic = {
+                "diffusion": "first_order_force_field",
+                "wave": "second_order_force_field",
+                "coupled_oscillator": "second_order_coupled_oscillator",
+            }[dynamic]
+            assert axes["dynamics_type"] == expected_dynamic
             assert axes["generator_params"]["topology"] == topology
 
 
@@ -276,3 +317,31 @@ def test_drive_free_wave_events_keep_neighbor_signals_and_remove_only_drives():
     assert torch.equal(free.dst, template.dst)
     assert torch.equal(free.features[:, 0], torch.tensor([0.2, -0.3, 0.0, 0.0]))
     assert torch.equal(free.features[:, 1], torch.tensor([0.0, 0.0, 0.0, 0.0]))
+
+
+def test_physical_raindrops_repeat_within_each_episode():
+    dataset = SyntheticDataset(
+        SyntheticDatasetConfig(
+            task="wave",
+            num_nodes=16,
+            num_bins=12,
+            num_episodes=3,
+            events_per_bin=32,
+            raindrop_interval=4,
+            seed=11,
+        )
+    )
+
+    drops = []
+    for batch in dataset._bins_all:
+        assert batch.is_external is not None
+        external = batch.is_external
+        if bool(external.any()):
+            assert int(external.sum()) == 1
+            drops.append((int(batch.episode[external][0]), int(batch.t[external][0]) % 12))
+
+    assert drops == [
+        (episode, local_t)
+        for episode in range(3)
+        for local_t in (0, 4, 8)
+    ]

@@ -8,7 +8,7 @@ import torch
 from interactiondynamics.core.config import ModelConfig, UpdateType
 from interactiondynamics.core.interfaces import ModelState
 from interactiondynamics.data.synthetic import SyntheticDataset, SyntheticDatasetConfig
-from interactiondynamics.models.tgn_model import build_tgn_model
+from interactiondynamics.models.model_factory import build_model
 from interactiondynamics.training.targets import edge_regression_loss
 from interactiondynamics.training.types import TrainConfig
 from interactiondynamics.updates.ift_update import IFTDiffusionUpdate
@@ -39,7 +39,7 @@ def _update_grad_norms(update_name: str) -> list[float]:
         scorer_dropout=0.0,
         encoder_hidden=128,
     )
-    model = build_tgn_model(spec, model_cfg).to(device)
+    model = build_model(spec, model_cfg).to(device)
     model.train()
 
     cfg = TrainConfig(num_nodes=spec.num_nodes, num_neg=4, device=device)
@@ -86,7 +86,7 @@ def test_build_tgn_model_passes_ift_kappa_cap_and_max() -> None:
         )
     ).spec()
 
-    model = build_tgn_model(
+    model = build_model(
         spec,
         ModelConfig(
             node_dim=32,

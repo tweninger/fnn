@@ -54,12 +54,63 @@ def sample_negative_dsts(
     return neg
 
 
+def sample_filtered_negative_dsts(
+    num_nodes: int,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    num_neg: int,
+    device: torch.device,
+) -> tuple[torch.LongTensor, torch.BoolTensor]:
+    """Sample destinations that are not active positives in the same bin.
+
+    For every positive ``src[i] -> dst[i]``, the filtered candidate set removes
+    *all* destinations observed for ``src[i]`` in that bin, not only ``dst[i]``.
+    This implements the standard filtered temporal-link-prediction convention:
+    another true simultaneous interaction must never be treated as a negative.
+
+    Returns sampled destinations and a row-validity mask. A row is invalid only
+    when its source is connected to every node in the current bin, leaving no
+    true negative destination to sample.
+    """
+    M = int(src.numel())
+    neg = torch.empty((M, num_neg), dtype=torch.long, device=device)
+    valid = torch.zeros((M,), dtype=torch.bool, device=device)
+    if num_nodes <= 0 or M == 0:
+        return neg, valid
+
+    all_nodes = torch.arange(num_nodes, device=device, dtype=torch.long)
+    for source in torch.unique(src):
+        rows = src.eq(source)
+        active_destinations = torch.unique(dst[rows])
+        allowed = all_nodes[~torch.isin(all_nodes, active_destinations)]
+        if allowed.numel() == 0:
+            continue
+        row_count = int(rows.sum().item())
+        sampled = allowed[torch.randint(allowed.numel(), (row_count, num_neg), device=device)]
+        neg[rows] = sampled
+        valid[rows] = True
+    return cast(torch.LongTensor, neg), cast(torch.BoolTensor, valid)
+
+
+def _select_event_rows(events: EventBatch, keep: torch.Tensor) -> EventBatch:
+    """Index an event batch while preserving per-event metadata."""
+    return EventBatch(
+        src=events.src[keep],
+        dst=events.dst[keep],
+        features=None if events.features is None else events.features[keep],
+        t=None if events.t is None else events.t[keep],
+        episode=None if events.episode is None else events.episode[keep],
+        is_external=None if events.is_external is None else events.is_external[keep],
+    )
+
+
 
 def build_candidate_eventbatch(
     src: torch.LongTensor,
     candidates_dst: torch.LongTensor,
     t: torch.LongTensor | None = None,
     features: torch.Tensor | None = None,
+    is_external: torch.BoolTensor | None = None,
 ) -> EventBatch:
     """
     Flattens (M, K+1) candidate dsts into an EventBatch of size M*(K+1).
@@ -80,7 +131,12 @@ def build_candidate_eventbatch(
     else:
         feat_rep = None
 
-    return EventBatch(src=src_rep, dst=dst_flat, t=t_rep, features=feat_rep)
+    if is_external is not None:
+        external_rep = cast(torch.BoolTensor, is_external.view(M, 1).expand(M, K1).reshape(-1))
+    else:
+        external_rep = None
+
+    return EventBatch(src=src_rep, dst=dst_flat, t=t_rep, features=feat_rep, is_external=external_rep)
 
 
 def bce_ranking_loss(
@@ -195,6 +251,61 @@ def mrr_and_hits(
     return ranking_metrics(scores=scores, M=M, K1=K1, hits_ks=hits_ks)
 
 
+def event_force_loss_and_metrics(
+    model,
+    predicted_force: torch.Tensor,
+    target_force: torch.Tensor,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """Calibrated physical-force objective shared by one-step and rollouts."""
+    target_force = target_force.to(device=predicted_force.device, dtype=predicted_force.dtype)
+    raw_error = predicted_force - target_force
+    raw_mse = raw_error.square().mean()
+    target_std = getattr(model, "event_feature_target_std", None)
+    if target_std is None:
+        target_std = torch.ones(target_force.shape[-1], device=target_force.device, dtype=target_force.dtype)
+    else:
+        target_std = target_std.to(device=target_force.device, dtype=target_force.dtype).clamp_min(1e-8)
+    normalized_per_event_mse = (raw_error / target_std).square().mean(dim=-1)
+    force_magnitude = target_force.norm(dim=-1)
+    q90 = getattr(model, "event_feature_magnitude_q90", 1.0)
+    q90 = float(q90.detach().item()) if isinstance(q90, torch.Tensor) else float(q90)
+    magnitude_weight = float(getattr(model, "event_feature_magnitude_weight", 2.0))
+    weights = 1.0 + magnitude_weight * (force_magnitude / max(q90, 1e-8)).clamp(0.0, 3.0)
+    weighted_loss = (weights * normalized_per_event_mse).mean()
+    metrics = {
+        "force_mse": float(raw_mse.detach().item()),
+        "force_nrmse": float(normalized_per_event_mse.mean().sqrt().detach().item()),
+        "force_weighted_nrmse": float(weighted_loss.sqrt().detach().item()),
+    }
+    active_threshold = getattr(model, "event_feature_active_threshold", 0.0)
+    active_threshold = float(active_threshold.detach().item()) if isinstance(active_threshold, torch.Tensor) else float(active_threshold)
+    active = force_magnitude >= active_threshold
+    if bool(active.any()):
+        metrics["active_force_mse"] = float(raw_error[active].square().mean().detach().item())
+    return weighted_loss, metrics
+
+
+def internal_events(events: EventBatch) -> EventBatch:
+    """Return events whose targets are endogenous physical interactions.
+
+    External raindrops are observed interventions.  They update model state,
+    but their random node and amplitude are not a prediction target.
+    """
+    if events.is_external is None:
+        return events
+    keep = ~events.is_external.to(dtype=torch.bool)
+    if bool(keep.all()):
+        return events
+    return EventBatch(
+        src=events.src[keep],
+        dst=events.dst[keep],
+        features=None if events.features is None else events.features[keep],
+        t=None if events.t is None else events.t[keep],
+        episode=None if events.episode is None else events.episode[keep],
+        is_external=events.is_external[keep],
+    )
+
+
 def ranking_loss_and_metrics(
     model,
     state,
@@ -205,8 +316,13 @@ def ranking_loss_and_metrics(
     """
     Given current state, evaluate next_events as positives with negatives.
     """
+    next_events = internal_events(next_events)
     device = next_events.src.device
     M = next_events.num_events
+    if M == 0:
+        # Keep the tensor connected to the current graph without inventing a
+        # target for a bin containing only observed interventions.
+        return state.node.sum() * 0.0, {}
     K1 = num_neg + 1
 
     neg_dst = sample_negative_dsts(num_nodes, next_events.dst, num_neg, device=device)
@@ -217,6 +333,7 @@ def ranking_loss_and_metrics(
         candidates_dst=candidates_dst,
         t=next_events.t,
         features=next_events.features,
+        is_external=next_events.is_external,
     )
 
     assert cand_batch.src.numel() == M * K1
@@ -269,4 +386,45 @@ def ranking_loss_and_metrics(
     loss = softmax_ranking_loss(scores, M=M, K1=K1)
 
     metrics = ranking_metrics(scores.detach(), M=M, K1=K1)
+    # Training retains the original sampled objective. During evaluation, add
+    # the standard filtered ranking diagnostics: destinations that are another
+    # true same-bin interaction from this source are excluded from negatives.
+    if not model.training:
+        filtered_neg_dst, valid_rows = sample_filtered_negative_dsts(
+            num_nodes=num_nodes,
+            src=next_events.src,
+            dst=next_events.dst,
+            num_neg=num_neg,
+            device=device,
+        )
+        if bool(valid_rows.any()):
+            filtered_events = _select_event_rows(next_events, valid_rows)
+            filtered_candidates = cast(torch.LongTensor, torch.cat([
+                filtered_events.dst.view(-1, 1), filtered_neg_dst[valid_rows],
+            ], dim=1))
+            filtered_batch = build_candidate_eventbatch(
+                src=filtered_events.src,
+                candidates_dst=filtered_candidates,
+                t=filtered_events.t,
+                features=filtered_events.features,
+                is_external=filtered_events.is_external,
+            )
+            filtered_scores = model.score(state_eval.clone(detach=True), filtered_batch)
+            filtered = ranking_metrics(
+                filtered_scores.detach(),
+                M=filtered_events.num_events,
+                K1=num_neg + 1,
+            )
+            metrics.update({f"filtered_{key}": value for key, value in filtered.items()})
+    # Event-only physical models additionally predict the measured force on
+    # the *positive* next interaction.  Generic ranking baselines remain
+    # unchanged because they do not expose this optional decoder.
+    force_predictor = getattr(model, "predict_event_features", None)
+    if callable(force_predictor) and next_events.features is not None:
+        predicted_force = force_predictor(state_eval, next_events)
+        force_loss, force_metrics = event_force_loss_and_metrics(
+            model, predicted_force, next_events.features
+        )
+        loss = loss + float(getattr(model, "event_feature_loss_weight", 1.0)) * force_loss
+        metrics.update(force_metrics)
     return loss, metrics

@@ -38,89 +38,48 @@ def test_parse_args_supports_subcommands_and_common_flags() -> None:
     assert args.prediction_mode == "delta"
 
 
-def test_parse_args_supports_shared_free_response_flags() -> None:
+def test_parse_args_supports_repeated_raindrop_flag() -> None:
     args = parse_args(
         [
             "quick",
             "--dataset", "synthetic",
             "--synthetic-task", "wave",
-            "--synthetic-drive-cutoff", "5",
-            "--synthetic-free-rollout",
-            "--synthetic-self-free-rollout",
-            "--synthetic-free-train-percent", "25",
-            "--synthetic-free-train-cutoff", "1",
+            "--synthetic-raindrop-interval", "12",
         ]
     )
 
-    assert args.synthetic_drive_cutoff == 5
-    assert args.synthetic_free_rollout is True
-    assert args.synthetic_self_free_rollout is True
-    assert args.synthetic_free_train_percent == 25
-    assert args.synthetic_free_train_cutoff == 1
+    assert args.synthetic_raindrop_interval == 12
 
 
-def test_parse_args_supports_ift_variant_selection() -> None:
+def test_parse_args_supports_physical_event_threshold() -> None:
     args = parse_args(
         [
             "quick",
-            "--ift-variants",
-            "linear",
-            "auto",
-            "--ift-orders",
-            "2",
-            "--ift-history-steps",
-            "1",
-            "3",
+            "--dataset", "synthetic",
+            "--synthetic-task", "wave",
+            "--synthetic-event-threshold", "0.25",
         ]
     )
 
-    assert args.command == "quick"
-    assert args.ift_variants == ["linear", "auto"]
-    assert args.ift_orders == [2]
-    assert args.ift_history_steps == [1, 3]
-    _normalize_ift_variant_args(args)
-    assert args.dataset == "synthetic"
+    assert args.synthetic_event_threshold == pytest.approx(0.25)
 
 
-def test_parse_args_expands_ift_variant_selection_without_dataset_override() -> None:
-    args = parse_args(
-        [
-            "quick",
-            "--ift-variants",
-        ]
-    )
-
-    assert args.ift_variants == []
-    _normalize_ift_variant_args(args)
-    assert args.dataset == "synthetic"
-
-
-def test_ift_variant_selection_rejects_non_synthetic_dataset_override() -> None:
-    args = parse_args(
-        [
-            "quick",
-            "--dataset",
-            "toy",
-            "--ift-variants",
-            "generic",
-        ]
-    )
-
-    with pytest.raises(ValueError, match="synthetic dataset"):
-        _normalize_ift_variant_args(args)
-
-
-def test_ift_variant_selection_rejects_sweep_preset() -> None:
-    args = parse_args(
-        [
-            "sweep",
-            "--ift-variants",
-            "generic",
-        ]
-    )
-
-    with pytest.raises(ValueError, match="smoke or quick"):
-        _normalize_ift_variant_args(args)
+@pytest.mark.parametrize(
+    "flag",
+    (
+        "--synthetic-drive-cutoff",
+        "--synthetic-free-rollout",
+        "--synthetic-self-free-rollout",
+        "--synthetic-free-train-percent",
+        "--synthetic-free-train-cutoff",
+    ),
+)
+def test_parse_args_rejects_retired_driven_field_flags(flag: str) -> None:
+    argv = ["quick", "--dataset", "synthetic", "--synthetic-task", "wave", flag]
+    if flag in {"--synthetic-drive-cutoff", "--synthetic-free-train-percent", "--synthetic-free-train-cutoff"}:
+        argv.append("1")
+    with pytest.raises(SystemExit):
+        parse_args(argv)
 
 
 @pytest.mark.parametrize(
@@ -139,21 +98,6 @@ def test_parse_args_maps_legacy_preset_aliases(preset: str, command: str) -> Non
 def test_parse_args_rejects_removed_ift_diagnose_subcommand() -> None:
     with pytest.raises(SystemExit):
         parse_args(["ift-diagnose"])
-
-
-def test_ift_history_steps_without_auto_still_parse_and_validate_later() -> None:
-    args = parse_args(
-        [
-            "quick",
-            "--ift-variants",
-            "linear",
-            "--ift-history-steps",
-            "2",
-        ]
-    )
-
-    with pytest.raises(ValueError, match="requires selecting the auto IFT variant"):
-        _normalize_ift_variant_args(args)
 
 
 def test_parse_args_requires_a_subcommand_or_legacy_preset() -> None:
