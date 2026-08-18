@@ -196,6 +196,8 @@ def _supports_rollout_training(model, cfg: TrainConfig, edge_targets) -> bool:
 def _supports_physical_rollout_training(model, cfg: TrainConfig, edge_targets) -> bool:
     """Physical event rollouts have force events, not revealed edge targets."""
     return bool(
+        int(getattr(cfg, "rollout_train_steps", 1)) > 1
+        and
         edge_targets is None
         and callable(getattr(model, "predict_event_features", None))
     )

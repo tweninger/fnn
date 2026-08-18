@@ -11,8 +11,8 @@ from interactiondynamics.train import (
     _validate_rollout_training_selection,
     parse_args,
 )
-from interactiondynamics.training.runner import short_run_label_from_name
-from interactiondynamics.training.types import RunResult, SweepRun
+from interactiondynamics.training.runner import _supports_physical_rollout_training, short_run_label_from_name
+from interactiondynamics.training.types import RunResult, SweepRun, TrainConfig
 from interactiondynamics.core.config import ModelConfig
 
 
@@ -156,6 +156,17 @@ def test_rollout_training_accepts_second_order_history_readout_with_baseline() -
     ]
 
     _validate_rollout_training_selection(runs, rollout_train_steps=3)
+
+
+def test_physical_rollout_training_requires_more_than_one_step() -> None:
+    model = SimpleNamespace(predict_event_features=lambda *_args: None)
+
+    assert not _supports_physical_rollout_training(
+        model, TrainConfig(num_nodes=8, rollout_train_steps=1), edge_targets=None
+    )
+    assert _supports_physical_rollout_training(
+        model, TrainConfig(num_nodes=8, rollout_train_steps=2), edge_targets=None
+    )
 
 
 def test_print_ift_diagnostic_footer_emits_table_for_variant_runs(capsys: pytest.CaptureFixture[str]) -> None:
