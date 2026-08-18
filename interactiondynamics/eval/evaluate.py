@@ -933,37 +933,62 @@ def evaluate_physical_force_rollout(
                 force_loss, force_metrics = event_force_loss_and_metrics(
                     model, predicted_force[keep], internal.features
                 )
-                _acc_update(overall, float(force_loss.item()), force_metrics)
+                # Evaluate temporal link prediction at the *same* closed-loop
+                # state as force prediction. The target supplies a real active
+                # source and its positive destination only for scoring; the
+                # candidates include sampled negatives, with filtered metrics
+                # excluding simultaneous true destinations.
+                _ranking_loss, ranking_metrics = ranking_loss_and_metrics(
+                    model=model,
+                    state=rollout_state,
+                    next_events=target,
+                    num_nodes=cfg.num_nodes,
+                    num_neg=cfg.num_neg,
+                    include_force=False,
+                )
+                combined_metrics = dict(force_metrics)
+                combined_metrics.update(ranking_metrics)
+                _acc_update(overall, float(force_loss.item()), combined_metrics)
                 _acc_update(
                     by_step.setdefault(relative_step, _acc_init()),
                     float(force_loss.item()),
-                    force_metrics,
+                    combined_metrics,
                 )
                 elapsed = steps_since_external[target_idx]
                 if elapsed is not None:
                     _acc_update(
                         by_steps_since_external.setdefault(elapsed, _acc_init()),
                         float(force_loss.item()),
-                        force_metrics,
+                        combined_metrics,
                     )
                 persistent_force_loss, persistent_force_metrics = event_force_loss_and_metrics(
                     model, persistent_predicted_force[keep], internal.features
                 )
+                _persistent_ranking_loss, persistent_ranking_metrics = ranking_loss_and_metrics(
+                    model=model,
+                    state=persistent_rollout_state,
+                    next_events=target,
+                    num_nodes=cfg.num_nodes,
+                    num_neg=cfg.num_neg,
+                    include_force=False,
+                )
+                persistent_combined_metrics = dict(persistent_force_metrics)
+                persistent_combined_metrics.update(persistent_ranking_metrics)
                 _acc_update(
                     persistent_overall,
                     float(persistent_force_loss.item()),
-                    persistent_force_metrics,
+                    persistent_combined_metrics,
                 )
                 _acc_update(
                     persistent_by_step.setdefault(relative_step, _acc_init()),
                     float(persistent_force_loss.item()),
-                    persistent_force_metrics,
+                    persistent_combined_metrics,
                 )
                 if elapsed is not None:
                     _acc_update(
                         persistent_by_steps_since_external.setdefault(elapsed, _acc_init()),
                         float(persistent_force_loss.item()),
-                        persistent_force_metrics,
+                        persistent_combined_metrics,
                     )
             generated_features = predicted_force.detach().clone()
             if target.is_external is not None and bool(target.is_external.any()):
@@ -991,6 +1016,7 @@ def evaluate_physical_force_rollout(
         "rollout_steps": float(windows),
         # Explicitly record the protocol in machine-readable form.
         "rollout_oracle_pair_queries": 1.0,
+        "rollout_oracle_active_sources": 1.0,
         "rollout_observed_external_events": float(observed_external_events),
     }
     for key, value in _acc_finalize(overall).items():

@@ -92,6 +92,81 @@ def sample_filtered_negative_dsts(
     return cast(torch.LongTensor, neg), cast(torch.BoolTensor, valid)
 
 
+def sample_balanced_inactive_pairs(
+    num_nodes: int,
+    observed_events: EventBatch,
+    num_samples: int,
+    device: torch.device,
+) -> tuple[torch.LongTensor, torch.LongTensor]:
+    """Uniformly sample currently unobserved directed pairs.
+
+    This is used *only* for the balanced event-detection diagnostic.  Every
+    endogenous event in the current bin is a positive; the same number of
+    directed pairs that are absent from that bin are sampled as negatives.
+    External interventions are excluded from both classes because their random
+    occurrence is not a model prediction target.
+
+    Sampling without replacement makes the 1:1 protocol exact whenever the
+    graph has enough inactive pairs.  It deliberately does not condition on a
+    known active source, unlike destination-ranking/MRR evaluation.
+    """
+    if num_nodes <= 0 or num_samples <= 0:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty
+    all_pair_ids = torch.arange(num_nodes * num_nodes, device=device, dtype=torch.long)
+    if observed_events.num_events:
+        observed_ids = torch.unique(observed_events.src * num_nodes + observed_events.dst)
+        available = all_pair_ids[~torch.isin(all_pair_ids, observed_ids)]
+    else:
+        available = all_pair_ids
+    if available.numel() == 0:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty
+    count = min(int(num_samples), int(available.numel()))
+    chosen = available[torch.randperm(available.numel(), device=device)[:count]]
+    return cast(torch.LongTensor, chosen // num_nodes), cast(torch.LongTensor, chosen % num_nodes)
+
+
+@torch.no_grad()
+def balanced_event_detection_metrics(
+    model,
+    state,
+    events: EventBatch,
+    num_nodes: int,
+) -> Dict[str, float]:
+    """Score observed events against an equal number of random inactive pairs.
+
+    This complements conditional MRR.  It asks whether a pair is active in the
+    current bin, without supplying the source node as an oracle query.  The
+    metric is evaluation-only and does not alter the sampled-softmax training
+    objective.
+    """
+    positives = internal_events(events)
+    if positives.num_events == 0:
+        return {}
+    neg_src, neg_dst = sample_balanced_inactive_pairs(
+        num_nodes=num_nodes,
+        observed_events=events,
+        num_samples=positives.num_events,
+        device=events.src.device,
+    )
+    if neg_src.numel() == 0:
+        return {}
+    positive_query = EventBatch(src=positives.src, dst=positives.dst, t=positives.t)
+    negative_query = EventBatch(src=neg_src, dst=neg_dst)
+    pos_scores = model.score(state.clone(detach=True), positive_query)
+    neg_scores = model.score(state.clone(detach=True), negative_query)
+    scores = torch.cat([pos_scores, neg_scores])
+    labels = torch.cat([
+        torch.ones_like(pos_scores),
+        torch.zeros_like(neg_scores),
+    ])
+    return {
+        f"event_{key}": value
+        for key, value in binary_metrics_from_logits(scores, labels).items()
+    }
+
+
 def _select_event_rows(events: EventBatch, keep: torch.Tensor) -> EventBatch:
     """Index an event batch while preserving per-event metadata."""
     return EventBatch(
@@ -312,6 +387,8 @@ def ranking_loss_and_metrics(
     next_events: EventBatch,
     num_nodes: int,
     num_neg: int,
+    *,
+    include_force: bool = True,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Given current state, evaluate next_events as positives with negatives.
@@ -416,11 +493,22 @@ def ranking_loss_and_metrics(
                 K1=num_neg + 1,
             )
             metrics.update({f"filtered_{key}": value for key, value in filtered.items()})
+        # This is deliberately separate from MRR: it does not condition on
+        # the source of a known positive event.  It uses a 1:1 random-pair
+        # positive/negative set to diagnose event detection.
+        metrics.update(
+            balanced_event_detection_metrics(
+                model=model,
+                state=state_eval,
+                events=next_events,
+                num_nodes=num_nodes,
+            )
+        )
     # Event-only physical models additionally predict the measured force on
     # the *positive* next interaction.  Generic ranking baselines remain
     # unchanged because they do not expose this optional decoder.
     force_predictor = getattr(model, "predict_event_features", None)
-    if callable(force_predictor) and next_events.features is not None:
+    if include_force and callable(force_predictor) and next_events.features is not None:
         predicted_force = force_predictor(state_eval, next_events)
         force_loss, force_metrics = event_force_loss_and_metrics(
             model, predicted_force, next_events.features

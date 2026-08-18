@@ -140,15 +140,38 @@ def format_ranking_metric_bundle(
     hits1 = metrics.get(f"{key_prefix}hits@1", float("nan"))
     hits10 = metrics.get(f"{key_prefix}hits@10", float("nan"))
     auc = metrics.get(f"{key_prefix}pairwise_auc_tie_half", float("nan"))
+    event_auroc = metrics.get(f"{key_prefix}event_auroc", float("nan"))
+    event_auprc = metrics.get(f"{key_prefix}event_auprc", float("nan"))
+    force_mse = metrics.get(f"{key_prefix}force_mse", float("nan"))
     if math.isnan(mrr):
         return ""
     parts = [
         f"mrr={mrr:.3f}",
         f"h@1={hits1:.3f}" if not math.isnan(hits1) else "h@1=nan",
         f"h@10={hits10:.3f}" if not math.isnan(hits10) else "h@10=nan",
-        f"auc={auc:.3f}" if not math.isnan(auc) else "auc=nan",
+        f"rank_auc={auc:.3f}" if not math.isnan(auc) else "rank_auc=nan",
+        f"event_auc={event_auroc:.3f}" if not math.isnan(event_auroc) else "event_auc=nan",
+        f"event_aupr={event_auprc:.3f}" if not math.isnan(event_auprc) else "event_aupr=nan",
     ]
+    if not math.isnan(force_mse):
+        parts.insert(0, f"force_mse={force_mse:.4g}")
     return " ".join(parts)
+
+
+def format_physical_rollout_bundle(metrics: Dict[str, float]) -> str:
+    """Compact event-only physical rollout summary for console reporting."""
+    force_mse = metrics.get("rollout_force_mse", float("nan"))
+    mrr = metrics.get("rollout_mrr", float("nan"))
+    event_auroc = metrics.get("rollout_event_auroc", float("nan"))
+    event_auprc = metrics.get("rollout_event_auprc", float("nan"))
+    if all(math.isnan(value) for value in (force_mse, mrr, event_auroc, event_auprc)):
+        return ""
+    return " ".join([
+        f"force_mse={force_mse:.4g}" if not math.isnan(force_mse) else "force_mse=nan",
+        f"mrr={mrr:.3f}" if not math.isnan(mrr) else "mrr=nan",
+        f"event_auc={event_auroc:.3f}" if not math.isnan(event_auroc) else "event_auc=nan",
+        f"event_aupr={event_auprc:.3f}" if not math.isnan(event_auprc) else "event_aupr=nan",
+    ])
 
 
 def format_regression_diagnostics(metrics: Dict[str, float], stem: str) -> str:

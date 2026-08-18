@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from interactiondynamics.eval.ranking_metrics import sample_filtered_negative_dsts
+from interactiondynamics.core.events import EventBatch
+from interactiondynamics.eval.ranking_metrics import (
+    sample_balanced_inactive_pairs,
+    sample_filtered_negative_dsts,
+)
 
 
 def test_filtered_negative_destinations_exclude_all_same_source_positives() -> None:
@@ -38,3 +42,20 @@ def test_filtered_negative_destinations_mark_fully_active_source_invalid() -> No
     )
 
     assert not bool(valid.any())
+
+
+def test_balanced_inactive_pairs_exclude_every_observed_pair() -> None:
+    events = EventBatch(
+        src=torch.tensor([0, 1, 3]),
+        dst=torch.tensor([1, 2, 0]),
+    )
+    src, dst = sample_balanced_inactive_pairs(
+        num_nodes=4,
+        observed_events=events,
+        num_samples=3,
+        device=torch.device("cpu"),
+    )
+
+    assert src.numel() == dst.numel() == 3
+    observed_ids = events.src * 4 + events.dst
+    assert not bool(torch.isin(src * 4 + dst, observed_ids).any())

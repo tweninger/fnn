@@ -38,6 +38,7 @@ from interactiondynamics.training.reporting import (
     format_edge_target_summary,
     format_node_metric,
     format_node_metric_bundle,
+    format_physical_rollout_bundle,
     format_primary_metric,
     format_ranking_metric_bundle,
     format_rollout_metric_bundle,
@@ -1349,6 +1350,14 @@ def run_one_experiment(
                 print(
                     f"           rollout@{rollout_horizon}"
                     f" | {' | '.join(rollout_parts)}"
+                )
+            physical_rollout_val = format_physical_rollout_bundle(rollout_val_stats)
+            physical_rollout_test = format_physical_rollout_bundle(rollout_test_stats)
+            if physical_rollout_val or physical_rollout_test:
+                print(
+                    f"           rollout@{rollout_horizon}"
+                    f" | val {physical_rollout_val or 'n/a'}"
+                    f" | test {physical_rollout_test or 'n/a'}"
                 )
         if rollout_intervention_val_stats:
             intervention_val = format_rollout_metric_bundle(rollout_intervention_val_stats, stem="edge")

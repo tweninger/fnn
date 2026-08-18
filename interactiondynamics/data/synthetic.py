@@ -128,13 +128,14 @@ def _physical_force_task(
         feature_schema=("force_x", "force_y", "force_z", "force_w"),
         supported_metrics=(
             "mrr", "hits@1", "filtered_mrr", "filtered_hits@1", "filtered_hits@10",
+            "event_auroc", "event_auprc",
             "force_mse", "topology_auc", "topology_f1",
         ),
         primary_metric_path="val.force_mse",
         primary_metric_goal="min",
         summary_metric_paths=(
             "val.force_mse", "test.force_mse", "test.active_force_mse",
-            "test.filtered_mrr", "test.filtered_hits@1",
+            "test.filtered_mrr", "test.filtered_hits@1", "test.event_auroc", "test.event_auprc",
             "rollout_test.rollout_force_mse", "rollout_test.rollout_persistent_force_mse",
         ),
     )
