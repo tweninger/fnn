@@ -472,6 +472,7 @@ def train_one_epoch(
 
     total_loss = 0.0
     total_primary = 0.0
+    total_primary_count = 0
     n_steps = 0
     kappa_sum = 0.0
     kappa_n = 0
@@ -794,8 +795,16 @@ def train_one_epoch(
             state.detach_()
 
         total_loss += float(total_step_loss.item())
-        primary_name = primary_metric_name(metrics)
-        total_primary += float(metrics[primary_name])
+        # Thresholded physical streams legitimately contain quiet bins with
+        # only an observed external raindrop (or no events). Their ranking
+        # loss is a valid zero connected to the model state, but they have no
+        # positive interaction and therefore no MRR/AUC to aggregate.
+        if metrics:
+            step_primary_name = primary_metric_name(metrics)
+            if step_primary_name in metrics:
+                primary_name = step_primary_name
+                total_primary += float(metrics[step_primary_name])
+                total_primary_count += 1
         n_steps += 1
 
         if cfg.log_every and (n_steps % cfg.log_every) == 0:
@@ -841,7 +850,10 @@ def train_one_epoch(
 
     if primary_name is None:
         primary_name = "mrr"
-    out = {"loss": total_loss / n_steps, primary_name: total_primary / n_steps}
+    out = {
+        "loss": total_loss / n_steps,
+        primary_name: total_primary / max(total_primary_count, 1),
+    }
     if kappa_n > 0:
         out["kappa_mean"] = kappa_sum / kappa_n
     if n_steps > 0:
