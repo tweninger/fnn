@@ -100,6 +100,16 @@ def _build_common_parser() -> argparse.ArgumentParser:
             "in nominal raindrop-force units [0, 1]."
         ),
     )
+    data_group.add_argument("--synthetic-dt", type=float, default=None, help="Physical simulator integration step.")
+    data_group.add_argument("--synthetic-gamma", type=float, default=None, help="Physical simulator damping coefficient.")
+    data_group.add_argument(
+        "--synthetic-omega", type=float, default=None,
+        help="Physical simulator restoring frequency (wave and coupled_oscillator only).",
+    )
+    data_group.add_argument(
+        "--synthetic-force-scale", type=float, default=None,
+        help="Physical simulator pair-force coupling scale.",
+    )
     data_group.add_argument(
         "--num-bins",
         type=int,
@@ -1001,6 +1011,24 @@ def main() -> None:
         args.dataset == "synthetic" and args.synthetic_task in {"diffusion", "wave", "coupled_oscillator"}
     ):
         raise ValueError("--synthetic-event-threshold is supported only for event-only physical synthetic tasks.")
+    synthetic_physics_args = (
+        args.synthetic_dt,
+        args.synthetic_gamma,
+        args.synthetic_omega,
+        args.synthetic_force_scale,
+    )
+    if any(value is not None for value in synthetic_physics_args) and not (
+        args.dataset == "synthetic" and args.synthetic_task in {"diffusion", "wave", "coupled_oscillator"}
+    ):
+        raise ValueError("Synthetic physics parameters are supported only for event-only physical synthetic tasks.")
+    if args.synthetic_dt is not None and args.synthetic_dt <= 0.0:
+        raise ValueError("--synthetic-dt must be positive.")
+    if args.synthetic_gamma is not None and args.synthetic_gamma < 0.0:
+        raise ValueError("--synthetic-gamma must be nonnegative.")
+    if args.synthetic_omega is not None and args.synthetic_omega < 0.0:
+        raise ValueError("--synthetic-omega must be nonnegative.")
+    if args.synthetic_force_scale is not None and args.synthetic_force_scale < 0.0:
+        raise ValueError("--synthetic-force-scale must be nonnegative.")
     if args.synthetic_num_episodes is not None:
         if args.dataset != "synthetic" or args.synthetic_task not in {"diffusion", "wave", "coupled_oscillator"}:
             raise ValueError(

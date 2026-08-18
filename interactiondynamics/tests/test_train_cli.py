@@ -64,6 +64,19 @@ def test_parse_args_supports_physical_event_threshold() -> None:
     assert args.synthetic_event_threshold == pytest.approx(0.25)
 
 
+def test_parse_args_supports_physical_simulator_parameters() -> None:
+    args = parse_args([
+        "quick", "--dataset", "synthetic", "--synthetic-task", "wave",
+        "--synthetic-dt", "0.05", "--synthetic-gamma", "0.2",
+        "--synthetic-omega", "0.9", "--synthetic-force-scale", "0.7",
+    ])
+
+    assert args.synthetic_dt == pytest.approx(0.05)
+    assert args.synthetic_gamma == pytest.approx(0.2)
+    assert args.synthetic_omega == pytest.approx(0.9)
+    assert args.synthetic_force_scale == pytest.approx(0.7)
+
+
 @pytest.mark.parametrize(
     "flag",
     (

@@ -149,6 +149,8 @@ Common dataset flags:
 - `--synthetic-num-episodes N`: number of independent trajectories for episodic physical dynamics; splits preserve whole trajectories.
 - `--synthetic-raindrop-interval K`: for physical dynamics, inject an observed external raindrop every `K` local steps within an episode (in addition to step 0). Drops update all model states but are excluded from prediction loss because their time, node, and amplitude are exogenous.
 - `--synthetic-event-threshold TAU`: emit an endogenous physical interaction only when its force-vector magnitude exceeds `TAU`, in fixed nominal-raindrop-force units from `0` to `1`. `0` retains every nonzero physical interaction.
+- `--synthetic-dt DT`, `--synthetic-gamma G`, `--synthetic-force-scale C`: override the simulator integration step, damping, and pair-force coupling. Omitting them retains each dynamic's canonical values.
+- `--synthetic-omega O`: override the simulator restoring frequency for `wave` or `coupled_oscillator`; it is not defined for first-order `diffusion`.
 - `--num-bins N`: override the number of simulated synthetic time bins.
 - `--seed N`: set the synthetic-data random seed.
 

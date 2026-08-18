@@ -261,6 +261,30 @@ def test_physical_event_threshold_filters_only_observed_endogenous_events():
             assert bool((torch.linalg.vector_norm(batch.features[internal], dim=1) > 1.0).all())
 
 
+def test_physical_simulator_parameters_are_configurable_and_reported():
+    dataset = SyntheticDataset(
+        SyntheticDatasetConfig(
+            task="wave",
+            num_nodes=16,
+            num_bins=12,
+            num_episodes=3,
+            dt=0.05,
+            gamma=0.2,
+            omega=0.9,
+            force_scale=0.7,
+            seed=11,
+        )
+    )
+
+    assert dataset.hidden_truth() is not None
+    params = dataset.hidden_truth()["params"]
+    assert params["dt"] == pytest.approx(0.05)
+    assert params["gamma"] == pytest.approx(0.2)
+    assert params["omega"] == pytest.approx(0.9)
+    assert params["force_scale"] == pytest.approx(0.7)
+    assert dataset.spec().extra["generator_params"]["omega"] == pytest.approx(0.9)
+
+
 def test_physical_dynamics_support_every_field_topology():
     for dynamic in ("diffusion", "wave", "coupled_oscillator"):
         for topology in ("ring", "grid", "torus", "doorway", "swisscheese"):

@@ -956,6 +956,12 @@ class SyntheticDatasetConfig:
     num_episodes: int = 10
     raindrop_interval: Optional[int] = None
     event_threshold: float = 0.0
+    # Optional physical simulator overrides. ``None`` preserves the
+    # task-specific canonical benchmark values.
+    dt: Optional[float] = None
+    gamma: Optional[float] = None
+    omega: Optional[float] = None
+    force_scale: Optional[float] = None
     diffusion_topology: Optional[str] = None
     field_topology: Optional[str] = None
     split_fracs: tuple[float, float, float] = (0.6, 0.2, 0.2)
@@ -980,6 +986,15 @@ class SyntheticDataset(EventStreamDataset):
                 raise ValueError("raindrop_interval must be at least one local episode step.")
         if cfg.event_threshold < 0.0 or cfg.event_threshold > 1.0:
             raise ValueError("event_threshold must lie in [0, 1], in nominal raindrop-force units.")
+        for name, value, strictly_positive in (
+            ("dt", cfg.dt, True),
+            ("gamma", cfg.gamma, False),
+            ("omega", cfg.omega, False),
+            ("force_scale", cfg.force_scale, False),
+        ):
+            if value is not None and (value <= 0.0 if strictly_positive else value < 0.0):
+                comparator = "positive" if strictly_positive else "nonnegative"
+                raise ValueError(f"{name} must be {comparator} when provided.")
         if selected_topology is not None:
             if cfg.task not in {"diffusion", "wave", "coupled_oscillator"}:
                 raise ValueError("Topology selection is supported only for field-dynamics synthetic tasks.")
@@ -1547,6 +1562,13 @@ class SyntheticDataset(EventStreamDataset):
             dt, gamma, omega, force_scale = 0.10, 0.10, 1.15, 0.65
         else:
             raise ValueError(f"Unknown physical dynamic {dynamics!r}.")
+        dt = float(self.cfg.dt) if self.cfg.dt is not None else dt
+        gamma = float(self.cfg.gamma) if self.cfg.gamma is not None else gamma
+        if self.cfg.omega is not None:
+            if dynamics == "diffusion":
+                raise ValueError("omega is not defined for first-order diffusion.")
+            omega = float(self.cfg.omega)
+        force_scale = float(self.cfg.force_scale) if self.cfg.force_scale is not None else force_scale
         adjacency = np.zeros((num_nodes, num_nodes), dtype=np.float32)
         adjacency[edge_src, edge_dst] = 1.0
         active_nodes = np.flatnonzero(active)
@@ -1932,6 +1954,8 @@ class SyntheticDataset(EventStreamDataset):
             generator_params = {} if task_axes["generator_params"] is None else dict(task_axes["generator_params"])
             generator_params["topology"] = topology
             generator_params["event_threshold"] = float(self.cfg.event_threshold)
+            if self._hidden_truth is not None:
+                generator_params.update(dict(self._hidden_truth.get("params", {})))
             task_axes["generator_params"] = generator_params
         if field_dynamic and topology != "ring":
             graph_types = {
