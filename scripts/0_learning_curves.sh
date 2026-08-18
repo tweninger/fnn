@@ -84,7 +84,9 @@ run_one() {
   fi
 
   echo "=== ${label} | gpu=${gpu_id} ==="
-  CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON" -m interactiondynamics.train quick \
+  # -u is important here: tee makes stdout a pipe, which otherwise causes
+  # Python to buffer step/epoch prints until a large output block accumulates.
+  CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON" -u -m interactiondynamics.train quick \
     --dataset synthetic \
     --synthetic-task "$DYNAMIC" \
     --synthetic-topology "$TOPOLOGY" \

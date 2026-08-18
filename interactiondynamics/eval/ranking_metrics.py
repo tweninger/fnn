@@ -78,17 +78,25 @@ def sample_filtered_negative_dsts(
     if num_nodes <= 0 or M == 0:
         return neg, valid
 
-    all_nodes = torch.arange(num_nodes, device=device, dtype=torch.long)
-    for source in torch.unique(src):
-        rows = src.eq(source)
-        active_destinations = torch.unique(dst[rows])
-        allowed = all_nodes[~torch.isin(all_nodes, active_destinations)]
-        if allowed.numel() == 0:
-            continue
-        row_count = int(rows.sum().item())
-        sampled = allowed[torch.randint(allowed.numel(), (row_count, num_neg), device=device)]
-        neg[rows] = sampled
-        valid[rows] = True
+    # Build the same per-source exclusion set as the former Python loop, but
+    # sample every row on-device at once. The old implementation synchronized
+    # the GPU once for every active source in every evaluation bin, which made
+    # dense physical-force streams overwhelmingly CPU-bound.
+    active = torch.zeros((num_nodes, num_nodes), dtype=torch.bool, device=device)
+    active[src, dst] = True
+    source_has_candidate = (~active).any(dim=1)
+    valid = source_has_candidate[src]
+
+    # Rejection sampling is exactly uniform over inactive destinations. Field
+    # topologies have only a few active destinations per source, so nearly all
+    # rows succeed on the first draw; the loop is typically entered zero or one
+    # times rather than once per source.
+    neg = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long)
+    blocked = active[src.view(-1, 1), neg] & valid.view(-1, 1)
+    while bool(blocked.any()):
+        redraw = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long)
+        neg = torch.where(blocked, redraw, neg)
+        blocked = active[src.view(-1, 1), neg] & valid.view(-1, 1)
     return cast(torch.LongTensor, neg), cast(torch.BoolTensor, valid)
 
 
