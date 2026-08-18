@@ -174,6 +174,8 @@ Common training flags:
 
 - `--max-runs N`: cap the number of runs executed after filtering the preset.
 - `--epochs N`: override the preset epoch count.
+- `--eval-every N`: evaluate every N epochs during training. Without this flag,
+  evaluation runs once after the final epoch.
 - `--rollout-horizon K`: set the maximum closed-loop rollout horizon where supported.
 - Physical rollout JSONL records include both distance-from-start and distance-from-raindrop curves; aggregate metrics are retained as `rollout_*` fields.
 - `--rollout-train-steps K`: optimize an average loss over `K` differentiable autoregressive event-prediction steps before each optimizer update. The default, `1`, is ordinary one-step training.

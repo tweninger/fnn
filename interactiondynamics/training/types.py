@@ -76,6 +76,9 @@ class TrainConfig:
     # Number of differentiable, autoregressive prediction steps per optimizer
     # update. One preserves the original one-step teacher-forced trainer.
     rollout_train_steps: int = 1
+    # Evaluate only after training by default. A positive value enables
+    # periodic in-loop evaluation at this epoch interval.
+    eval_every: Optional[int] = None
     # Opt-in wall-clock breakdown for training and evaluation stages.
     debug_timing: bool = False
 

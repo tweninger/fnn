@@ -101,6 +101,7 @@ run_one() {
     --synthetic-force-scale "$SYNTHETIC_FORCE_SCALE" \
     --seed "$seed" \
     --epochs "$EPOCHS" \
+    --eval-every 1 \
     --max-runs "$MODELS" \
     --num-bins "$NUM_BINS" \
     --rollout-train-steps "$ROLLOUT_TRAIN_STEPS" \

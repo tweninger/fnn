@@ -1062,68 +1062,12 @@ def run_one_experiment(
             f" | {format_edge_target_summary('test', test_node_mode_stats)}"
         )
 
-    baseline_val = evaluate_stream_sliced(
-        model,
-        ds.bins("val"),
-        val_node_targets,
-        val_edge_targets,
-        train_cfg,
-        slices=eval_slices,
-    )
-    baseline_test = evaluate_stream_sliced(
-        model,
-        ds.bins("test"),
-        test_node_targets,
-        test_edge_targets,
-        train_cfg,
-        slices=eval_slices,
-    )
-    run_primary_name = infer_primary_metric(baseline_val, baseline_test)
-    baseline_str = (
-        f"  baseline (no-update)"
-        f" | {format_primary_metric(baseline_val, prefix='persistent', name=run_primary_name)}"
-        f" | {format_primary_metric(baseline_test, prefix='persistent', name=run_primary_name)}"
-    )
-    if run_primary_name == "edge_mse":
-        baseline_val_edge = format_edge_metric_bundle(baseline_val, prefix="persistent")
-        baseline_test_edge = format_edge_metric_bundle(baseline_test, prefix="persistent")
-        baseline_str = (
-            f"  baseline (no-update)"
-            f" | val {baseline_val_edge}"
-            f" | test {baseline_test_edge}"
-        )
-    elif run_primary_name == "edge_auroc":
-        baseline_val_edge = format_edge_classification_bundle(baseline_val, prefix="persistent")
-        baseline_test_edge = format_edge_classification_bundle(baseline_test, prefix="persistent")
-        baseline_str = (
-            f"  baseline (no-update)"
-            f" | val {baseline_val_edge}"
-            f" | test {baseline_test_edge}"
-        )
-    baseline_node_val = format_node_metric(
-        {
-            key.replace("persistent_", "", 1): value
-            for key, value in baseline_val.items()
-            if key.startswith("persistent_node_")
-        }
-    )
-    baseline_node_test = format_node_metric(
-        {
-            key.replace("persistent_", "", 1): value
-            for key, value in baseline_test.items()
-            if key.startswith("persistent_node_")
-        }
-    )
-    if baseline_node_val or baseline_node_test:
-        baseline_str += f" | val {baseline_node_val} | test {baseline_node_test}"
-    print(baseline_str)
-
     snapshot: dict[str, Any] = {
         "epoch": 0,
         "train_step": {},
         "train_eval": {},
-        "val": baseline_val,
-        "test": baseline_test,
+        "val": {},
+        "test": {},
         "rollout_val": {},
         "rollout_test": {},
         "readout": _linear_hvf_readout_snapshot(model),
@@ -1134,6 +1078,7 @@ def run_one_experiment(
     field_topology = str(generator_params.get("topology", "ring"))
     setattr(train_cfg, "synthetic_field_dynamics", field_dynamics)
     setattr(train_cfg, "synthetic_field_topology", field_topology)
+    baseline_printed = False
     for epoch in range(1, epochs + 1):
         timing_sec: dict[str, float] = {}
         timing_enabled = bool(getattr(train_cfg, "debug_timing", False))
@@ -1161,6 +1106,87 @@ def run_one_experiment(
                 train_cfg,
             ),
         )
+        eval_every = train_cfg.eval_every
+        eval_due = epoch == epochs or (
+            eval_every is not None and epoch % eval_every == 0
+        )
+        if not eval_due:
+            print(f"  ep {epoch:03d} | train loss={train_stats_step['loss']:.4f}")
+            if save_jsonl_path is not None:
+                row = {
+                    "run": run.name,
+                    "seed": run.seed,
+                    "model_cfg": asdict(run.model_cfg),
+                    "train_cfg_overrides": {
+                        key: value
+                        for key, value in {
+                            "lr": run.lr,
+                            "weight_decay": run.weight_decay,
+                            "num_neg": run.num_neg,
+                            "tbptt_steps": run.tbptt_steps,
+                        }.items()
+                        if value is not None
+                    },
+                    "epoch": epoch,
+                    "train_step": train_stats_step,
+                }
+                with open(save_jsonl_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row) + "\n")
+            continue
+
+        if not baseline_printed:
+            baseline_val = evaluate_stream_sliced(
+                model,
+                ds.bins("val"),
+                val_node_targets,
+                val_edge_targets,
+                train_cfg,
+                slices=eval_slices,
+            )
+            baseline_test = evaluate_stream_sliced(
+                model,
+                ds.bins("test"),
+                test_node_targets,
+                test_edge_targets,
+                train_cfg,
+                slices=eval_slices,
+            )
+            run_primary_name = infer_primary_metric(baseline_val, baseline_test)
+            baseline_str = (
+                f"  baseline (no-update)"
+                f" | {format_primary_metric(baseline_val, prefix='persistent', name=run_primary_name)}"
+                f" | {format_primary_metric(baseline_test, prefix='persistent', name=run_primary_name)}"
+            )
+            if run_primary_name == "edge_mse":
+                baseline_str = (
+                    "  baseline (no-update)"
+                    f" | val {format_edge_metric_bundle(baseline_val, prefix='persistent')}"
+                    f" | test {format_edge_metric_bundle(baseline_test, prefix='persistent')}"
+                )
+            elif run_primary_name == "edge_auroc":
+                baseline_str = (
+                    "  baseline (no-update)"
+                    f" | val {format_edge_classification_bundle(baseline_val, prefix='persistent')}"
+                    f" | test {format_edge_classification_bundle(baseline_test, prefix='persistent')}"
+                )
+            baseline_node_val = format_node_metric(
+                {
+                    key.replace("persistent_", "", 1): value
+                    for key, value in baseline_val.items()
+                    if key.startswith("persistent_node_")
+                }
+            )
+            baseline_node_test = format_node_metric(
+                {
+                    key.replace("persistent_", "", 1): value
+                    for key, value in baseline_test.items()
+                    if key.startswith("persistent_node_")
+                }
+            )
+            if baseline_node_val or baseline_node_test:
+                baseline_str += f" | val {baseline_node_val} | test {baseline_node_test}"
+            print(baseline_str)
+            baseline_printed = True
         train_eval = timed(
             "train_eval",
             lambda: evaluate_stream_sliced(

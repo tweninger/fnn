@@ -131,6 +131,15 @@ def _build_common_parser() -> argparse.ArgumentParser:
         help="Optional override for the preset epoch count.",
     )
     train_group.add_argument(
+        "--eval-every",
+        type=int,
+        default=None,
+        help=(
+            "Evaluate every N epochs during training. By default evaluation runs "
+            "only once after the final epoch."
+        ),
+    )
+    train_group.add_argument(
         "--rollout-horizon",
         type=int,
         default=5,
@@ -1001,6 +1010,9 @@ def main() -> None:
     base_train_cfg.edge_target_scale = str(args.edge_target_scale)
     base_train_cfg.prediction_mode = _resolve_prediction_mode(str(args.prediction_mode))
     base_train_cfg.rollout_horizon = int(args.rollout_horizon)
+    if getattr(args, "eval_every", None) is not None and args.eval_every < 1:
+        raise ValueError("--eval-every must be at least 1.")
+    base_train_cfg.eval_every = getattr(args, "eval_every", None)
     base_train_cfg.debug_timing = bool(args.debug_timing)
     if args.synthetic_raindrop_interval is not None:
         supported_field_tasks = {"diffusion", "wave", "coupled_oscillator"}
