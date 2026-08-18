@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Stage 0: learning-curve diagnostic for the canonical event-only wave task.
 #
-# Runs the complete physical-event panel (FNN, three TGN-family baselines,
-# Hopfield, LNN, and HNN) for five independent seeds.  Each JSONL retains one
-# record per epoch, including train objective, validation/test force metrics,
-# active-force metrics, event AUPR, and closed-loop rollout metrics.
+# Runs the minimal physical-event learning-curve comparison—FNN and the
+# standard sum/TGN-GRU baseline—for five independent seeds. Each JSONL retains
+# one record per epoch, including train objective, validation/test force
+# metrics, active-force metrics, event AUPR, and closed-loop rollout metrics.
 set -euo pipefail
 
 PYTHON="${PYTHON:-venv/bin/python}"
@@ -19,7 +19,9 @@ LOG_DIR="${LOG_DIR:-derived/logs/learning_curves}"
 # Every value below is passed explicitly and encoded in each result filename.
 DYNAMIC="wave"
 TOPOLOGY="ring"
-MODELS=7
+# Physical quick-panel order is FNN, then sum/TGN-GRU. Keep this at two for
+# convergence diagnostics; the broader seven-model comparison is Stage 1.
+MODELS=2
 SEEDS=(0 1 2 3 4)
 EPOCHS=20
 NUM_NODES=64
