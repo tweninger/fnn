@@ -190,7 +190,7 @@ def balanced_event_detection_metrics(
     if query_and_labels is None:
         return {}
     query, labels = query_and_labels
-    scores = model.score(state.clone(detach=True), query)
+    scores = model.score(state.clone(detach=True) if model.training else state, query)
     return {
         f"event_{key}": value
         for key, value in binary_metrics_from_logits(scores, labels).items()
@@ -518,19 +518,24 @@ def ranking_loss_and_metrics(
     # print("DEBUG mean unique candidates (first 50 rows):", uniq_per_row)    
 
 
-    before = state.node.detach().clone()
-    detach_for_score = not torch.is_grad_enabled()
-    state_eval = state.clone(detach=detach_for_score)  # ensure score() can't mutate original state
-        
-
+    # The full state clone and equality checks below were invaluable while
+    # wiring models, but in no-grad evaluation they caused a device-to-host
+    # synchronization and copied every node state for every time bin.  Built
+    # models score functionally; use the live state in the production eval
+    # path and retain the defensive checks during training.
+    if model.training:
+        before = state.node.detach().clone()
+        state_eval = state.clone(detach=False)
+    else:
+        before = None
+        state_eval = state
     scores = model.score(state_eval, cand_batch)  # (M*K1,)
 
-
-    assert torch.equal(before, state.node.detach()), "score() mutated state.node"
-    
+    if before is not None:
+        assert torch.equal(before, state.node.detach()), "score() mutated state.node"
     assert scores.shape == (M * K1,), f"scores has shape {tuple(scores.shape)} expected {(M*K1,)}"
 
-    if not torch.allclose(before, state.node):
+    if before is not None and not torch.allclose(before, state.node):
         raise RuntimeError("score() mutated state.node")
 
     if not torch.isfinite(scores).all():
@@ -572,7 +577,10 @@ def ranking_loss_and_metrics(
                 is_external=filtered_events.is_external,
                 batch=filtered_events.batch,
             )
-            filtered_scores = model.score(state_eval.clone(detach=True), filtered_batch)
+            filtered_scores = model.score(
+                state_eval.clone(detach=True) if model.training else state_eval,
+                filtered_batch,
+            )
             filtered = ranking_metrics(
                 filtered_scores.detach(),
                 M=filtered_events.num_events,
