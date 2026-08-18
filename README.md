@@ -179,6 +179,17 @@ Common training flags:
 - `--node-loss-weight W`: weight for the node prediction loss.
 - `--node-scorer-hidden H`: hidden width for the node scorer MLP.
 
+Physical-event model flags:
+
+- `--event-feature-loss-weight W`, `--event-feature-magnitude-weight W`: tune force-loss weighting for all models in the panel.
+- `--fnn-dt DT`, `--fnn-gamma-init G`, `--fnn-omega-init O`, `--fnn-force-scale-init C`, `--fnn-topology-init B`: FNN integration and initialization controls. The FNN state width is fixed to the observed physical force-vector width.
+- `--fnn-force-decoder {mlp,linear,field_difference}`: choose the FNN force readout.
+- `--fnn-learn-physical-params`: learn FNN damping, restoring frequency, and constrained force scale rather than keeping them fixed.
+- `--lnn-dt DT`, `--lnn-hidden H`, `--lnn-layers L`, `--lnn-damping G`: LNN integrator and potential-network controls.
+- `--hnn-dt DT`, `--hnn-hidden H`, `--hnn-layers L`, `--hnn-damping G`: HNN integrator and energy-network controls.
+
+The physical `quick` panel runs FNN, three TGN encoders, Hopfield, LNN, and HNN in that order. Use `--max-runs 5` for the routine FNN/TGN/Hopfield panel, `6` to include LNN, or `7` to include HNN.
+
 For event-only physical benchmarks, rollouts begin from observed history,
 then feed each model's predicted internal force events back into its state.
 The future source/destination measurement schedule remains an explicit oracle

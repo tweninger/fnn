@@ -41,14 +41,17 @@ FIELD_COMPARISON_PANEL = (
 )
 
 # The canonical physical-event benchmark has a single input/output contract:
-# observed force events in, next pair plus next force vector out.  IFT, LNN,
-# and HNN are intentionally not part of this panel: they belong to the retired
-# revealed-state experiments rather than this event-only comparison.
+# observed force events in, next pair plus next force vector out.  LNN/HNN are
+# retained as energy-structured event baselines. They are considerably more
+# expensive than the GRU updates because each state update differentiates an
+# energy network, so routine smoke runs can use --max-runs to omit them.
 PHYSICAL_EVENT_COMPARISON_PANEL = (
     ("sum", "tgn_gru"),
     ("deepsets", "tgn_gru"),
     ("settransformer", "tgn_gru"),
     ("hopfield", "hopfield_update"),
+    ("settransformer", "lnn"),
+    ("settransformer", "hnn"),
 )
 # Backward-compatible name for callers that still refer to the original
 # first-order diffusion panel.  The same architecture-paired baselines are

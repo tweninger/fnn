@@ -141,9 +141,25 @@ def balanced_event_detection_metrics(
     metric is evaluation-only and does not alter the sampled-softmax training
     objective.
     """
+    query_and_labels = balanced_event_detection_query(events, num_nodes)
+    if query_and_labels is None:
+        return {}
+    query, labels = query_and_labels
+    scores = model.score(state.clone(detach=True), query)
+    return {
+        f"event_{key}": value
+        for key, value in binary_metrics_from_logits(scores, labels).items()
+    }
+
+
+def balanced_event_detection_query(
+    events: EventBatch,
+    num_nodes: int,
+) -> tuple[EventBatch, torch.Tensor] | None:
+    """Build a 1:1 positive/random-inactive query set for reuse in evaluation."""
     positives = internal_events(events)
     if positives.num_events == 0:
-        return {}
+        return None
     neg_src, neg_dst = sample_balanced_inactive_pairs(
         num_nodes=num_nodes,
         observed_events=events,
@@ -151,20 +167,20 @@ def balanced_event_detection_metrics(
         device=events.src.device,
     )
     if neg_src.numel() == 0:
-        return {}
-    positive_query = EventBatch(src=positives.src, dst=positives.dst, t=positives.t)
-    negative_query = EventBatch(src=neg_src, dst=neg_dst)
-    pos_scores = model.score(state.clone(detach=True), positive_query)
-    neg_scores = model.score(state.clone(detach=True), negative_query)
-    scores = torch.cat([pos_scores, neg_scores])
+        return None
+    neg_t = None
+    if positives.t is not None:
+        neg_t = positives.t[:1].expand(neg_src.numel())
+    query = EventBatch(
+        src=torch.cat([positives.src, neg_src]),
+        dst=torch.cat([positives.dst, neg_dst]),
+        t=None if positives.t is None else torch.cat([positives.t, neg_t]),
+    )
     labels = torch.cat([
-        torch.ones_like(pos_scores),
-        torch.zeros_like(neg_scores),
+        torch.ones((positives.num_events,), device=events.src.device),
+        torch.zeros((neg_src.numel(),), device=events.src.device),
     ])
-    return {
-        f"event_{key}": value
-        for key, value in binary_metrics_from_logits(scores, labels).items()
-    }
+    return query, labels
 
 
 def _select_event_rows(events: EventBatch, keep: torch.Tensor) -> EventBatch:
@@ -241,6 +257,8 @@ def ranking_metrics(
     M: int,
     K1: int,
     hits_ks=(1, 3, 10),
+    *,
+    include_binary_metrics: bool = True,
 ) -> Dict[str, float]:
     """
     Compute sampled ranking diagnostics.
@@ -308,8 +326,9 @@ def ranking_metrics(
             torch.zeros((M,), device=scores.device, dtype=torch.long),
             reduction="mean",
         ).item(),
-        **binary_metrics_from_logits(logits=logits, labels=labels),
     }
+    if include_binary_metrics:
+        out.update(binary_metrics_from_logits(logits=logits, labels=labels))
 
     for k in hits_ks:
         out[f"hits@{k}"] = (rank <= k).float().mean().item()
@@ -389,6 +408,8 @@ def ranking_loss_and_metrics(
     num_neg: int,
     *,
     include_force: bool = True,
+    include_binary_metrics: bool = True,
+    include_event_detection: bool = True,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Given current state, evaluate next_events as positives with negatives.
@@ -462,7 +483,9 @@ def ranking_loss_and_metrics(
     #loss = bce_ranking_loss(scores, M=M, K1=K1)  
     loss = softmax_ranking_loss(scores, M=M, K1=K1)
 
-    metrics = ranking_metrics(scores.detach(), M=M, K1=K1)
+    metrics = ranking_metrics(
+        scores.detach(), M=M, K1=K1, include_binary_metrics=include_binary_metrics
+    )
     # Training retains the original sampled objective. During evaluation, add
     # the standard filtered ranking diagnostics: destinations that are another
     # true same-bin interaction from this source are excluded from negatives.
@@ -491,19 +514,21 @@ def ranking_loss_and_metrics(
                 filtered_scores.detach(),
                 M=filtered_events.num_events,
                 K1=num_neg + 1,
+                include_binary_metrics=include_binary_metrics,
             )
             metrics.update({f"filtered_{key}": value for key, value in filtered.items()})
         # This is deliberately separate from MRR: it does not condition on
         # the source of a known positive event.  It uses a 1:1 random-pair
         # positive/negative set to diagnose event detection.
-        metrics.update(
-            balanced_event_detection_metrics(
-                model=model,
-                state=state_eval,
-                events=next_events,
-                num_nodes=num_nodes,
+        if include_event_detection:
+            metrics.update(
+                balanced_event_detection_metrics(
+                    model=model,
+                    state=state_eval,
+                    events=next_events,
+                    num_nodes=num_nodes,
+                )
             )
-        )
     # Event-only physical models additionally predict the measured force on
     # the *positive* next interaction.  Generic ranking baselines remain
     # unchanged because they do not expose this optional decoder.

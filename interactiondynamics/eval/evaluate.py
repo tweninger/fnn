@@ -18,10 +18,12 @@ from interactiondynamics.eval.node_metrics import (
     regression_metrics,
 )
 from interactiondynamics.eval.ranking_metrics import (
+    balanced_event_detection_query,
     event_force_loss_and_metrics,
     internal_events,
     ranking_loss_and_metrics,
 )
+from interactiondynamics.eval.prediction_metrics import binary_metrics_from_logits
 from interactiondynamics.training.targets import (
     edge_regression_loss as _edge_regression_loss,
     edge_regression_readout as _edge_regression_readout,
@@ -62,6 +64,24 @@ def _acc_finalize(acc: dict) -> Dict[str, float]:
     for key, value in acc["metric_sums"].items():
         out[key] = value / acc["metric_counts"][key]
     return out
+
+
+def _event_score_acc_init() -> dict[str, list[torch.Tensor]]:
+    """Deferred event-detection scores, kept on device until finalization."""
+    return {"scores": [], "labels": []}
+
+
+def _event_score_acc_update(acc: dict[str, list[torch.Tensor]], scores: torch.Tensor, labels: torch.Tensor) -> None:
+    acc["scores"].append(scores.detach())
+    acc["labels"].append(labels.detach())
+
+
+def _event_score_acc_finalize(acc: dict[str, list[torch.Tensor]]) -> dict[str, float]:
+    if not acc["scores"]:
+        return {}
+    scores = torch.cat(acc["scores"])
+    labels = torch.cat(acc["labels"])
+    return {f"event_{key}": value for key, value in binary_metrics_from_logits(scores, labels).items()}
 
 
 def _stash_observed_history(
@@ -862,8 +882,12 @@ def evaluate_physical_force_rollout(
 
     overall = _acc_init()
     persistent_overall = _acc_init()
+    event_overall = _event_score_acc_init()
+    persistent_event_overall = _event_score_acc_init()
     by_step: dict[int, dict] = {}
     persistent_by_step: dict[int, dict] = {}
+    event_by_step: dict[int, dict[str, list[torch.Tensor]]] = {}
+    persistent_event_by_step: dict[int, dict[str, list[torch.Tensor]]] = {}
     # This axis is different from rollout distance.  A window can begin at
     # any phase of an episode, so a fixed rollout step mixes samples before,
     # at, and after a raindrop.  Track the local time since the latest observed
@@ -884,6 +908,8 @@ def evaluate_physical_force_rollout(
         previous_episode = episode
     by_steps_since_external: dict[int, dict] = {}
     persistent_by_steps_since_external: dict[int, dict] = {}
+    event_by_steps_since_external: dict[int, dict[str, list[torch.Tensor]]] = {}
+    persistent_event_by_steps_since_external: dict[int, dict[str, list[torch.Tensor]]] = {}
     windows = 0
     observed_external_events = 0
     for start_idx in range(len(events_seq) - horizon):
@@ -945,6 +971,8 @@ def evaluate_physical_force_rollout(
                     num_nodes=cfg.num_nodes,
                     num_neg=cfg.num_neg,
                     include_force=False,
+                    include_binary_metrics=False,
+                    include_event_detection=False,
                 )
                 combined_metrics = dict(force_metrics)
                 combined_metrics.update(ranking_metrics)
@@ -971,6 +999,8 @@ def evaluate_physical_force_rollout(
                     num_nodes=cfg.num_nodes,
                     num_neg=cfg.num_neg,
                     include_force=False,
+                    include_binary_metrics=False,
+                    include_event_detection=False,
                 )
                 persistent_combined_metrics = dict(persistent_force_metrics)
                 persistent_combined_metrics.update(persistent_ranking_metrics)
@@ -990,6 +1020,43 @@ def evaluate_physical_force_rollout(
                         float(persistent_force_loss.item()),
                         persistent_combined_metrics,
                     )
+                # Pool event-detection logits until each final aggregate is
+                # complete. Calling sklearn once per rollout target is both
+                # slow and statistically less useful than a pooled AUROC/AP.
+                event_query = balanced_event_detection_query(target, cfg.num_nodes)
+                if event_query is not None:
+                    event_query_batch, event_labels = event_query
+                    event_scores = model.score(rollout_state.clone(detach=True), event_query_batch)
+                    persistent_event_scores = model.score(
+                        persistent_rollout_state.clone(detach=True), event_query_batch
+                    )
+                    _event_score_acc_update(event_overall, event_scores, event_labels)
+                    _event_score_acc_update(
+                        persistent_event_overall, persistent_event_scores, event_labels
+                    )
+                    _event_score_acc_update(
+                        event_by_step.setdefault(relative_step, _event_score_acc_init()),
+                        event_scores,
+                        event_labels,
+                    )
+                    _event_score_acc_update(
+                        persistent_event_by_step.setdefault(relative_step, _event_score_acc_init()),
+                        persistent_event_scores,
+                        event_labels,
+                    )
+                    if elapsed is not None:
+                        _event_score_acc_update(
+                            event_by_steps_since_external.setdefault(elapsed, _event_score_acc_init()),
+                            event_scores,
+                            event_labels,
+                        )
+                        _event_score_acc_update(
+                            persistent_event_by_steps_since_external.setdefault(
+                                elapsed, _event_score_acc_init()
+                            ),
+                            persistent_event_scores,
+                            event_labels,
+                        )
             generated_features = predicted_force.detach().clone()
             if target.is_external is not None and bool(target.is_external.any()):
                 external = target.is_external.to(dtype=torch.bool)
@@ -1019,26 +1086,36 @@ def evaluate_physical_force_rollout(
         "rollout_oracle_active_sources": 1.0,
         "rollout_observed_external_events": float(observed_external_events),
     }
-    for key, value in _acc_finalize(overall).items():
+    overall_metrics = _acc_finalize(overall)
+    overall_metrics.update(_event_score_acc_finalize(event_overall))
+    for key, value in overall_metrics.items():
         if key not in {"loss", "steps"}:
             out[f"rollout_{key}"] = float(value)
-    for key, value in _acc_finalize(persistent_overall).items():
+    persistent_overall_metrics = _acc_finalize(persistent_overall)
+    persistent_overall_metrics.update(_event_score_acc_finalize(persistent_event_overall))
+    for key, value in persistent_overall_metrics.items():
         if key not in {"loss", "steps"}:
             out[f"rollout_persistent_{key}"] = float(value)
+    def _finalize_rollout_bucket(acc: dict, event_acc: dict[str, list[torch.Tensor]] | None) -> dict[str, float]:
+        block = _acc_finalize(acc)
+        if event_acc is not None:
+            block.update(_event_score_acc_finalize(event_acc))
+        return {key: float(value) for key, value in block.items()}
+
     out["rollout_by_step"] = {
-        str(step): {key: float(value) for key, value in _acc_finalize(acc).items()}
+        str(step): _finalize_rollout_bucket(acc, event_by_step.get(step))
         for step, acc in sorted(by_step.items())
     }
     out["rollout_by_steps_since_external"] = {
-        str(step): {key: float(value) for key, value in _acc_finalize(acc).items()}
+        str(step): _finalize_rollout_bucket(acc, event_by_steps_since_external.get(step))
         for step, acc in sorted(by_steps_since_external.items())
     }
     out["rollout_persistent_by_step"] = {
-        str(step): {key: float(value) for key, value in _acc_finalize(acc).items()}
+        str(step): _finalize_rollout_bucket(acc, persistent_event_by_step.get(step))
         for step, acc in sorted(persistent_by_step.items())
     }
     out["rollout_persistent_by_steps_since_external"] = {
-        str(step): {key: float(value) for key, value in _acc_finalize(acc).items()}
+        str(step): _finalize_rollout_bucket(acc, persistent_event_by_steps_since_external.get(step))
         for step, acc in sorted(persistent_by_steps_since_external.items())
     }
     return out

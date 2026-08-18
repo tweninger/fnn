@@ -113,6 +113,28 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
     cfg.fnn_learn_physical_params = bool(
         getattr(args, "fnn_learn_physical_params", False)
     ) or bool(cfg.fnn_learn_physical_params)
+    # Deliberately expose only the compact physical-event experiment surface;
+    # the legacy IFT knobs remain preset-owned.
+    for arg_name, config_name in (
+        ("event_feature_loss_weight", "event_feature_loss_weight"),
+        ("event_feature_magnitude_weight", "event_feature_magnitude_weight"),
+        ("fnn_dt", "fnn_dt"),
+        ("fnn_gamma_init", "fnn_gamma_init"),
+        ("fnn_omega_init", "fnn_omega_init"),
+        ("fnn_force_scale_init", "fnn_force_scale_init"),
+        ("fnn_topology_init", "fnn_topology_init"),
+        ("lnn_dt", "lnn_dt"),
+        ("lnn_hidden", "lnn_hidden"),
+        ("lnn_layers", "lnn_layers"),
+        ("lnn_damping", "lnn_damping"),
+        ("hnn_dt", "hnn_dt"),
+        ("hnn_hidden", "hnn_hidden"),
+        ("hnn_layers", "hnn_layers"),
+        ("hnn_damping", "hnn_damping"),
+    ):
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            setattr(cfg, config_name, value)
     return cfg
 
 

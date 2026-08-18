@@ -170,6 +170,28 @@ def _build_common_parser() -> argparse.ArgumentParser:
             "By default these remain fixed at their model-preset values."
         ),
     )
+    physical_model_group = common.add_argument_group("physical event models")
+    physical_model_group.add_argument(
+        "--event-feature-loss-weight", type=float, default=None,
+        help="Relative weight of next-force regression in every physical-event model's objective.",
+    )
+    physical_model_group.add_argument(
+        "--event-feature-magnitude-weight", type=float, default=None,
+        help="Additional emphasis on large force targets during physical-event training.",
+    )
+    physical_model_group.add_argument("--fnn-dt", type=float, default=None, help="Fixed FNN integration step.")
+    physical_model_group.add_argument("--fnn-gamma-init", type=float, default=None, help="Initial FNN damping.")
+    physical_model_group.add_argument("--fnn-omega-init", type=float, default=None, help="Initial FNN restoring frequency.")
+    physical_model_group.add_argument("--fnn-force-scale-init", type=float, default=None, help="Initial FNN force scale.")
+    physical_model_group.add_argument("--fnn-topology-init", type=float, default=None, help="Initial FNN pair-operator logit.")
+    physical_model_group.add_argument("--lnn-dt", type=float, default=None, help="LNN integration step.")
+    physical_model_group.add_argument("--lnn-hidden", type=int, default=None, help="LNN potential-network width.")
+    physical_model_group.add_argument("--lnn-layers", type=int, default=None, help="LNN potential-network depth.")
+    physical_model_group.add_argument("--lnn-damping", type=float, default=None, help="LNN velocity damping.")
+    physical_model_group.add_argument("--hnn-dt", type=float, default=None, help="HNN integration step.")
+    physical_model_group.add_argument("--hnn-hidden", type=int, default=None, help="HNN energy-network width.")
+    physical_model_group.add_argument("--hnn-layers", type=int, default=None, help="HNN energy-network depth.")
+    physical_model_group.add_argument("--hnn-damping", type=float, default=None, help="HNN momentum damping.")
 
     target_group = common.add_argument_group("targets")
     target_group.add_argument(

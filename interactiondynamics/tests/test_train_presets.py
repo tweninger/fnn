@@ -71,6 +71,8 @@ def test_physical_tasks_use_the_shared_event_prediction_panel() -> None:
         "deepsets/tgn_gru",
         "settransformer/tgn_gru",
         "hopfield/hopfield_update",
+        "settransformer/lnn",
+        "settransformer/hnn",
     ]
     pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
     assert pairs == set(PHYSICAL_EVENT_COMPARISON_PANEL)
