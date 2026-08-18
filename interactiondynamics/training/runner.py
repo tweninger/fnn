@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from interactiondynamics.core.config import ModelConfig
-from interactiondynamics.core.events import EventBatch
+from interactiondynamics.core.events import EventBatch, pack_independent_episode_bins
 from interactiondynamics.data.interfaces import EdgeTargetBatch
 from interactiondynamics.eval.evaluate import (
     EvalSlices,
@@ -466,9 +466,19 @@ def train_one_epoch(
         return _train_one_epoch_rollout(model, bins, edge_targets, optimizer, cfg)
     if _supports_physical_rollout_training(model, cfg, edge_targets):
         return _train_one_epoch_physical_rollout(model, bins, optimizer, cfg)
+    # Physical episodes are independent trajectories. Pack equal local-time
+    # bins into a disjoint node space so the GPU sees useful tensor widths
+    # instead of ten tiny sequential launches. Non-physical and legacy paths
+    # retain their original stream representation.
+    bins = list(bins)
+    if edge_targets is None and node_targets is None and bins and bins[0].features is not None:
+        bins = pack_independent_episode_bins(bins, num_nodes=cfg.num_nodes)
     model.train()
     device = torch.device(cfg.device)
-    state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
+    batch_size = 1
+    if bins and bins[0].batch is not None:
+        batch_size = int(bins[0].batch.max().item()) + 1
+    state = model.init_state(batch_size=batch_size, num_nodes=cfg.num_nodes, device=device)
 
     total_loss = 0.0
     total_primary = 0.0
@@ -512,6 +522,8 @@ def train_one_epoch(
         curr_node_target = None if target_iter is None else next(target_iter).to(device)
         curr_edge_target = None if edge_target_iter is None else next(edge_target_iter)
         episode_changed = (
+            curr.batch is None
+            and
             prev is not None
             and prev.episode is not None
             and curr.episode is not None
@@ -598,9 +610,10 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        assert prev.t is not None and int(prev.t.min().item()) == int(prev.t.max().item())
-        assert curr.t is not None and int(curr.t.min().item()) == int(curr.t.max().item())
-        assert int(prev.t.max().item()) < int(curr.t.min().item())
+        if curr.batch is None:
+            assert prev.t is not None and int(prev.t.min().item()) == int(prev.t.max().item())
+            assert curr.t is not None and int(curr.t.min().item()) == int(curr.t.max().item())
+            assert int(prev.t.max().item()) < int(curr.t.min().item())
 
         if getattr(state, "aux", None) is not None:
             if "L_bin_t_min" in state.aux and "L_bin_t_max" in state.aux:

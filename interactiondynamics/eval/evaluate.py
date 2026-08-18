@@ -6,7 +6,7 @@ import math
 from typing import Any, Dict, Iterable, Optional, cast
 import torch
 
-from interactiondynamics.core.events import EventBatch
+from interactiondynamics.core.events import EventBatch, pack_independent_episode_bins
 from interactiondynamics.core.interfaces import ModelState
 from interactiondynamics.data.interfaces import EdgeTargetBatch
 from interactiondynamics.eval.node_metrics import (
@@ -1139,10 +1139,16 @@ def evaluate_stream_sliced(
 
     No warmup. State is initialized fresh.
     """
+    bins = list(bins)
+    if edge_targets is None and node_targets is None and bins and bins[0].features is not None:
+        bins = pack_independent_episode_bins(bins, num_nodes=cfg.num_nodes)
     model.eval()
     device = torch.device(cfg.device)
 
-    state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
+    batch_size = 1
+    if bins and bins[0].batch is not None:
+        batch_size = int(bins[0].batch.max().item()) + 1
+    state = model.init_state(batch_size=batch_size, num_nodes=cfg.num_nodes, device=device)
 
     overall = _acc_init()
     early = _acc_init()
@@ -1170,6 +1176,8 @@ def evaluate_stream_sliced(
         curr_edge_target = None if edge_target_iter is None else next(edge_target_iter)
 
         episode_changed = (
+            events.batch is None
+            and
             prev is not None
             and prev.episode is not None
             and events.episode is not None

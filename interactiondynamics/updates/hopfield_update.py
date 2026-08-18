@@ -89,8 +89,8 @@ class HopfieldUpdate(UpdateLaw):
         num_nodes: int,
         device: torch.device,
     ) -> Optional[ModelState]:
-        node = torch.randn((num_nodes, self.node_dim), device=device) * 0.02
-        return ModelState(node=node)
+        node = torch.randn((int(batch_size) * num_nodes, self.node_dim), device=device) * 0.02
+        return ModelState(node=node, aux={"batch_size": int(batch_size), "nodes_per_graph": int(num_nodes)})
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         # (N, D) -> (H, N, dk)
@@ -118,6 +118,36 @@ class HopfieldUpdate(UpdateLaw):
         assert messages.size(0) == h.size(0), "messages N must match state.node N"
         assert messages.size(1) == self.msg_dim, \
             f"messages dim {messages.size(1)} != msg_dim {self.msg_dim}"
+
+        batch_size = int((state.aux or {}).get("batch_size", 1))
+        nodes_per_graph = int((state.aux or {}).get("nodes_per_graph", h.size(0)))
+        if batch_size > 1:
+            # Attention retrieval is a within-system memory operation. Packed
+            # episodes must not become an accidental cross-episode memory.
+            h_b = h.view(batch_size, nodes_per_graph, self.node_dim)
+            m_b = messages.view(batch_size, nodes_per_graph, self.msg_dim)
+            h0 = self.ln(h_b) if self.ln is not None else h_b
+            K = self.k_proj(h0).view(batch_size, nodes_per_graph, self.num_heads, self.dk).transpose(1, 2)
+            V = self.v_proj(h0).view(batch_size, nodes_per_graph, self.num_heads, self.dk).transpose(1, 2)
+            h_cur = h_b
+            retrieved = None
+            for _ in range(self.steps):
+                Q = self.q_proj(m_b).view(batch_size, nodes_per_graph, self.num_heads, self.dk).transpose(1, 2)
+                scores = torch.einsum("bhnd,bhmd->bhnm", Q, K) / (self.dk ** 0.5)
+                A = torch.softmax(self.beta * scores, dim=-1)
+                A = F.dropout(A, p=self.dropout, training=self.training)
+                retrieved_h = torch.einsum("bhnm,bhmd->bhnd", A, V)
+                retrieved = self.out_proj(retrieved_h.transpose(1, 2).contiguous().view(batch_size, nodes_per_graph, self.node_dim))
+                proposal = self.mix(torch.cat([h_cur, retrieved, m_b], dim=-1))
+                g = self.gate_net(torch.cat([h_cur, m_b], dim=-1)) if self.gate_net is not None else torch.full_like(h_cur, self.fixed_alpha)
+                h_cur = (1.0 - g) * h_cur + g * proposal
+                if self.ln is not None:
+                    h_cur = self.ln(h_cur)
+            next_state = ModelState(node=h_cur.reshape_as(h), aux={"batch_size": batch_size, "nodes_per_graph": nodes_per_graph})
+            aux: Dict[str, torch.Tensor] = {}
+            if retrieved is not None:
+                aux["retrieved_norm"] = retrieved.norm(dim=-1).mean().detach()
+            return next_state, aux
 
         # Optional pre-norm
         h0 = self.ln(h) if self.ln is not None else h

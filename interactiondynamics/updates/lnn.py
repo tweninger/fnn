@@ -70,9 +70,9 @@ class LNNUpdate(UpdateLaw):
         num_nodes: int,
         device: torch.device,
     ) -> Optional[ModelState]:
-        q = torch.randn(num_nodes, self.node_dim, device=device) * 0.02
+        q = torch.randn(int(batch_size) * num_nodes, self.node_dim, device=device) * 0.02
         q_prev = q.clone()
-        return ModelState(node=q, node_prev=q_prev, aux={})
+        return ModelState(node=q, node_prev=q_prev, aux={"batch_size": int(batch_size), "nodes_per_graph": int(num_nodes)})
 
     def forward(self, state, messages, drive=None):
         assert state is not None

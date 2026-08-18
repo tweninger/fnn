@@ -28,6 +28,7 @@ def sample_negative_dsts(
     num_neg: int,
     device: torch.device,
     avoid: torch.Tensor | None = None,   # (M,) optional (e.g., src)
+    batch: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Uniform negative sampling over node ids, avoiding collisions with pos_dst (and optionally avoid).
@@ -37,21 +38,27 @@ def sample_negative_dsts(
     if num_nodes <= 1:
         return torch.zeros((M, num_neg), device=device, dtype=torch.long)
 
+    base = (
+        torch.zeros((M, 1), device=device, dtype=torch.long)
+        if batch is None
+        else batch.to(device=device, dtype=torch.long).view(-1, 1) * num_nodes
+    )
+    local_pos = pos_dst.view(-1, 1) - base
     neg = torch.randint(0, num_nodes, (M, num_neg), device=device, dtype=torch.long)
 
     # Fix collisions with pos_dst (one pass is usually fine)
-    collide = neg.eq(pos_dst.view(-1, 1))
+    collide = neg.eq(local_pos)
     if collide.any():
         neg[collide] = (neg[collide] + 1) % num_nodes
 
     # Optional: avoid another id (e.g., src for no self-loop negatives)
     if avoid is not None:
-        collide2 = neg.eq(avoid.view(-1, 1))
+        collide2 = neg.eq(avoid.view(-1, 1) - base)
         if collide2.any():
             neg[collide2] = (neg[collide2] + 1) % num_nodes
             # might re-collide with pos_dst in rare cases; acceptable for now
 
-    return neg
+    return cast(torch.LongTensor, neg + base)
 
 
 def sample_filtered_negative_dsts(
@@ -60,6 +67,7 @@ def sample_filtered_negative_dsts(
     dst: torch.Tensor,
     num_neg: int,
     device: torch.device,
+    batch: torch.Tensor | None = None,
 ) -> tuple[torch.LongTensor, torch.BoolTensor]:
     """Sample destinations that are not active positives in the same bin.
 
@@ -82,7 +90,8 @@ def sample_filtered_negative_dsts(
     # sample every row on-device at once. The old implementation synchronized
     # the GPU once for every active source in every evaluation bin, which made
     # dense physical-force streams overwhelmingly CPU-bound.
-    active = torch.zeros((num_nodes, num_nodes), dtype=torch.bool, device=device)
+    total_nodes = num_nodes if batch is None else num_nodes * (int(batch.max().item()) + 1)
+    active = torch.zeros((total_nodes, total_nodes), dtype=torch.bool, device=device)
     active[src, dst] = True
     source_has_candidate = (~active).any(dim=1)
     valid = source_has_candidate[src]
@@ -91,10 +100,15 @@ def sample_filtered_negative_dsts(
     # topologies have only a few active destinations per source, so nearly all
     # rows succeed on the first draw; the loop is typically entered zero or one
     # times rather than once per source.
-    neg = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long)
+    base = (
+        torch.zeros((M, 1), device=device, dtype=torch.long)
+        if batch is None
+        else batch.to(device=device, dtype=torch.long).view(-1, 1) * num_nodes
+    )
+    neg = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long) + base
     blocked = active[src.view(-1, 1), neg] & valid.view(-1, 1)
     while bool(blocked.any()):
-        redraw = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long)
+        redraw = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long) + base
         neg = torch.where(blocked, redraw, neg)
         blocked = active[src.view(-1, 1), neg] & valid.view(-1, 1)
     return cast(torch.LongTensor, neg), cast(torch.BoolTensor, valid)
@@ -105,7 +119,9 @@ def sample_balanced_inactive_pairs(
     observed_events: EventBatch,
     num_samples: int,
     device: torch.device,
-) -> tuple[torch.LongTensor, torch.LongTensor]:
+    *,
+    return_batch: bool = False,
+) -> tuple[torch.LongTensor, torch.LongTensor] | tuple[torch.LongTensor, torch.LongTensor, torch.LongTensor | None]:
     """Uniformly sample currently unobserved directed pairs.
 
     This is used *only* for the balanced event-detection diagnostic.  Every
@@ -120,19 +136,40 @@ def sample_balanced_inactive_pairs(
     """
     if num_nodes <= 0 or num_samples <= 0:
         empty = torch.empty((0,), dtype=torch.long, device=device)
-        return empty, empty
-    all_pair_ids = torch.arange(num_nodes * num_nodes, device=device, dtype=torch.long)
+        return (empty, empty, None) if return_batch else (empty, empty)
+    batch = observed_events.batch
+    if batch is None:
+        all_pair_ids = torch.arange(num_nodes * num_nodes, device=device, dtype=torch.long)
+        if observed_events.num_events:
+            observed_ids = torch.unique(observed_events.src * num_nodes + observed_events.dst)
+            available = all_pair_ids[~torch.isin(all_pair_ids, observed_ids)]
+        else:
+            available = all_pair_ids
+        if available.numel() == 0:
+            empty = torch.empty((0,), dtype=torch.long, device=device)
+            return (empty, empty, None) if return_batch else (empty, empty)
+        count = min(int(num_samples), int(available.numel()))
+        chosen = available[torch.randperm(available.numel(), device=device)[:count]]
+        result = (cast(torch.LongTensor, chosen // num_nodes), cast(torch.LongTensor, chosen % num_nodes), None)
+        return result if return_batch else result[:2]
+
+    # Packed streams have disjoint node ID ranges. Draw one negative within
+    # the same physical system as each positive, never across episodes.
+    target_batch = batch[:num_samples].to(device=device, dtype=torch.long)
+    total_nodes = num_nodes * (int(batch.max().item()) + 1)
+    active = torch.zeros((total_nodes, total_nodes), dtype=torch.bool, device=device)
     if observed_events.num_events:
-        observed_ids = torch.unique(observed_events.src * num_nodes + observed_events.dst)
-        available = all_pair_ids[~torch.isin(all_pair_ids, observed_ids)]
-    else:
-        available = all_pair_ids
-    if available.numel() == 0:
-        empty = torch.empty((0,), dtype=torch.long, device=device)
-        return empty, empty
-    count = min(int(num_samples), int(available.numel()))
-    chosen = available[torch.randperm(available.numel(), device=device)[:count]]
-    return cast(torch.LongTensor, chosen // num_nodes), cast(torch.LongTensor, chosen % num_nodes)
+        active[observed_events.src, observed_events.dst] = True
+    base = target_batch * num_nodes
+    neg_src = torch.randint(num_nodes, (num_samples,), device=device, dtype=torch.long) + base
+    neg_dst = torch.randint(num_nodes, (num_samples,), device=device, dtype=torch.long) + base
+    blocked = active[neg_src, neg_dst]
+    while bool(blocked.any()):
+        neg_src = torch.where(blocked, torch.randint(num_nodes, (num_samples,), device=device) + base, neg_src)
+        neg_dst = torch.where(blocked, torch.randint(num_nodes, (num_samples,), device=device) + base, neg_dst)
+        blocked = active[neg_src, neg_dst]
+    result = (cast(torch.LongTensor, neg_src), cast(torch.LongTensor, neg_dst), cast(torch.LongTensor, target_batch))
+    return result if return_batch else result[:2]
 
 
 @torch.no_grad()
@@ -168,11 +205,12 @@ def balanced_event_detection_query(
     positives = internal_events(events)
     if positives.num_events == 0:
         return None
-    neg_src, neg_dst = sample_balanced_inactive_pairs(
+    neg_src, neg_dst, neg_batch = sample_balanced_inactive_pairs(
         num_nodes=num_nodes,
         observed_events=events,
         num_samples=positives.num_events,
         device=events.src.device,
+        return_batch=True,
     )
     if neg_src.numel() == 0:
         return None
@@ -183,6 +221,7 @@ def balanced_event_detection_query(
         src=torch.cat([positives.src, neg_src]),
         dst=torch.cat([positives.dst, neg_dst]),
         t=None if positives.t is None else torch.cat([positives.t, neg_t]),
+        batch=None if positives.batch is None else torch.cat([positives.batch, neg_batch]),
     )
     labels = torch.cat([
         torch.ones((positives.num_events,), device=events.src.device),
@@ -200,6 +239,7 @@ def _select_event_rows(events: EventBatch, keep: torch.Tensor) -> EventBatch:
         t=None if events.t is None else events.t[keep],
         episode=None if events.episode is None else events.episode[keep],
         is_external=None if events.is_external is None else events.is_external[keep],
+        batch=None if events.batch is None else events.batch[keep],
     )
 
 
@@ -210,6 +250,7 @@ def build_candidate_eventbatch(
     t: torch.LongTensor | None = None,
     features: torch.Tensor | None = None,
     is_external: torch.BoolTensor | None = None,
+    batch: torch.LongTensor | None = None,
 ) -> EventBatch:
     """
     Flattens (M, K+1) candidate dsts into an EventBatch of size M*(K+1).
@@ -235,7 +276,8 @@ def build_candidate_eventbatch(
     else:
         external_rep = None
 
-    return EventBatch(src=src_rep, dst=dst_flat, t=t_rep, features=feat_rep, is_external=external_rep)
+    batch_rep = None if batch is None else cast(torch.LongTensor, batch.view(M, 1).expand(M, K1).reshape(-1))
+    return EventBatch(src=src_rep, dst=dst_flat, t=t_rep, features=feat_rep, is_external=external_rep, batch=batch_rep)
 
 
 def bce_ranking_loss(
@@ -405,6 +447,7 @@ def internal_events(events: EventBatch) -> EventBatch:
         t=None if events.t is None else events.t[keep],
         episode=None if events.episode is None else events.episode[keep],
         is_external=events.is_external[keep],
+        batch=None if events.batch is None else events.batch[keep],
     )
 
 
@@ -429,9 +472,18 @@ def ranking_loss_and_metrics(
         # Keep the tensor connected to the current graph without inventing a
         # target for a bin containing only observed interventions.
         return state.node.sum() * 0.0, {}
+    if next_events.t is not None and next_events.t.numel() != M:
+        raise RuntimeError(
+            f"Malformed event batch after internal-event filtering: M={M}, t={next_events.t.numel()}, "
+            f"features={None if next_events.features is None else next_events.features.size(0)}, "
+            f"external={None if next_events.is_external is None else next_events.is_external.numel()}, "
+            f"batch={None if next_events.batch is None else next_events.batch.numel()}"
+        )
     K1 = num_neg + 1
 
-    neg_dst = sample_negative_dsts(num_nodes, next_events.dst, num_neg, device=device)
+    neg_dst = sample_negative_dsts(
+        num_nodes, next_events.dst, num_neg, device=device, batch=next_events.batch
+    )
     candidates_dst = cast(torch.LongTensor, torch.cat([next_events.dst.view(M, 1), neg_dst], dim=1))  # (M, K1)
 
     cand_batch = build_candidate_eventbatch(
@@ -440,6 +492,7 @@ def ranking_loss_and_metrics(
         t=next_events.t,
         features=next_events.features,
         is_external=next_events.is_external,
+        batch=next_events.batch,
     )
 
     assert cand_batch.src.numel() == M * K1
@@ -504,6 +557,7 @@ def ranking_loss_and_metrics(
             dst=next_events.dst,
             num_neg=num_neg,
             device=device,
+            batch=next_events.batch,
         )
         if bool(valid_rows.any()):
             filtered_events = _select_event_rows(next_events, valid_rows)
@@ -516,6 +570,7 @@ def ranking_loss_and_metrics(
                 t=filtered_events.t,
                 features=filtered_events.features,
                 is_external=filtered_events.is_external,
+                batch=filtered_events.batch,
             )
             filtered_scores = model.score(state_eval.clone(detach=True), filtered_batch)
             filtered = ranking_metrics(

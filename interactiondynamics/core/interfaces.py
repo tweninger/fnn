@@ -265,8 +265,13 @@ class ComposedInteractionModel(InteractionModel):
 
     def step(self, state, events, drive=None):
         event_emb = self.encoder(state, events)
+        effective_num_nodes = (
+            self.num_nodes
+            if state is None or state.node is None
+            else int(state.node.size(0))
+        )
         messages = self.aggregator(
-            state, event_emb, events, self.num_nodes
+            state, event_emb, events, effective_num_nodes
         )
         agg_aux = None
         if state is not None and state.aux is not None:

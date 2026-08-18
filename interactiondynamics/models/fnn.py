@@ -134,9 +134,10 @@ class FieldNeuralNetwork(InteractionModel):
     def init_state(self, batch_size: int, num_nodes: int, device: torch.device) -> ModelState:
         if int(num_nodes) != self.num_nodes:
             raise ValueError(f"Model was built for {self.num_nodes} nodes, got {num_nodes}.")
-        h = torch.zeros((self.num_nodes, self.state_dim), device=device)
+        batch_size = int(batch_size)
+        h = torch.zeros((batch_size * self.num_nodes, self.state_dim), device=device)
         v = torch.zeros_like(h)
-        return ModelState(node=h, node_prev=v, aux={})
+        return ModelState(node=h, node_prev=v, aux={"batch_size": batch_size})
 
     def step(
         self,
@@ -159,7 +160,11 @@ class FieldNeuralNetwork(InteractionModel):
             if events.is_external is not None
             else events.src == events.dst
         )
-        weighted_force = gate[events.src, events.dst].unsqueeze(-1) * force
+        # Packed episode batches use disjoint node-index blocks. The learned
+        # physical operator is shared, so map those IDs back to local nodes.
+        src_local = events.src.remainder(self.num_nodes)
+        dst_local = events.dst.remainder(self.num_nodes)
+        weighted_force = gate[src_local, dst_local].unsqueeze(-1) * force
         # An external event is an observed raindrop impulse. It bypasses the
         # learned inter-node operator; no hidden drive signal is available.
         weighted_force = torch.where(is_drop.unsqueeze(-1), force, weighted_force)
@@ -174,7 +179,11 @@ class FieldNeuralNetwork(InteractionModel):
                 incoming - params["omega"].square() * h
             )
             h_next = h + self.dt * v_next
-        next_state = ModelState(node=h_next, node_prev=v_next, aux={})
+        next_state = ModelState(
+            node=h_next,
+            node_prev=v_next,
+            aux={"batch_size": int((state.aux or {}).get("batch_size", 1))},
+        )
         aux: Dict[str, Any] = {
             "gamma": params["gamma"],
             "omega": params["omega"],
@@ -200,7 +209,10 @@ class FieldNeuralNetwork(InteractionModel):
             raise ValueError("FieldNeuralNetwork requires a state for next-event scoring.")
         # Event force values are intentionally ignored for destination ranking:
         # they are targets to predict, never clues that identify a candidate.
-        return self.topology_logits[candidate_events.src, candidate_events.dst]
+        return self.topology_logits[
+            candidate_events.src.remainder(self.num_nodes),
+            candidate_events.dst.remainder(self.num_nodes),
+        ]
 
     def predict_event_features(self, state: ModelState | None, events: EventBatch) -> torch.Tensor:
         if state is None:
