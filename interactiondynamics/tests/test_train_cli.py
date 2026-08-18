@@ -77,6 +77,11 @@ def test_parse_args_supports_physical_simulator_parameters() -> None:
     assert args.synthetic_force_scale == pytest.approx(0.7)
 
 
+def test_parse_args_supports_debug_timing() -> None:
+    args = parse_args(["quick", "--dataset", "synthetic", "--synthetic-task", "wave", "--debug-timing"])
+    assert args.debug_timing
+
+
 @pytest.mark.parametrize(
     "flag",
     (

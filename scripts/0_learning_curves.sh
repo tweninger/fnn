@@ -11,7 +11,7 @@ PYTHON="${PYTHON:-venv/bin/python}"
 # Use both physical GPUs by default. Override, for example, with GPU_IDS="2 3".
 GPU_IDS="${GPU_IDS:-0 1}"
 # Two experiments per GPU was the observed saturation point on wl-gpu1.
-MAX_PARALLEL="${MAX_PARALLEL:-4}"
+MAX_PARALLEL="${MAX_PARALLEL:-2}"
 
 RESULTS_DIR="${RESULTS_DIR:-derived/results/learning_curves}"
 LOG_DIR="${LOG_DIR:-derived/logs/learning_curves}"
@@ -105,6 +105,7 @@ run_one() {
     --num-bins "$NUM_BINS" \
     --rollout-train-steps "$ROLLOUT_TRAIN_STEPS" \
     --rollout-horizon "$ROLLOUT_HORIZON" \
+    --debug-timing \
     --save-jsonl "$result" \
     2>&1 | tee "$log"
 }

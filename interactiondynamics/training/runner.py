@@ -1110,37 +1110,64 @@ def run_one_experiment(
     setattr(train_cfg, "synthetic_field_dynamics", field_dynamics)
     setattr(train_cfg, "synthetic_field_topology", field_topology)
     for epoch in range(1, epochs + 1):
-        train_stats_step = train_one_epoch(
-            model,
-            ds.bins("train"),
-            train_node_targets,
-            train_edge_targets,
-            optimizer,
-            train_cfg,
+        timing_sec: dict[str, float] = {}
+        timing_enabled = bool(getattr(train_cfg, "debug_timing", False))
+
+        def timed(label: str, fn):
+            if timing_enabled and device.type == "cuda":
+                torch.cuda.synchronize(device)
+            started = time.perf_counter()
+            value = fn()
+            if timing_enabled and device.type == "cuda":
+                torch.cuda.synchronize(device)
+            if timing_enabled:
+                timing_sec[label] = time.perf_counter() - started
+            return value
+
+        epoch_started = time.perf_counter()
+        train_stats_step = timed(
+            "train",
+            lambda: train_one_epoch(
+                model,
+                ds.bins("train"),
+                train_node_targets,
+                train_edge_targets,
+                optimizer,
+                train_cfg,
+            ),
         )
-        train_eval = evaluate_stream_sliced(
-            model,
-            ds.bins("train"),
-            train_node_targets,
-            train_edge_targets,
-            train_cfg,
-            slices=eval_slices,
+        train_eval = timed(
+            "train_eval",
+            lambda: evaluate_stream_sliced(
+                model,
+                ds.bins("train"),
+                train_node_targets,
+                train_edge_targets,
+                train_cfg,
+                slices=eval_slices,
+            ),
         )
-        val_stats = evaluate_stream_sliced(
-            model,
-            ds.bins("val"),
-            val_node_targets,
-            val_edge_targets,
-            train_cfg,
-            slices=eval_slices,
+        val_stats = timed(
+            "val_eval",
+            lambda: evaluate_stream_sliced(
+                model,
+                ds.bins("val"),
+                val_node_targets,
+                val_edge_targets,
+                train_cfg,
+                slices=eval_slices,
+            ),
         )
-        test_stats = evaluate_stream_sliced(
-            model,
-            ds.bins("test"),
-            test_node_targets,
-            test_edge_targets,
-            train_cfg,
-            slices=eval_slices,
+        test_stats = timed(
+            "test_eval",
+            lambda: evaluate_stream_sliced(
+                model,
+                ds.bins("test"),
+                test_node_targets,
+                test_edge_targets,
+                train_cfg,
+                slices=eval_slices,
+            ),
         )
         recovery_stats: dict[str, float] = {}
         hidden_truth_fn = getattr(ds, "hidden_truth", None)
@@ -1256,12 +1283,23 @@ def run_one_experiment(
             # Event-only physical tasks have no revealed scalar field target.
             # Their rollout is closed-loop in predicted forces while retaining
             # the future pair-query schedule as an explicit oracle condition.
-            rollout_val_stats = evaluate_physical_force_rollout(
-                model, ds.bins("val"), train_cfg, horizon=rollout_horizon
+            rollout_val_stats = timed(
+                "rollout_val",
+                lambda: evaluate_physical_force_rollout(
+                    model, ds.bins("val"), train_cfg, horizon=rollout_horizon
+                ),
             )
-            rollout_test_stats = evaluate_physical_force_rollout(
-                model, ds.bins("test"), train_cfg, horizon=rollout_horizon
+            rollout_test_stats = timed(
+                "rollout_test",
+                lambda: evaluate_physical_force_rollout(
+                    model, ds.bins("test"), train_cfg, horizon=rollout_horizon
+                ),
             )
+
+        if timing_enabled:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            timing_sec["total"] = time.perf_counter() - epoch_started
 
         snapshot = {
             "epoch": epoch,
@@ -1279,6 +1317,7 @@ def run_one_experiment(
             "rollout_self_free_val": rollout_self_free_val_stats,
             "rollout_self_free_test": rollout_self_free_test_stats,
             "readout": _linear_hvf_readout_snapshot(model),
+            "timing_sec": timing_sec,
         }
 
         km = train_stats_step.get("kappa_mean", None)
@@ -1328,6 +1367,9 @@ def run_one_experiment(
         print(f"  ep {epoch:03d}")
         print(losses_str)
         print(f"           metrics{metric_str}")
+        if timing_sec:
+            timing_parts = [f"{key}={value:.2f}s" for key, value in timing_sec.items()]
+            print(f"           timing  | {' | '.join(timing_parts)}")
         if "diffusion_term_norm_mean" in train_stats_step:
             print(
                 "           ift"

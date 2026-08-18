@@ -146,6 +146,11 @@ def _build_common_parser() -> argparse.ArgumentParser:
         ),
     )
     train_group.add_argument(
+        "--debug-timing",
+        action="store_true",
+        help="Print and save per-epoch training/evaluation wall-clock timing.",
+    )
+    train_group.add_argument(
         "--use-node-scorer",
         action="store_true",
         help="Enable auxiliary node prediction on whether a node appears in the next bin.",
@@ -996,6 +1001,7 @@ def main() -> None:
     base_train_cfg.edge_target_scale = str(args.edge_target_scale)
     base_train_cfg.prediction_mode = _resolve_prediction_mode(str(args.prediction_mode))
     base_train_cfg.rollout_horizon = int(args.rollout_horizon)
+    base_train_cfg.debug_timing = bool(args.debug_timing)
     if args.synthetic_raindrop_interval is not None:
         supported_field_tasks = {"diffusion", "wave", "coupled_oscillator"}
         if args.dataset != "synthetic" or args.synthetic_task not in supported_field_tasks:

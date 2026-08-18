@@ -76,6 +76,8 @@ class TrainConfig:
     # Number of differentiable, autoregressive prediction steps per optimizer
     # update. One preserves the original one-step teacher-forced trainer.
     rollout_train_steps: int = 1
+    # Opt-in wall-clock breakdown for training and evaluation stages.
+    debug_timing: bool = False
 
 
 @dataclass(frozen=True)
