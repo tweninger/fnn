@@ -73,6 +73,15 @@ run_one() {
   fi
 
   echo "=== ${dynamic} / ${topology} / K_train=${train_steps} / seed=${seed} / gpu=${gpu_id} ==="
+  local physics_args=(
+    --synthetic-dt "$SYNTHETIC_DT"
+    --synthetic-gamma "$SYNTHETIC_GAMMA"
+    --synthetic-force-scale "$SYNTHETIC_FORCE_SCALE"
+  )
+  # Diffusion is first order, so its generator has no omega parameter.
+  if [[ "$dynamic" != "diffusion" ]]; then
+    physics_args+=(--synthetic-omega "$SYNTHETIC_OMEGA")
+  fi
   OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON" -u -m interactiondynamics.train quick \
     --dataset synthetic \
     --synthetic-task "$dynamic" \
@@ -82,10 +91,7 @@ run_one() {
     --synthetic-events-per-bin "$EVENTS_PER_BIN" \
     --synthetic-raindrop-interval "$RAINDROP_INTERVAL" \
     --synthetic-event-threshold "$EVENT_THRESHOLD" \
-    --synthetic-dt "$SYNTHETIC_DT" \
-    --synthetic-gamma "$SYNTHETIC_GAMMA" \
-    --synthetic-omega "$SYNTHETIC_OMEGA" \
-    --synthetic-force-scale "$SYNTHETIC_FORCE_SCALE" \
+    "${physics_args[@]}" \
     --seed "$seed" \
     --epochs "$EPOCHS" \
     --max-runs "$MODELS" \
