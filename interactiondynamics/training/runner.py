@@ -83,6 +83,14 @@ def _linear_hvf_readout_snapshot(model) -> dict[str, float]:
     return out
 
 
+def _parameter_recovery_snapshot(model, hidden_truth: Optional[dict[str, Any]], device: torch.device) -> dict[str, float]:
+    """Return cheap synthetic-parameter recovery metrics without stream evaluation."""
+    recovery_fn = getattr(model, "recovery_metrics", None)
+    if hidden_truth is None or not callable(recovery_fn):
+        return {}
+    return recovery_fn(hidden_truth["adjacency"].to(device), hidden_truth["params"])
+
+
 def short_run_label(run: SweepRun) -> str:
     if "agg=" not in run.name or "update=" not in run.name:
         return run.name
@@ -1078,6 +1086,8 @@ def run_one_experiment(
     field_topology = str(generator_params.get("topology", "ring"))
     setattr(train_cfg, "synthetic_field_dynamics", field_dynamics)
     setattr(train_cfg, "synthetic_field_topology", field_topology)
+    hidden_truth_fn = getattr(ds, "hidden_truth", None)
+    hidden_truth = hidden_truth_fn() if callable(hidden_truth_fn) else None
     baseline_printed = False
     for epoch in range(1, epochs + 1):
         timing_sec: dict[str, float] = {}
@@ -1106,6 +1116,7 @@ def run_one_experiment(
                 train_cfg,
             ),
         )
+        parameter_trace = _parameter_recovery_snapshot(model, hidden_truth, device)
         eval_every = train_cfg.eval_every
         eval_due = epoch == epochs or (
             eval_every is not None and epoch % eval_every == 0
@@ -1129,6 +1140,7 @@ def run_one_experiment(
                     },
                     "epoch": epoch,
                     "train_step": train_stats_step,
+                    "parameter_trace": parameter_trace,
                 }
                 with open(save_jsonl_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(row) + "\n")
@@ -1220,18 +1232,10 @@ def run_one_experiment(
                 slices=eval_slices,
             ),
         )
-        recovery_stats: dict[str, float] = {}
-        hidden_truth_fn = getattr(ds, "hidden_truth", None)
-        recovery_fn = getattr(model, "recovery_metrics", None)
-        if callable(hidden_truth_fn) and callable(recovery_fn):
-            hidden_truth = hidden_truth_fn()
-            if hidden_truth is not None:
-                recovery_stats = recovery_fn(
-                    hidden_truth["adjacency"].to(device), hidden_truth["params"]
-                )
-                # Keep evaluation-only recovery quantities alongside test
-                # metrics so normal JSONL summaries can select them.
-                test_stats.update(recovery_stats)
+        # Keep recovery quantities alongside test metrics so normal JSONL
+        # summaries can select them. The same values are traced every epoch.
+        recovery_stats = dict(parameter_trace)
+        test_stats.update(recovery_stats)
         rollout_val_stats: dict[str, float] = {}
         rollout_test_stats: dict[str, float] = {}
         rollout_intervention_val_stats: dict[str, float] = {}
@@ -1369,6 +1373,7 @@ def run_one_experiment(
             "rollout_self_free_test": rollout_self_free_test_stats,
             "readout": _linear_hvf_readout_snapshot(model),
             "timing_sec": timing_sec,
+            "parameter_trace": parameter_trace,
         }
 
         km = train_stats_step.get("kappa_mean", None)

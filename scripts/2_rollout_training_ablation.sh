@@ -11,9 +11,9 @@ MAX_PARALLEL="${MAX_PARALLEL:-2}"
 RESULTS_DIR="${RESULTS_DIR:-derived/results/rollout_training_ablation}"
 LOG_DIR="${LOG_DIR:-derived/logs/rollout_training_ablation}"
 
-DYNAMICS=(diffusion wave coupled_oscillator)
+DYNAMICS=(diffusion wave)
 TOPOLOGIES=(ring grid torus doorway swisscheese)
-TRAIN_ROLLOUT_STEPS=(1 2 5 10 20)
+TRAIN_ROLLOUT_STEPS=(1)
 SEEDS=(0 1 2 3 4)
 MODELS=7
 EPOCHS="${EPOCHS:-20}"
