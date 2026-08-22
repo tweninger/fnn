@@ -40,6 +40,9 @@ class FieldNeuralNetwork(InteractionModel):
         order: int = 2,
         force_decoder: str = "mlp",
         learn_physical_params: bool = False,
+        learn_gamma: bool = False,
+        learn_omega: bool = False,
+        learn_force_scale: bool = False,
         force_scale_init: float = 1.0,
     ) -> None:
         super().__init__()
@@ -56,6 +59,9 @@ class FieldNeuralNetwork(InteractionModel):
             raise ValueError(f"FieldNeuralNetwork order must be 1 or 2, got {order}.")
         self.order = int(order)
         self.learn_physical_params = bool(learn_physical_params)
+        self.learn_gamma = bool(learn_physical_params or learn_gamma)
+        self.learn_omega = bool(learn_physical_params or learn_omega)
+        self.learn_force_scale = bool(learn_physical_params or learn_force_scale)
         if force_decoder not in {"mlp", "linear", "field_difference"}:
             raise ValueError(
                 "force_decoder must be one of {'mlp', 'linear', 'field_difference'}, "
@@ -72,13 +78,15 @@ class FieldNeuralNetwork(InteractionModel):
 
         gamma_raw = torch.tensor(_inverse_softplus(gamma_init))
         omega_raw = torch.tensor(_inverse_softplus(omega_init))
-        if self.learn_physical_params:
+        if self.learn_gamma:
             self.gamma_raw = nn.Parameter(gamma_raw)
+        else:
+            self.register_buffer("gamma_raw", gamma_raw)
+        if self.learn_omega:
             self.omega_raw = nn.Parameter(omega_raw)
         else:
             # Buffers follow device placement and checkpoints but receive no
             # optimizer updates.  This is the default predictive setting.
-            self.register_buffer("gamma_raw", gamma_raw)
             self.register_buffer("omega_raw", omega_raw)
         if force_decoder == "mlp":
             self.force_decoder: nn.Module | None = nn.Sequential(
@@ -94,7 +102,7 @@ class FieldNeuralNetwork(InteractionModel):
             # Shared positive readout scale.  This is deliberately the only
             # flexibility beyond the latent field difference itself.
             force_scale_raw = torch.tensor(_inverse_softplus(force_scale_init))
-            if self.learn_physical_params:
+            if self.learn_force_scale:
                 self.force_scale_raw = nn.Parameter(force_scale_raw)
             else:
                 self.register_buffer("force_scale_raw", force_scale_raw)
@@ -124,6 +132,15 @@ class FieldNeuralNetwork(InteractionModel):
         logits = 0.5 * (self.topology_logits + self.topology_logits.T)
         gate = torch.sigmoid(logits)
         return gate * (1.0 - torch.eye(self.num_nodes, device=gate.device, dtype=gate.dtype))
+
+    @torch.no_grad()
+    def set_oracle_topology(self, adjacency: torch.Tensor) -> None:
+        """Fix the pair operator to a supplied binary recovery oracle."""
+        if adjacency.shape != (self.num_nodes, self.num_nodes):
+            raise ValueError(f"Expected adjacency {(self.num_nodes, self.num_nodes)}, got {tuple(adjacency.shape)}.")
+        self.topology_logits.fill_(-30.0)
+        self.topology_logits[adjacency.to(device=self.topology_logits.device, dtype=torch.bool)] = 30.0
+        self.topology_logits.requires_grad_(False)
 
     def physical_parameters(self) -> dict[str, torch.Tensor]:
         params = {"gamma": F.softplus(self.gamma_raw), "omega": F.softplus(self.omega_raw)}

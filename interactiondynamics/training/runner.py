@@ -121,6 +121,13 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
     cfg.fnn_learn_physical_params = bool(
         getattr(args, "fnn_learn_physical_params", False)
     ) or bool(cfg.fnn_learn_physical_params)
+    for arg_name, config_name in (
+        ("fnn_learn_gamma", "fnn_learn_gamma"),
+        ("fnn_learn_omega", "fnn_learn_omega"),
+        ("fnn_learn_force_scale", "fnn_learn_force_scale"),
+        ("fnn_oracle_topology", "fnn_oracle_topology"),
+    ):
+        setattr(cfg, config_name, bool(getattr(args, arg_name, False)) or bool(getattr(cfg, config_name)))
     # Deliberately expose only the compact physical-event experiment surface;
     # the legacy IFT knobs remain preset-owned.
     for arg_name, config_name in (
@@ -954,6 +961,12 @@ def run_one_experiment(
         train_cfg.prediction_mode = run.prediction_mode
 
     model = build_model_fn(spec, run.model_cfg).to(device)
+    if bool(getattr(run.model_cfg, "fnn_oracle_topology", False)):
+        hidden_truth = ds.hidden_truth() if hasattr(ds, "hidden_truth") else None
+        set_oracle_topology = getattr(model, "set_oracle_topology", None)
+        if hidden_truth is None or not callable(set_oracle_topology):
+            raise ValueError("--fnn-oracle-topology requires an FNN on a physical synthetic dataset.")
+        set_oracle_topology(hidden_truth["adjacency"].to(device))
     # Calibrate force supervision exactly once from *training* target forces.
     # External impulses start episodes and are not next internal interactions,
     # so exclude them from the target distribution.  The calibration is used
@@ -1003,9 +1016,27 @@ def run_one_experiment(
                 f" | magnitude q90={magnitude_q90:.4g}"
                 f" | large-force weight={getattr(model, 'event_feature_magnitude_weight', 2.0):.3g}"
             )
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
-    )
+    # Physical FNN coefficients are positive transforms of unconstrained
+    # ``*_raw`` parameters.  L2/Adam weight decay would pull those raw values
+    # toward zero, changing the corresponding physical coefficient even at an
+    # exact zero-loss solution.  Keep ordinary model weights regularized but
+    # exempt the recovery scalars from decay.
+    physical_raw_names = {"gamma_raw", "omega_raw", "force_scale_raw"}
+    physical_params = []
+    other_params = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.rsplit(".", 1)[-1] in physical_raw_names:
+            physical_params.append(parameter)
+        else:
+            other_params.append(parameter)
+    optimizer_groups = []
+    if other_params:
+        optimizer_groups.append({"params": other_params, "weight_decay": train_cfg.weight_decay})
+    if physical_params:
+        optimizer_groups.append({"params": physical_params, "weight_decay": 0.0})
+    optimizer = torch.optim.Adam(optimizer_groups, lr=train_cfg.lr)
 
     if eval_slices is None:
         eval_slices = EvalSlices(early_steps=10)

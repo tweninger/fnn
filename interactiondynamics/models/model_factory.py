@@ -37,6 +37,9 @@ def build_model(spec: DataSpec, cfg: ModelConfig):
             order=cfg.fnn_order,
             force_decoder=cfg.fnn_force_decoder,
             learn_physical_params=cfg.fnn_learn_physical_params,
+            learn_gamma=cfg.fnn_learn_gamma,
+            learn_omega=cfg.fnn_learn_omega,
+            learn_force_scale=cfg.fnn_learn_force_scale,
             force_scale_init=cfg.fnn_force_scale_init,
         )
         model.event_feature_loss_weight = float(cfg.event_feature_loss_weight)

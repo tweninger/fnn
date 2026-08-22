@@ -150,6 +150,15 @@ class ModelConfig:
     # studies parameter recovery.  The topology and force readout remain
     # trainable in either mode.
     fnn_learn_physical_params: bool = False
+    # Selective recovery flags are mutually exclusive with the all-parameter
+    # mode at the CLI.  They make single-coefficient identifiability tests
+    # possible without changing the predictive-model default.
+    fnn_learn_gamma: bool = False
+    fnn_learn_omega: bool = False
+    fnn_learn_force_scale: bool = False
+    # Explicit recovery-only oracle: fix the persistent operator to synthetic
+    # hidden truth.  It is never enabled by ordinary benchmark presets.
+    fnn_oracle_topology: bool = False
     # ``field_difference`` is the mechanism-constrained readout
     # f(i -> j) = c * (h_i - h_j); ``linear`` is a small generic ablation.
     fnn_force_decoder: str = "mlp"

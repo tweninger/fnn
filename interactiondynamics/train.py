@@ -185,7 +185,8 @@ def _build_common_parser() -> argparse.ArgumentParser:
             "or constrained shared field difference."
         ),
     )
-    train_group.add_argument(
+    fnn_recovery_group = train_group.add_mutually_exclusive_group()
+    fnn_recovery_group.add_argument(
         "--fnn-learn-physical-params",
         action="store_true",
         help=(
@@ -193,6 +194,21 @@ def _build_common_parser() -> argparse.ArgumentParser:
             "the field-difference force scale when applicable. "
             "By default these remain fixed at their model-preset values."
         ),
+    )
+    fnn_recovery_group.add_argument(
+        "--fnn-learn-gamma",
+        action="store_true",
+        help="Recovery experiment: optimize only FNN damping gamma.",
+    )
+    fnn_recovery_group.add_argument(
+        "--fnn-learn-omega",
+        action="store_true",
+        help="Recovery experiment: optimize only FNN restoring frequency omega.",
+    )
+    fnn_recovery_group.add_argument(
+        "--fnn-learn-force-scale",
+        action="store_true",
+        help="Recovery experiment: optimize only the field-difference force scale.",
     )
     physical_model_group = common.add_argument_group("physical event models")
     physical_model_group.add_argument(
@@ -208,6 +224,11 @@ def _build_common_parser() -> argparse.ArgumentParser:
     physical_model_group.add_argument("--fnn-omega-init", type=float, default=None, help="Initial FNN restoring frequency.")
     physical_model_group.add_argument("--fnn-force-scale-init", type=float, default=None, help="Initial FNN force scale.")
     physical_model_group.add_argument("--fnn-topology-init", type=float, default=None, help="Initial FNN pair-operator logit.")
+    physical_model_group.add_argument(
+        "--fnn-oracle-topology",
+        action="store_true",
+        help="Recovery experiment only: fix FNN topology to hidden synthetic truth.",
+    )
     physical_model_group.add_argument("--lnn-dt", type=float, default=None, help="LNN integration step.")
     physical_model_group.add_argument("--lnn-hidden", type=int, default=None, help="LNN potential-network width.")
     physical_model_group.add_argument("--lnn-layers", type=int, default=None, help="LNN potential-network depth.")
@@ -1058,9 +1079,16 @@ def main() -> None:
     physical_synthetic_task = args.dataset == "synthetic" and args.synthetic_task in {
         "diffusion", "wave", "coupled_oscillator"
     }
-    if (args.fnn_force_decoder is not None or args.fnn_learn_physical_params) and not physical_synthetic_task:
+    if (
+        args.fnn_force_decoder is not None
+        or args.fnn_learn_physical_params
+        or args.fnn_learn_gamma
+        or args.fnn_learn_omega
+        or args.fnn_learn_force_scale
+        or args.fnn_oracle_topology
+    ) and not physical_synthetic_task:
         raise ValueError(
-            "--fnn-force-decoder and --fnn-learn-physical-params are supported only "
+            "FNN physical-recovery flags are supported only "
             "for event-only synthetic diffusion, wave, and coupled_oscillator tasks."
         )
     if physical_synthetic_task:
