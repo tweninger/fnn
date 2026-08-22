@@ -156,6 +156,8 @@ class ModelConfig:
     fnn_learn_gamma: bool = False
     fnn_learn_omega: bool = False
     fnn_learn_force_scale: bool = False
+    # Applied once per epoch by the selective scalar-recovery optimizer.
+    fnn_physical_recovery_lr: float = 0.1
     # Explicit recovery-only oracle: fix the persistent operator to synthetic
     # hidden truth.  It is never enabled by ordinary benchmark presets.
     fnn_oracle_topology: bool = False

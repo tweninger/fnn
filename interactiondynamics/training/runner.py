@@ -138,6 +138,7 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
         ("fnn_omega_init", "fnn_omega_init"),
         ("fnn_force_scale_init", "fnn_force_scale_init"),
         ("fnn_topology_init", "fnn_topology_init"),
+        ("fnn_physical_recovery_lr", "fnn_physical_recovery_lr"),
         ("lnn_dt", "lnn_dt"),
         ("lnn_hidden", "lnn_hidden"),
         ("lnn_layers", "lnn_layers"),
@@ -151,6 +152,45 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
         if value is not None:
             setattr(cfg, config_name, value)
     return cfg
+
+
+class _EpochAccumulatingPhysicalOptimizer:
+    """Adam for ordinary weights; one zero-momentum SGD scalar update/epoch.
+
+    Selective FNN recovery estimates only a few physical scalars.  Per-bin
+    Adam steps amplify harmless float32 replay residuals near an exact physical
+    solution.  Accumulating their true gradients and applying one SGD update
+    per epoch preserves a zero-gradient optimum.
+    """
+
+    def __init__(self, other_params, physical_params, *, lr: float, weight_decay: float) -> None:
+        self._other = (
+            torch.optim.Adam(other_params, lr=lr, weight_decay=weight_decay)
+            if other_params else None
+        )
+        self._physical = torch.optim.SGD(physical_params, lr=lr, momentum=0.0, weight_decay=0.0)
+        self._physical_params = list(physical_params)
+        self._gradient_sums = [torch.zeros_like(parameter) for parameter in self._physical_params]
+
+    def zero_grad(self, *, set_to_none: bool = True) -> None:
+        if self._other is not None:
+            self._other.zero_grad(set_to_none=set_to_none)
+
+    def step(self) -> None:
+        for parameter, gradient_sum in zip(self._physical_params, self._gradient_sums):
+            if parameter.grad is not None:
+                gradient_sum.add_(parameter.grad.detach())
+                parameter.grad = None
+        if self._other is not None:
+            self._other.step()
+
+    def finalize_epoch(self) -> None:
+        for parameter, gradient_sum in zip(self._physical_params, self._gradient_sums):
+            parameter.grad = gradient_sum.clone()
+        self._physical.step()
+        self._physical.zero_grad(set_to_none=True)
+        for gradient_sum in self._gradient_sums:
+            gradient_sum.zero_()
 
 
 def _stash_observed_history(
@@ -478,9 +518,25 @@ def train_one_epoch(
 ) -> dict[str, float]:
     if _supports_rollout_training(model, cfg, edge_targets):
         assert edge_targets is not None
-        return _train_one_epoch_rollout(model, bins, edge_targets, optimizer, cfg)
-    if _supports_physical_rollout_training(model, cfg, edge_targets):
-        return _train_one_epoch_physical_rollout(model, bins, optimizer, cfg)
+        result = _train_one_epoch_rollout(model, bins, edge_targets, optimizer, cfg)
+    elif _supports_physical_rollout_training(model, cfg, edge_targets):
+        result = _train_one_epoch_physical_rollout(model, bins, optimizer, cfg)
+    else:
+        result = _train_one_epoch_standard(model, bins, node_targets, edge_targets, optimizer, cfg)
+    finalize_epoch = getattr(optimizer, "finalize_epoch", None)
+    if callable(finalize_epoch):
+        finalize_epoch()
+    return result
+
+
+def _train_one_epoch_standard(
+    model,
+    bins: Iterable[EventBatch],
+    node_targets: Optional[Iterable[torch.Tensor]],
+    edge_targets: Optional[Iterable[EdgeTargetBatch]],
+    optimizer,
+    cfg: TrainConfig,
+) -> dict[str, float]:
     # Physical episodes are independent trajectories. Pack equal local-time
     # bins into a disjoint node space so the GPU sees useful tensor widths
     # instead of ten tiny sequential launches. Non-physical and legacy paths
@@ -1031,12 +1087,27 @@ def run_one_experiment(
             physical_params.append(parameter)
         else:
             other_params.append(parameter)
-    optimizer_groups = []
-    if other_params:
-        optimizer_groups.append({"params": other_params, "weight_decay": train_cfg.weight_decay})
-    if physical_params:
-        optimizer_groups.append({"params": physical_params, "weight_decay": 0.0})
-    optimizer = torch.optim.Adam(optimizer_groups, lr=train_cfg.lr)
+    selective_scalar_recovery = (
+        not bool(getattr(run.model_cfg, "fnn_learn_physical_params", False))
+        and any(
+            bool(getattr(run.model_cfg, field, False))
+            for field in ("fnn_learn_gamma", "fnn_learn_omega", "fnn_learn_force_scale")
+        )
+    )
+    if selective_scalar_recovery and physical_params:
+        optimizer = _EpochAccumulatingPhysicalOptimizer(
+            other_params,
+            physical_params,
+            lr=float(getattr(run.model_cfg, "fnn_physical_recovery_lr", 0.1)),
+            weight_decay=train_cfg.weight_decay,
+        )
+    else:
+        optimizer_groups = []
+        if other_params:
+            optimizer_groups.append({"params": other_params, "weight_decay": train_cfg.weight_decay})
+        if physical_params:
+            optimizer_groups.append({"params": physical_params, "weight_decay": 0.0})
+        optimizer = torch.optim.Adam(optimizer_groups, lr=train_cfg.lr)
 
     if eval_slices is None:
         eval_slices = EvalSlices(early_steps=10)

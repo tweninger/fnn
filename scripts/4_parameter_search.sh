@@ -10,16 +10,20 @@ set -euo pipefail
 PYTHON="${PYTHON:-venv/bin/python}"
 GPU_IDS="${GPU_IDS:-0 1}"
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
-RESULTS_DIR="${RESULTS_DIR:-derived/results/parameter_recovery_controlled_nodecay}"
-LOG_DIR="${LOG_DIR:-derived/logs/parameter_recovery_controlled_nodecay}"
+RESULTS_DIR="${RESULTS_DIR:-derived/results/parameter_recovery_controlled_sgd_scaled}"
+LOG_DIR="${LOG_DIR:-derived/logs/parameter_recovery_controlled_sgd_scaled}"
 read -r -a SEEDS <<< "${SEEDS:-0 1 2 3 4}"
 # Run all single-component checks by default.  Enable the final joint check
 # only after reviewing them: STAGES="gamma omega force_scale topology joint".
 read -r -a STAGES <<< "${STAGES:-gamma omega force_scale topology}"
-EPOCHS="${EPOCHS:-50}"
+EPOCHS="${EPOCHS:-100}"
 NUM_NODES="${NUM_NODES:-64}"
 NUM_EPISODES="${NUM_EPISODES:-10}"
 NUM_BINS="${NUM_BINS:-72}"
+# Scalar gradients are summed over one epoch rather than stepped per bin.
+# Match the former FNN Adam step scale: 0.003 (the physical-suite FNN LR)
+# times the number of prediction steps, normally NUM_BINS - 1.
+PHYSICAL_RECOVERY_LR="${PHYSICAL_RECOVERY_LR:-$(awk -v bins="$NUM_BINS" 'BEGIN { printf "%.8g", 0.003 * (bins - 1) }')}"
 EVENTS_PER_BIN="${EVENTS_PER_BIN:-257}"
 RAINDROP_INTERVAL="${RAINDROP_INTERVAL:-12}"
 ROLLOUT_HORIZON=20
@@ -76,6 +80,7 @@ run_one() {
     --synthetic-event-threshold 0 "${physics_args[@]}" --seed "$seed" --epochs "$EPOCHS" \
     --max-runs 1 --num-bins "$NUM_BINS" --rollout-train-steps 1 --rollout-horizon "$ROLLOUT_HORIZON" \
     --fnn-force-decoder field_difference "${recovery_args[@]}" \
+    --fnn-physical-recovery-lr "$PHYSICAL_RECOVERY_LR" \
     --fnn-gamma-init "$init_gamma" --fnn-omega-init "$init_omega" --fnn-force-scale-init "$init_force" --fnn-topology-init "$init_topology" \
     --save-jsonl "$result" 2>&1 | tee "$log"
 }

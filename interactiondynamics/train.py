@@ -225,6 +225,12 @@ def _build_common_parser() -> argparse.ArgumentParser:
     physical_model_group.add_argument("--fnn-force-scale-init", type=float, default=None, help="Initial FNN force scale.")
     physical_model_group.add_argument("--fnn-topology-init", type=float, default=None, help="Initial FNN pair-operator logit.")
     physical_model_group.add_argument(
+        "--fnn-physical-recovery-lr",
+        type=float,
+        default=None,
+        help="Per-epoch SGD learning rate for selective FNN scalar-recovery runs.",
+    )
+    physical_model_group.add_argument(
         "--fnn-oracle-topology",
         action="store_true",
         help="Recovery experiment only: fix FNN topology to hidden synthetic truth.",
@@ -1068,6 +1074,8 @@ def main() -> None:
         raise ValueError("--synthetic-omega must be nonnegative.")
     if args.synthetic_force_scale is not None and args.synthetic_force_scale < 0.0:
         raise ValueError("--synthetic-force-scale must be nonnegative.")
+    if args.fnn_physical_recovery_lr is not None and args.fnn_physical_recovery_lr <= 0.0:
+        raise ValueError("--fnn-physical-recovery-lr must be positive.")
     if args.synthetic_num_episodes is not None:
         if args.dataset != "synthetic" or args.synthetic_task not in {"diffusion", "wave", "coupled_oscillator"}:
             raise ValueError(
