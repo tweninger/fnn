@@ -10,20 +10,21 @@ set -euo pipefail
 PYTHON="${PYTHON:-venv/bin/python}"
 GPU_IDS="${GPU_IDS:-0 1}"
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
-RESULTS_DIR="${RESULTS_DIR:-derived/results/parameter_recovery_controlled_sgd_scaled}"
-LOG_DIR="${LOG_DIR:-derived/logs/parameter_recovery_controlled_sgd_scaled}"
+RESULTS_DIR="${RESULTS_DIR:-derived/results/parameter_recovery}"
+LOG_DIR="${LOG_DIR:-derived/logs/parameter_recovery}"
 read -r -a SEEDS <<< "${SEEDS:-0 1 2 3 4}"
-# Run all single-component checks by default.  Enable the final joint check
-# only after reviewing them: STAGES="gamma omega force_scale topology joint".
-read -r -a STAGES <<< "${STAGES:-gamma omega force_scale topology}"
+# Gamma and topology recovery are already validated. Recheck the two scalars
+# whose full-trajectory curvature needs a smaller step size.
+read -r -a STAGES <<< "${STAGES:-omega force_scale}"
 EPOCHS="${EPOCHS:-100}"
 NUM_NODES="${NUM_NODES:-64}"
 NUM_EPISODES="${NUM_EPISODES:-10}"
 NUM_BINS="${NUM_BINS:-72}"
-# Scalar gradients are summed over one epoch rather than stepped per bin.
-# Match the former FNN Adam step scale: 0.003 (the physical-suite FNN LR)
-# times the number of prediction steps, normally NUM_BINS - 1.
-PHYSICAL_RECOVERY_LR="${PHYSICAL_RECOVERY_LR:-$(awk -v bins="$NUM_BINS" 'BEGIN { printf "%.8g", 0.003 * (bins - 1) }')}"
+# Gamma uses the previously validated scaled step. Omega and force scale have
+# sharper recovery curvature, so they use a conservative per-epoch SGD step.
+GAMMA_RECOVERY_LR="${GAMMA_RECOVERY_LR:-$(awk -v bins="$NUM_BINS" 'BEGIN { printf "%.8g", 0.003 * (bins - 1) }')}"
+OMEGA_RECOVERY_LR="${OMEGA_RECOVERY_LR:-0.01}"
+FORCE_SCALE_RECOVERY_LR="${FORCE_SCALE_RECOVERY_LR:-0.01}"
 EVENTS_PER_BIN="${EVENTS_PER_BIN:-257}"
 RAINDROP_INTERVAL="${RAINDROP_INTERVAL:-12}"
 ROLLOUT_HORIZON=20
@@ -57,8 +58,15 @@ run_one() {
     topology) init_topology="$initial_value" ;;
     *) echo "Unknown parameter: $parameter" >&2; return 2 ;;
   esac
-  local value_tag; value_tag="$(tag "$initial_value")"
-  local label="paramrecovery_${stage}_${dynamic}_ring_${parameter}init${value_tag}_models1_epochs${EPOCHS}_nodes${NUM_NODES}_episodes${NUM_EPISODES}_bins${NUM_BINS}_events${EVENTS_PER_BIN}_dropint${RAINDROP_INTERVAL}_tau0_trainroll1_rollhorizon${ROLLOUT_HORIZON}_seed${seed}"
+  local scalar_lr
+  case "$stage" in
+    gamma) scalar_lr="$GAMMA_RECOVERY_LR" ;;
+    omega) scalar_lr="$OMEGA_RECOVERY_LR" ;;
+    force_scale) scalar_lr="$FORCE_SCALE_RECOVERY_LR" ;;
+    *) scalar_lr="$GAMMA_RECOVERY_LR" ;;
+  esac
+  local value_tag lr_tag; value_tag="$(tag "$initial_value")"; lr_tag="$(tag "$scalar_lr")"
+  local label="paramrecovery_${stage}_${dynamic}_ring_${parameter}init${value_tag}_recoverylr${lr_tag}_models1_epochs${EPOCHS}_nodes${NUM_NODES}_episodes${NUM_EPISODES}_bins${NUM_BINS}_events${EVENTS_PER_BIN}_dropint${RAINDROP_INTERVAL}_tau0_trainroll1_rollhorizon${ROLLOUT_HORIZON}_seed${seed}"
   local result="$RESULTS_DIR/${label}.jsonl" log="$LOG_DIR/${label}.log"
   [[ -e "$result" ]] && { echo "Skipping existing: $result"; return; }
   local physics_args=(--synthetic-dt 0.10 --synthetic-gamma "$true_gamma" --synthetic-force-scale "$true_force")
@@ -80,7 +88,7 @@ run_one() {
     --synthetic-event-threshold 0 "${physics_args[@]}" --seed "$seed" --epochs "$EPOCHS" \
     --max-runs 1 --num-bins "$NUM_BINS" --rollout-train-steps 1 --rollout-horizon "$ROLLOUT_HORIZON" \
     --fnn-force-decoder field_difference "${recovery_args[@]}" \
-    --fnn-physical-recovery-lr "$PHYSICAL_RECOVERY_LR" \
+    --fnn-physical-recovery-lr "$scalar_lr" \
     --fnn-gamma-init "$init_gamma" --fnn-omega-init "$init_omega" --fnn-force-scale-init "$init_force" --fnn-topology-init "$init_topology" \
     --save-jsonl "$result" 2>&1 | tee "$log"
 }

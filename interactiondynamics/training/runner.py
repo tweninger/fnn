@@ -31,7 +31,11 @@ from interactiondynamics.eval.node_metrics import (
     node_regression_metrics,
     regression_metrics,
 )
-from interactiondynamics.eval.ranking_metrics import ranking_loss_and_metrics
+from interactiondynamics.eval.ranking_metrics import (
+    event_force_loss_and_metrics,
+    internal_events,
+    ranking_loss_and_metrics,
+)
 from interactiondynamics.training.reporting import (
     format_edge_classification_bundle,
     format_edge_metric_bundle,
@@ -256,6 +260,72 @@ def _supports_physical_rollout_training(model, cfg: TrainConfig, edge_targets) -
         edge_targets is None
         and callable(getattr(model, "predict_event_features", None))
     )
+
+
+def _supports_full_trajectory_scalar_recovery(model, cfg: TrainConfig, edge_targets, optimizer) -> bool:
+    """Use full BPTT only for controlled physical-scalar recovery."""
+    return bool(
+        edge_targets is None
+        and callable(getattr(model, "predict_event_features", None))
+        and callable(getattr(optimizer, "finalize_epoch", None))
+    )
+
+
+def _train_one_epoch_physical_scalar_recovery(
+    model,
+    bins: Iterable[EventBatch],
+    optimizer,
+    cfg: TrainConfig,
+) -> dict[str, float]:
+    """Fit recovery scalars from a complete differentiable physical episode.
+
+    Wave damping and frequency affect force observations through velocity and
+    future field states.  Per-bin TBPTT discards that path; this recovery-only
+    routine preserves it through the complete packed episode and makes one
+    scalar update at epoch end via ``_EpochAccumulatingPhysicalOptimizer``.
+    """
+    model.train()
+    device = torch.device(cfg.device)
+    sequence = [batch.to(device) for batch in bins]
+    if len(sequence) < 2:
+        return {"loss": 0.0, "steps": 0}
+    sequence = pack_independent_episode_bins(sequence, num_nodes=cfg.num_nodes)
+    batch_size = 1
+    if sequence and sequence[0].batch is not None:
+        batch_size = int(sequence[0].batch.max().item()) + 1
+    state = model.init_state(batch_size=batch_size, num_nodes=cfg.num_nodes, device=device)
+    losses: list[torch.Tensor] = []
+    metric_sums: dict[str, float] = {}
+    metric_counts: dict[str, int] = {}
+    optimizer.zero_grad(set_to_none=True)
+    for previous, current in zip(sequence, sequence[1:]):
+        state, _ = model.step(state, previous)
+        # Raindrops are observed exogenous inputs, not predictable pair-force
+        # targets. They still update state above, but excluding them here
+        # removes their irreducible self-event loss from scalar recovery.
+        target = internal_events(current)
+        if target.num_events == 0:
+            continue
+        assert target.features is not None
+        prediction = model.predict_event_features(state, target)
+        loss, metrics = event_force_loss_and_metrics(model, prediction, target.features)
+        losses.append(loss)
+        for key, value in metrics.items():
+            metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
+            metric_counts[key] = metric_counts.get(key, 0) + 1
+    # Sum, rather than mean, to retain the effective scale of the former
+    # per-bin updates.  The reported loss remains a per-bin average.
+    if not losses:
+        return {"loss": 0.0, "steps": 0}
+    objective = torch.stack(losses).sum()
+    objective.backward()
+    if cfg.grad_clip and cfg.grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+    optimizer.step()
+    out = {"loss": float(torch.stack(losses).mean().detach().item()), "steps": len(losses)}
+    for key, value in metric_sums.items():
+        out[key] = value / metric_counts[key]
+    return out
 
 
 def _train_one_epoch_physical_rollout(
@@ -521,6 +591,8 @@ def train_one_epoch(
         result = _train_one_epoch_rollout(model, bins, edge_targets, optimizer, cfg)
     elif _supports_physical_rollout_training(model, cfg, edge_targets):
         result = _train_one_epoch_physical_rollout(model, bins, optimizer, cfg)
+    elif _supports_full_trajectory_scalar_recovery(model, cfg, edge_targets, optimizer):
+        result = _train_one_epoch_physical_scalar_recovery(model, bins, optimizer, cfg)
     else:
         result = _train_one_epoch_standard(model, bins, node_targets, edge_targets, optimizer, cfg)
     finalize_epoch = getattr(optimizer, "finalize_epoch", None)
