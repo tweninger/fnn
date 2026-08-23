@@ -143,6 +143,9 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
         ("fnn_force_scale_init", "fnn_force_scale_init"),
         ("fnn_topology_init", "fnn_topology_init"),
         ("fnn_physical_recovery_lr", "fnn_physical_recovery_lr"),
+        ("fnn_alternating_topology_epochs", "fnn_alternating_topology_epochs"),
+        ("fnn_alternating_physical_epochs", "fnn_alternating_physical_epochs"),
+        ("fnn_alternating_cycles", "fnn_alternating_cycles"),
         ("lnn_dt", "lnn_dt"),
         ("lnn_hidden", "lnn_hidden"),
         ("lnn_layers", "lnn_layers"),
@@ -155,6 +158,9 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
         value = getattr(args, arg_name, None)
         if value is not None:
             setattr(cfg, config_name, value)
+    cfg.fnn_alternating_recovery = bool(
+        getattr(args, "fnn_alternating_recovery", False)
+    ) or bool(cfg.fnn_alternating_recovery)
     return cfg
 
 
@@ -1166,7 +1172,31 @@ def run_one_experiment(
             for field in ("fnn_learn_gamma", "fnn_learn_omega", "fnn_learn_force_scale")
         )
     )
-    if selective_scalar_recovery and physical_params:
+    alternating_recovery = bool(getattr(run.model_cfg, "fnn_alternating_recovery", False))
+    topology_optimizer = None
+    physical_optimizer = None
+    if alternating_recovery:
+        if not bool(getattr(run.model_cfg, "fnn_learn_physical_params", False)):
+            raise ValueError("Alternating FNN recovery requires all physical raw parameters.")
+        if getattr(run.model_cfg, "fnn_force_decoder", None) != "field_difference":
+            raise ValueError("Alternating FNN recovery requires --fnn-force-decoder field_difference.")
+        topology_logits = getattr(model, "topology_logits", None)
+        if not isinstance(topology_logits, torch.nn.Parameter):
+            raise ValueError("Alternating FNN recovery requires a trainable FNN topology operator.")
+        non_topology_params = [parameter for parameter in other_params if parameter is not topology_logits]
+        if non_topology_params:
+            raise ValueError("Alternating FNN recovery supports only topology logits and one physical scalar.")
+        topology_optimizer = torch.optim.Adam(
+            [topology_logits], lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
+        )
+        physical_optimizer = _EpochAccumulatingPhysicalOptimizer(
+            [],
+            physical_params,
+            lr=float(getattr(run.model_cfg, "fnn_physical_recovery_lr", 0.1)),
+            weight_decay=0.0,
+        )
+        optimizer = physical_optimizer
+    elif selective_scalar_recovery and physical_params:
         optimizer = _EpochAccumulatingPhysicalOptimizer(
             other_params,
             physical_params,
@@ -1180,6 +1210,32 @@ def run_one_experiment(
         if physical_params:
             optimizer_groups.append({"params": physical_params, "weight_decay": 0.0})
         optimizer = torch.optim.Adam(optimizer_groups, lr=train_cfg.lr)
+
+    def alternating_phase(epoch: int) -> tuple[str, object]:
+        """Activate topology or one scheduled physical scalar for ``epoch``."""
+        assert topology_optimizer is not None and physical_optimizer is not None
+        topology_epochs = int(getattr(run.model_cfg, "fnn_alternating_topology_epochs", 20))
+        physical_epochs = int(getattr(run.model_cfg, "fnn_alternating_physical_epochs", 50))
+        scalar_order = ["omega", "gamma", "force_scale"]
+        if int(getattr(model, "order", 2)) == 1:
+            scalar_order.remove("omega")
+        cycle_epochs = topology_epochs + physical_epochs * len(scalar_order)
+        block_offset = (epoch - 1) % cycle_epochs
+        phase = "topology"
+        active_scalar = None
+        if block_offset >= topology_epochs:
+            active_scalar = scalar_order[(block_offset - topology_epochs) // physical_epochs]
+            phase = f"physical_{active_scalar}"
+        topology_logits = getattr(model, "topology_logits")
+        topology_logits.requires_grad_(active_scalar is None)
+        for parameter in physical_params:
+            raw_name = next(
+                name.rsplit(".", 1)[-1]
+                for name, candidate in model.named_parameters()
+                if candidate is parameter
+            )
+            parameter.requires_grad_(raw_name == f"{active_scalar}_raw")
+        return phase, topology_optimizer if active_scalar is None else physical_optimizer
 
     if eval_slices is None:
         eval_slices = EvalSlices(early_steps=10)
@@ -1279,6 +1335,10 @@ def run_one_experiment(
             return value
 
         epoch_started = time.perf_counter()
+        recovery_phase = None
+        active_optimizer = optimizer
+        if alternating_recovery:
+            recovery_phase, active_optimizer = alternating_phase(epoch)
         train_stats_step = timed(
             "train",
             lambda: train_one_epoch(
@@ -1286,17 +1346,20 @@ def run_one_experiment(
                 ds.bins("train"),
                 train_node_targets,
                 train_edge_targets,
-                optimizer,
+                active_optimizer,
                 train_cfg,
             ),
         )
+        if recovery_phase is not None:
+            train_stats_step["alternating_phase"] = recovery_phase
         parameter_trace = _parameter_recovery_snapshot(model, hidden_truth, device)
         eval_every = train_cfg.eval_every
         eval_due = epoch == epochs or (
             eval_every is not None and epoch % eval_every == 0
         )
         if not eval_due:
-            print(f"  ep {epoch:03d} | train loss={train_stats_step['loss']:.4f}")
+            phase_text = f" | phase={recovery_phase}" if recovery_phase is not None else ""
+            print(f"  ep {epoch:03d}{phase_text} | train loss={train_stats_step['loss']:.4f}")
             if save_jsonl_path is not None:
                 row = {
                     "run": run.name,
@@ -1314,6 +1377,7 @@ def run_one_experiment(
                     },
                     "epoch": epoch,
                     "train_step": train_stats_step,
+                    "alternating_phase": recovery_phase,
                     "parameter_trace": parameter_trace,
                 }
                 with open(save_jsonl_path, "a", encoding="utf-8") as f:
@@ -1532,6 +1596,7 @@ def run_one_experiment(
 
         snapshot = {
             "epoch": epoch,
+            "alternating_phase": recovery_phase,
             "train_step": train_stats_step,
             "train_eval": train_eval,
             "val": val_stats,

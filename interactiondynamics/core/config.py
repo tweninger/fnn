@@ -161,6 +161,14 @@ class ModelConfig:
     # Explicit recovery-only oracle: fix the persistent operator to synthetic
     # hidden truth.  It is never enabled by ordinary benchmark presets.
     fnn_oracle_topology: bool = False
+    # Alternating recovery first fits the persistent topology with physical
+    # scalars frozen, then freezes topology while fitting omega, gamma, and
+    # force scale sequentially from the full physical trajectory. The blocks
+    # repeat ``cycles`` times.
+    fnn_alternating_recovery: bool = False
+    fnn_alternating_topology_epochs: int = 20
+    fnn_alternating_physical_epochs: int = 50
+    fnn_alternating_cycles: int = 2
     # ``field_difference`` is the mechanism-constrained readout
     # f(i -> j) = c * (h_i - h_j); ``linear`` is a small generic ablation.
     fnn_force_decoder: str = "mlp"

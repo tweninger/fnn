@@ -235,6 +235,32 @@ def _build_common_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Recovery experiment only: fix FNN topology to hidden synthetic truth.",
     )
+    physical_model_group.add_argument(
+        "--fnn-alternating-recovery",
+        action="store_true",
+        help=(
+            "Alternate topology-only training with full-trajectory selective "
+            "physical-scalar recovery. Requires exactly one --fnn-learn-* scalar flag."
+        ),
+    )
+    physical_model_group.add_argument(
+        "--fnn-alternating-topology-epochs",
+        type=int,
+        default=None,
+        help="Topology-only epochs in each alternating-recovery cycle.",
+    )
+    physical_model_group.add_argument(
+        "--fnn-alternating-physical-epochs",
+        type=int,
+        default=None,
+        help="Scalar-recovery epochs in each alternating-recovery cycle.",
+    )
+    physical_model_group.add_argument(
+        "--fnn-alternating-cycles",
+        type=int,
+        default=None,
+        help="Number of topology/scalar alternating-recovery cycles.",
+    )
     physical_model_group.add_argument("--lnn-dt", type=float, default=None, help="LNN integration step.")
     physical_model_group.add_argument("--lnn-hidden", type=int, default=None, help="LNN potential-network width.")
     physical_model_group.add_argument("--lnn-layers", type=int, default=None, help="LNN potential-network depth.")
@@ -1076,6 +1102,14 @@ def main() -> None:
         raise ValueError("--synthetic-force-scale must be nonnegative.")
     if args.fnn_physical_recovery_lr is not None and args.fnn_physical_recovery_lr <= 0.0:
         raise ValueError("--fnn-physical-recovery-lr must be positive.")
+    for flag in (
+        "fnn_alternating_topology_epochs",
+        "fnn_alternating_physical_epochs",
+        "fnn_alternating_cycles",
+    ):
+        value = getattr(args, flag)
+        if value is not None and value < 1:
+            raise ValueError(f"--{flag.replace('_', '-')} must be at least one.")
     if args.synthetic_num_episodes is not None:
         if args.dataset != "synthetic" or args.synthetic_task not in {"diffusion", "wave", "coupled_oscillator"}:
             raise ValueError(
@@ -1094,6 +1128,7 @@ def main() -> None:
         or args.fnn_learn_omega
         or args.fnn_learn_force_scale
         or args.fnn_oracle_topology
+        or args.fnn_alternating_recovery
     ) and not physical_synthetic_task:
         raise ValueError(
             "FNN physical-recovery flags are supported only "
@@ -1109,6 +1144,26 @@ def main() -> None:
             or args.prediction_mode != "state"
         ):
             raise ValueError("Target-transform flags do not apply to event-only physical force tasks.")
+    if args.fnn_alternating_recovery:
+        if not args.fnn_learn_physical_params:
+            raise ValueError(
+                "--fnn-alternating-recovery requires --fnn-learn-physical-params; "
+                "it freezes all but one scalar inside each physical subphase."
+            )
+        if args.fnn_learn_gamma or args.fnn_learn_omega or args.fnn_learn_force_scale:
+            raise ValueError("--fnn-alternating-recovery does not accept selective --fnn-learn-* flags.")
+        if args.fnn_oracle_topology:
+            raise ValueError("--fnn-alternating-recovery cannot use --fnn-oracle-topology.")
+        topology_epochs = args.fnn_alternating_topology_epochs or 20
+        physical_epochs = args.fnn_alternating_physical_epochs or 50
+        cycles = args.fnn_alternating_cycles or 2
+        scalar_phases = 2 if args.synthetic_task == "diffusion" else 3
+        expected_epochs = cycles * (topology_epochs + scalar_phases * physical_epochs)
+        if args.epochs != expected_epochs:
+            raise ValueError(
+                "--epochs must equal cycles × (topology epochs + physical epochs) "
+                f"for alternating recovery; expected {expected_epochs}, got {args.epochs}."
+            )
     if args.rollout_train_steps < 1:
         raise ValueError("--rollout-train-steps must be at least 1.")
     base_train_cfg.rollout_train_steps = int(args.rollout_train_steps)
