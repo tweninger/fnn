@@ -922,12 +922,15 @@ def evaluate_physical_force_rollout(
         leave=False,
     ):
         start_episode = events_seq[start_idx].episode
-        if start_episode is None:
-            continue
-        episode_id = int(start_episode[0].item())
+        # Observational datasets such as JODIE are one continuous stream and
+        # intentionally carry no episode ID. In that case every in-range
+        # window is valid. Synthetic trajectories retain their strict episode
+        # boundary so a rollout never crosses independent simulations.
+        episode_id = None if start_episode is None else int(start_episode[0].item())
         target_indices = range(start_idx + 1, start_idx + horizon + 1)
-        # Never roll across an independent raindrop-started episode.
-        if any(
+        # Never roll across an independent raindrop-started episode. A stream
+        # without episode IDs is treated as one continuous trajectory.
+        if episode_id is not None and any(
             events_seq[idx].episode is None
             or int(events_seq[idx].episode[0].item()) != episode_id
             for idx in target_indices
