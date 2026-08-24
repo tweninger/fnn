@@ -630,13 +630,16 @@ def _train_one_epoch_standard(
         batch_size = int(bins[0].batch.max().item()) + 1
     state = model.init_state(batch_size=batch_size, num_nodes=cfg.num_nodes, device=device)
 
-    total_loss = 0.0
+    # Keep reductions on-device until the epoch finishes.  Converting a scalar
+    # to Python for every small temporal bin forces a CUDA synchronization.
+    total_loss = torch.zeros((), device=device)
     total_primary = 0.0
     total_primary_count = 0
     n_steps = 0
     kappa_sum = 0.0
     kappa_n = 0
     grad_norm_sum = 0.0
+    grad_norm_n = 0
     state_std_sum = 0.0
     state_abs_sum = 0.0
     state_delta_sum = 0.0
@@ -668,6 +671,9 @@ def _train_one_epoch_standard(
     prev_prev_edge_target: Optional[torch.Tensor] = None
     primary_name: Optional[str] = None
     for curr in bins:
+        collect_step_metrics = bool(
+            cfg.log_every and ((n_steps + 1) % cfg.log_every == 0)
+        )
         curr = curr.to(device)
         curr_node_target = None if target_iter is None else next(target_iter).to(device)
         curr_edge_target = None if edge_target_iter is None else next(edge_target_iter)
@@ -697,7 +703,11 @@ def _train_one_epoch_standard(
                 prev_edge_target = curr_edge_target.targets.detach().to(device)
             continue
 
-        state_before = None if state is None or state.node is None else state.node.detach().clone()
+        state_before = (
+            None
+            if not (cfg.debug or collect_step_metrics) or state is None or state.node is None
+            else state.node.detach().clone()
+        )
         observed_target = prev_edge_target if prev_edge_target is not None else prev_node_target
         observed_prev_target = prev_prev_edge_target if prev_prev_edge_target is not None else prev_prev_node_target
         _stash_observed_history(
@@ -716,12 +726,12 @@ def _train_one_epoch_standard(
         )
         state, aux = model.step(state, prev)
 
-        if aux is not None and "kappa" in aux:
+        if collect_step_metrics and aux is not None and "kappa" in aux:
             kappa = aux["kappa"]
             if torch.is_tensor(kappa):
                 kappa_sum += float(kappa.detach().item())
                 kappa_n += 1
-        if aux is not None:
+        if collect_step_metrics and aux is not None:
             for key, value in aux.items():
                 scalar: float | None = None
                 if torch.is_tensor(value):
@@ -735,7 +745,7 @@ def _train_one_epoch_standard(
                 aux_counts[key] = aux_counts.get(key, 0) + 1
 
         h = state.node
-        if h is not None:
+        if collect_step_metrics and h is not None:
             state_std_sum += float(h.std(unbiased=False).item())
             state_abs_sum += float(h.abs().mean().item())
             state_stat_n += 1
@@ -750,22 +760,22 @@ def _train_one_epoch_standard(
                 float(h.abs().max().item()),
             )
 
-        if prev.t is not None and getattr(state, "aux", None) is not None and "L_bin_t_min" in state.aux:
+        if cfg.debug and prev.t is not None and getattr(state, "aux", None) is not None and "L_bin_t_min" in state.aux:
             assert state.aux["L_bin_t_min"] == int(prev.t.min().item()), (
                 "step() did not use prev bin for operator"
             )
 
-        if state.node is not None and (not torch.isfinite(state.node).all()):
+        if cfg.debug and state.node is not None and (not torch.isfinite(state.node).all()):
             raise RuntimeError("Non-finite state.node after model.step()")
 
         optimizer.zero_grad(set_to_none=True)
 
-        if curr.batch is None:
+        if cfg.debug and curr.batch is None:
             assert prev.t is not None and int(prev.t.min().item()) == int(prev.t.max().item())
             assert curr.t is not None and int(curr.t.min().item()) == int(curr.t.max().item())
             assert int(prev.t.max().item()) < int(curr.t.min().item())
 
-        if getattr(state, "aux", None) is not None:
+        if cfg.debug and getattr(state, "aux", None) is not None:
             if "L_bin_t_min" in state.aux and "L_bin_t_max" in state.aux:
                 prev_time = int(prev.t.min().item())
                 assert state.aux["L_bin_t_min"] == prev_time and state.aux["L_bin_t_max"] == prev_time, (
@@ -833,6 +843,7 @@ def _train_one_epoch_standard(
                 next_events=curr,
                 num_nodes=cfg.num_nodes,
                 num_neg=cfg.num_neg,
+                compute_metrics=collect_step_metrics,
             )
             total_step_loss = loss
         if curr_edge_target is not None and getattr(model, "node_scorer", None) is not None:
@@ -951,13 +962,15 @@ def _train_one_epoch_standard(
         total_step_loss.backward()
         if cfg.grad_clip and cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        grad_norm_sum += global_grad_norm(model.parameters())
+        if collect_step_metrics:
+            grad_norm_sum += global_grad_norm(model.parameters())
+            grad_norm_n += 1
         optimizer.step()
 
         if cfg.tbptt_steps and ((n_steps + 1) % cfg.tbptt_steps == 0) and state is not None:
             state.detach_()
 
-        total_loss += float(total_step_loss.item())
+        total_loss += total_step_loss.detach()
         # Thresholded physical streams legitimately contain quiet bins with
         # only an observed external raindrop (or no events). Their ranking
         # loss is a valid zero connected to the model state, but they have no
@@ -1014,13 +1027,13 @@ def _train_one_epoch_standard(
     if primary_name is None:
         primary_name = "mrr"
     out = {
-        "loss": total_loss / n_steps,
+        "loss": float((total_loss / n_steps).item()),
         primary_name: total_primary / max(total_primary_count, 1),
     }
     if kappa_n > 0:
         out["kappa_mean"] = kappa_sum / kappa_n
-    if n_steps > 0:
-        out["grad_norm_mean"] = grad_norm_sum / n_steps
+    if grad_norm_n > 0:
+        out["grad_norm_mean"] = grad_norm_sum / grad_norm_n
     if state_stat_n > 0:
         out["state_node_std_mean"] = state_std_sum / state_stat_n
         out["state_node_abs_mean"] = state_abs_sum / state_stat_n

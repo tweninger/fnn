@@ -428,6 +428,8 @@ def event_force_loss_and_metrics(
     model,
     predicted_force: torch.Tensor,
     target_force: torch.Tensor,
+    *,
+    compute_metrics: bool = True,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Calibrated physical-force objective shared by one-step and rollouts."""
     target_force = target_force.to(device=predicted_force.device, dtype=predicted_force.dtype)
@@ -440,11 +442,16 @@ def event_force_loss_and_metrics(
         target_std = target_std.to(device=target_force.device, dtype=target_force.dtype).clamp_min(1e-8)
     normalized_per_event_mse = (raw_error / target_std).square().mean(dim=-1)
     force_magnitude = target_force.norm(dim=-1)
-    q90 = getattr(model, "event_feature_magnitude_q90", 1.0)
-    q90 = float(q90.detach().item()) if isinstance(q90, torch.Tensor) else float(q90)
+    q90 = torch.as_tensor(
+        getattr(model, "event_feature_magnitude_q90", 1.0),
+        device=predicted_force.device,
+        dtype=predicted_force.dtype,
+    )
     magnitude_weight = float(getattr(model, "event_feature_magnitude_weight", 2.0))
-    weights = 1.0 + magnitude_weight * (force_magnitude / max(q90, 1e-8)).clamp(0.0, 3.0)
+    weights = 1.0 + magnitude_weight * (force_magnitude / q90.clamp_min(1e-8)).clamp(0.0, 3.0)
     weighted_loss = (weights * normalized_per_event_mse).mean()
+    if not compute_metrics:
+        return weighted_loss, {}
     metrics = {
         "force_mse": float(raw_mse.detach().item()),
         "force_nrmse": float(normalized_per_event_mse.mean().sqrt().detach().item()),
@@ -490,6 +497,7 @@ def ranking_loss_and_metrics(
     include_force: bool = True,
     include_binary_metrics: bool = True,
     include_event_detection: bool = True,
+    compute_metrics: bool = True,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Given current state, evaluate next_events as positives with negatives.
@@ -578,13 +586,15 @@ def ranking_loss_and_metrics(
     #loss = bce_ranking_loss(scores, M=M, K1=K1)  
     loss = softmax_ranking_loss(scores, M=M, K1=K1)
 
-    metrics = ranking_metrics(
-        scores.detach(), M=M, K1=K1, include_binary_metrics=include_binary_metrics
+    metrics = (
+        ranking_metrics(scores.detach(), M=M, K1=K1, include_binary_metrics=include_binary_metrics)
+        if compute_metrics
+        else {}
     )
     # Training retains the original sampled objective. During evaluation, add
     # the standard filtered ranking diagnostics: destinations that are another
     # true same-bin interaction from this source are excluded from negatives.
-    if not model.training:
+    if not model.training and compute_metrics:
         filtered_neg_dst, valid_rows = sample_filtered_negative_dsts(
             num_nodes=num_nodes,
             src=next_events.src,
@@ -636,7 +646,7 @@ def ranking_loss_and_metrics(
     if include_force and callable(force_predictor) and next_events.features is not None:
         predicted_force = force_predictor(state_eval, next_events)
         force_loss, force_metrics = event_force_loss_and_metrics(
-            model, predicted_force, next_events.features
+            model, predicted_force, next_events.features, compute_metrics=compute_metrics
         )
         loss = loss + float(getattr(model, "event_feature_loss_weight", 1.0)) * force_loss
         metrics.update(force_metrics)
