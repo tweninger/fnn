@@ -5,7 +5,7 @@ set -euo pipefail
 
 PYTHON="${PYTHON:-venv/bin/python}"
 GPU_IDS="${GPU_IDS:-0 1}"
-MAX_PARALLEL="${MAX_PARALLEL:-4}"
+MAX_PARALLEL="${MAX_PARALLEL:-2}"
 RESULTS_DIR="${RESULTS_DIR:-derived/results/horizon_curves}"
 LOG_DIR="${LOG_DIR:-derived/logs/horizon_curves}"
 
@@ -52,7 +52,7 @@ run_one() {
     --synthetic-events-per-bin "$EVENTS_PER_BIN" --synthetic-raindrop-interval "$RAINDROP_INTERVAL" \
     --synthetic-event-threshold "$EVENT_THRESHOLD" "${physics_args[@]}" \
     --seed "$seed" --epochs "$EPOCHS" --max-runs "$MODELS" --num-bins "$NUM_BINS" \
-    --rollout-train-steps "$ROLLOUT_TRAIN_STEPS" --rollout-horizon "$ROLLOUT_HORIZON" \
+    --rollout-train-steps "$ROLLOUT_TRAIN_STEPS" --rollout-horizon "$ROLLOUT_HORIZON" --debug-timing \
     --save-jsonl "$result" 2>&1 | tee "$log"
 }
 
