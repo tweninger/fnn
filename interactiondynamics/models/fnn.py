@@ -39,6 +39,7 @@ class FieldNeuralNetwork(InteractionModel):
         learn_dt: bool = False,
         topology_init: float = 0.0,
         topology_mode: str = "dense",
+        state_score: bool = False,
         order: int = 2,
         force_decoder: str = "mlp",
         learn_physical_params: bool = False,
@@ -61,6 +62,7 @@ class FieldNeuralNetwork(InteractionModel):
         if topology_mode not in {"dense", "observed_sparse"}:
             raise ValueError("topology_mode must be 'dense' or 'observed_sparse'.")
         self.topology_mode = topology_mode
+        self.state_score_enabled = bool(state_score)
         self._topology_init = float(topology_init)
         if order not in {1, 2}:
             raise ValueError(f"FieldNeuralNetwork order must be 1 or 2, got {order}.")
@@ -129,6 +131,20 @@ class FieldNeuralNetwork(InteractionModel):
                 self.force_scale_raw = nn.Parameter(force_scale_raw)
             else:
                 self.register_buffer("force_scale_raw", force_scale_raw)
+        if self.state_score_enabled:
+            self.state_score_head: nn.Module | None = nn.Sequential(
+                nn.Linear(4 * state_dim, 2 * state_dim),
+                nn.Tanh(),
+                nn.Linear(2 * state_dim, 1),
+            )
+            # Start as the existing static-topology model. The residual head
+            # then learns only when the observational preset enables it.
+            final_layer = self.state_score_head[-1]
+            assert isinstance(final_layer, nn.Linear)
+            nn.init.zeros_(final_layer.weight)
+            nn.init.zeros_(final_layer.bias)
+        else:
+            self.state_score_head = None
         # Filled from training targets by the runner.  Buffers make the
         # calibration device-safe and ensure checkpoints retain it.
         self.register_buffer("event_feature_target_std", torch.ones(force_dim))
@@ -287,7 +303,10 @@ class FieldNeuralNetwork(InteractionModel):
             raise ValueError("FieldNeuralNetwork requires a state for next-event scoring.")
         # Event force values are intentionally ignored for destination ranking:
         # they are targets to predict, never clues that identify a candidate.
-        return self._topology_logits_for(candidate_events.src, candidate_events.dst)
+        topology_score = self._topology_logits_for(candidate_events.src, candidate_events.dst)
+        if self.state_score_head is None:
+            return topology_score
+        return topology_score + self.state_score_head(self._pair_features(state, candidate_events)).squeeze(-1)
 
     def predict_event_features(self, state: ModelState | None, events: EventBatch) -> torch.Tensor:
         if state is None:

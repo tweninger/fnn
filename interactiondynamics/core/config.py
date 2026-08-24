@@ -157,6 +157,9 @@ class ModelConfig:
     # ``observed_sparse`` stores a parameter only for train-observed directed
     # pairs rather than allocating a dense N x N operator.
     fnn_topology_mode: str = "dense"
+    # Optional state-conditioned residual on top of persistent pair logits.
+    # Kept opt-in so controlled synthetic recovery remains topology-only.
+    fnn_state_score: bool = False
     # Keep the physical update law fixed unless an experiment explicitly
     # studies parameter recovery.  The topology and force readout remain
     # trainable in either mode.

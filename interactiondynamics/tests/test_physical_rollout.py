@@ -32,3 +32,29 @@ def test_physical_rollout_treats_episode_free_stream_as_continuous() -> None:
     assert metrics["rollout_horizon"] == 2.0
     assert metrics["rollout_steps"] == 2.0
     assert "rollout_force_mse" in metrics
+
+
+def test_state_score_head_is_an_opt_in_topology_residual() -> None:
+    common = dict(
+        num_nodes=3,
+        force_dim=1,
+        state_dim=1,
+        gamma_init=0.1,
+        omega_init=0.5,
+        dt=0.1,
+    )
+    static_model = FieldNeuralNetwork(**common)
+    dynamic_model = FieldNeuralNetwork(**common, state_score=True)
+    events = EventBatch(src=torch.tensor([0]), dst=torch.tensor([1]))
+    state = static_model.init_state(batch_size=1, num_nodes=3, device=torch.device("cpu"))
+
+    assert torch.equal(static_model.score(state, events), static_model._topology_logits_for(events.src, events.dst))
+    assert dynamic_model.state_score_head is not None
+    final_layer = dynamic_model.state_score_head[-1]
+    assert isinstance(final_layer, torch.nn.Linear)
+    final_layer.bias.data.fill_(2.0)
+    dynamic_state = dynamic_model.init_state(batch_size=1, num_nodes=3, device=torch.device("cpu"))
+    assert torch.allclose(
+        dynamic_model.score(dynamic_state, events),
+        dynamic_model._topology_logits_for(events.src, events.dst) + 2.0,
+    )

@@ -36,6 +36,7 @@ def build_model(spec: DataSpec, cfg: ModelConfig):
             learn_dt=cfg.fnn_learn_dt,
             topology_init=cfg.fnn_topology_init,
             topology_mode=cfg.fnn_topology_mode,
+            state_score=cfg.fnn_state_score,
             order=cfg.fnn_order,
             force_decoder=cfg.fnn_force_decoder,
             learn_physical_params=cfg.fnn_learn_physical_params,

@@ -730,6 +730,7 @@ def build_suite(
             model_cfg.fnn_state_dim = 1
             model_cfg.fnn_order = 2
             model_cfg.fnn_topology_mode = "observed_sparse"
+            model_cfg.fnn_state_score = True
             model_cfg.fnn_learn_dt = True
             model_cfg.fnn_learn_gamma = True
             model_cfg.fnn_learn_omega = True
@@ -759,6 +760,7 @@ def build_suite(
         model_cfg.fnn_state_dim = 1
         model_cfg.fnn_order = 2
         model_cfg.fnn_topology_mode = "observed_sparse"
+        model_cfg.fnn_state_score = True
         model_cfg.fnn_learn_dt = True
         model_cfg.fnn_learn_gamma = True
         model_cfg.fnn_learn_omega = True
