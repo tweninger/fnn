@@ -59,3 +59,22 @@ def test_balanced_inactive_pairs_exclude_every_observed_pair() -> None:
     assert src.numel() == dst.numel() == 3
     observed_ids = events.src * 4 + events.dst
     assert not bool(torch.isin(src * 4 + dst, observed_ids).any())
+
+
+def test_balanced_inactive_pairs_does_not_materialize_all_pairs() -> None:
+    events = EventBatch(
+        src=torch.tensor([0, 99_999]),
+        dst=torch.tensor([1, 99_998]),
+    )
+    src, dst = sample_balanced_inactive_pairs(
+        num_nodes=100_000,
+        observed_events=events,
+        num_samples=8,
+        device=torch.device("cpu"),
+    )
+
+    sampled_ids = src * 100_000 + dst
+    observed_ids = events.src * 100_000 + events.dst
+    assert sampled_ids.numel() == 8
+    assert sampled_ids.unique().numel() == 8
+    assert not bool(torch.isin(sampled_ids, observed_ids).any())

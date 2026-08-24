@@ -137,38 +137,67 @@ def sample_balanced_inactive_pairs(
     if num_nodes <= 0 or num_samples <= 0:
         empty = torch.empty((0,), dtype=torch.long, device=device)
         return (empty, empty, None) if return_batch else (empty, empty)
+
+    def sample_missing_pair_ids(observed_ids: torch.Tensor, count: int) -> torch.LongTensor:
+        """Sample distinct ranks in the complement without building N² pairs."""
+        total_pairs = num_nodes * num_nodes
+        observed_ids = torch.unique(observed_ids.to(device=device, dtype=torch.long), sorted=True)
+        observed_ids = observed_ids[(observed_ids >= 0) & (observed_ids < total_pairs)]
+        available = total_pairs - int(observed_ids.numel())
+        count = min(count, available)
+        if count <= 0:
+            return torch.empty((0,), dtype=torch.long, device=device)
+
+        # Draw only the requested number of complement ranks.  ``randperm``
+        # over ``total_pairs`` would be as costly as the full N x N grid.
+        chosen = torch.empty((0,), dtype=torch.long, device=device)
+        while chosen.numel() < count:
+            remaining = count - chosen.numel()
+            proposal = torch.randint(available, (max(2 * remaining, 16),), device=device)
+            proposal = torch.unique(proposal)
+            if chosen.numel():
+                proposal = proposal[~torch.isin(proposal, chosen)]
+            chosen = torch.cat([chosen, proposal[:remaining]])
+
+        # If p is a rank among absent pairs, inserting p after every observed
+        # id whose number of preceding gaps is <= p gives its true pair id.
+        gap_adjusted_observed = observed_ids - torch.arange(observed_ids.numel(), device=device)
+        offsets = torch.searchsorted(gap_adjusted_observed, chosen, right=True)
+        return cast(torch.LongTensor, chosen + offsets)
+
     batch = observed_events.batch
     if batch is None:
-        all_pair_ids = torch.arange(num_nodes * num_nodes, device=device, dtype=torch.long)
-        if observed_events.num_events:
-            observed_ids = torch.unique(observed_events.src * num_nodes + observed_events.dst)
-            available = all_pair_ids[~torch.isin(all_pair_ids, observed_ids)]
-        else:
-            available = all_pair_ids
-        if available.numel() == 0:
+        observed_ids = observed_events.src * num_nodes + observed_events.dst
+        chosen = sample_missing_pair_ids(observed_ids, int(num_samples))
+        if chosen.numel() == 0:
             empty = torch.empty((0,), dtype=torch.long, device=device)
             return (empty, empty, None) if return_batch else (empty, empty)
-        count = min(int(num_samples), int(available.numel()))
-        chosen = available[torch.randperm(available.numel(), device=device)[:count]]
         result = (cast(torch.LongTensor, chosen // num_nodes), cast(torch.LongTensor, chosen % num_nodes), None)
         return result if return_batch else result[:2]
 
     # Packed streams have disjoint node ID ranges. Draw one negative within
     # the same physical system as each positive, never across episodes.
     target_batch = batch[:num_samples].to(device=device, dtype=torch.long)
-    total_nodes = num_nodes * (int(batch.max().item()) + 1)
-    active = torch.zeros((total_nodes, total_nodes), dtype=torch.bool, device=device)
-    if observed_events.num_events:
-        active[observed_events.src, observed_events.dst] = True
-    base = target_batch * num_nodes
-    neg_src = torch.randint(num_nodes, (num_samples,), device=device, dtype=torch.long) + base
-    neg_dst = torch.randint(num_nodes, (num_samples,), device=device, dtype=torch.long) + base
-    blocked = active[neg_src, neg_dst]
-    while bool(blocked.any()):
-        neg_src = torch.where(blocked, torch.randint(num_nodes, (num_samples,), device=device) + base, neg_src)
-        neg_dst = torch.where(blocked, torch.randint(num_nodes, (num_samples,), device=device) + base, neg_dst)
-        blocked = active[neg_src, neg_dst]
-    result = (cast(torch.LongTensor, neg_src), cast(torch.LongTensor, neg_dst), cast(torch.LongTensor, target_batch))
+    neg_src_parts, neg_dst_parts, neg_batch_parts = [], [], []
+    for batch_id in torch.unique(target_batch).tolist():
+        count = int((target_batch == batch_id).sum().item())
+        observed = batch == batch_id
+        observed_ids = (
+            observed_events.src[observed] - batch_id * num_nodes
+        ) * num_nodes + (observed_events.dst[observed] - batch_id * num_nodes)
+        chosen = sample_missing_pair_ids(observed_ids, count)
+        if chosen.numel():
+            neg_src_parts.append(chosen // num_nodes + batch_id * num_nodes)
+            neg_dst_parts.append(chosen % num_nodes + batch_id * num_nodes)
+            neg_batch_parts.append(torch.full_like(chosen, batch_id))
+    if not neg_src_parts:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return (empty, empty, empty) if return_batch else (empty, empty)
+    result = (
+        cast(torch.LongTensor, torch.cat(neg_src_parts)),
+        cast(torch.LongTensor, torch.cat(neg_dst_parts)),
+        cast(torch.LongTensor, torch.cat(neg_batch_parts)),
+    )
     return result if return_batch else result[:2]
 
 
