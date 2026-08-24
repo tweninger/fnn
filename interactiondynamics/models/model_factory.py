@@ -33,7 +33,9 @@ def build_model(spec: DataSpec, cfg: ModelConfig):
             gamma_init=cfg.fnn_gamma_init,
             omega_init=cfg.fnn_omega_init,
             dt=cfg.fnn_dt,
+            learn_dt=cfg.fnn_learn_dt,
             topology_init=cfg.fnn_topology_init,
+            topology_mode=cfg.fnn_topology_mode,
             order=cfg.fnn_order,
             force_decoder=cfg.fnn_force_decoder,
             learn_physical_params=cfg.fnn_learn_physical_params,
@@ -41,6 +43,8 @@ def build_model(spec: DataSpec, cfg: ModelConfig):
             learn_omega=cfg.fnn_learn_omega,
             learn_force_scale=cfg.fnn_learn_force_scale,
             force_scale_init=cfg.fnn_force_scale_init,
+            learn_input_force_scale=cfg.fnn_learn_input_force_scale,
+            input_force_scale_init=cfg.fnn_input_force_scale_init,
         )
         model.event_feature_loss_weight = float(cfg.event_feature_loss_weight)
         model.event_feature_magnitude_weight = float(cfg.event_feature_magnitude_weight)

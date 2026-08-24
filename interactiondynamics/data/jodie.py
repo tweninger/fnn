@@ -19,6 +19,7 @@ class JODIEConfig:
     split_fracs: Tuple[float, float, float] = (0.7, 0.15, 0.15)  # train/val/test by time
     device: Optional[torch.device] = None
     cast_features_to_float32: bool = True
+    unit_force: bool = False
 
 
 class JODIEBinnedDataset(EventStreamDataset):
@@ -48,7 +49,7 @@ class JODIEBinnedDataset(EventStreamDataset):
             self._msg_all = msg
 
         self._num_nodes = int(torch.max(self._src_all.max(), self._dst_all.max()).item()) + 1
-        self._event_dim = int(self._msg_all.size(-1)) if self._msg_all is not None else 0
+        self._event_dim = 1 if cfg.unit_force else (int(self._msg_all.size(-1)) if self._msg_all is not None else 0)
 
         # Bin timestamps once
         t0 = float(ts_all.min().item())
@@ -81,6 +82,7 @@ class JODIEBinnedDataset(EventStreamDataset):
                 "bin_size": float(self.cfg.bin_size),
                 "t0": self._t0,
                 "split_fracs": self.cfg.split_fracs,
+                "unit_force": bool(self.cfg.unit_force),
             },
         )
 
@@ -92,6 +94,7 @@ class JODIEBinnedDataset(EventStreamDataset):
             dst_all=self._dst_all,
             bin_id_all=self._bin_id_all,
             msg_all=self._msg_all,
+            unit_force=self.cfg.unit_force,
             b0=b0,
             b1=b1,
             device=self.cfg.device,
@@ -106,6 +109,7 @@ class _JODIEBinnedStream(Iterable[EventBatch]):
     msg_all: Optional[torch.Tensor]
     b0: int
     b1: int
+    unit_force: bool = False
     device: Optional[torch.device] = None
 
     def __iter__(self) -> Iterator[EventBatch]:
@@ -116,7 +120,11 @@ class _JODIEBinnedStream(Iterable[EventBatch]):
 
             src = self.src_all[mask]
             dst = self.dst_all[mask]
-            feats = (self.msg_all[mask] if self.msg_all is not None else None)
+            feats = (
+                torch.ones((src.numel(), 1), dtype=torch.float32)
+                if self.unit_force
+                else (self.msg_all[mask] if self.msg_all is not None else None)
+            )
 
             eb = EventBatch(
                 src=cast(torch.LongTensor, src),

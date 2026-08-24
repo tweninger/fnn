@@ -117,6 +117,14 @@ def _build_common_parser() -> argparse.ArgumentParser:
         help="Number of simulated time bins for synthetic datasets.",
     )
     data_group.add_argument("--seed", type=int, default=0, help="Random seed for simulated datasets.")
+    data_group.add_argument(
+        "--jodie-fnn",
+        action="store_true",
+        help=(
+            "Run the minimal FNN on JODIE: unit interaction impulses, train-observed "
+            "sparse topology candidates, and ranking evaluation."
+        ),
+    )
     train_group = common.add_argument_group("training")
     train_group.add_argument(
         "--max-runs",
@@ -220,6 +228,10 @@ def _build_common_parser() -> argparse.ArgumentParser:
         help="Additional emphasis on large force targets during physical-event training.",
     )
     physical_model_group.add_argument("--fnn-dt", type=float, default=None, help="Fixed FNN integration step.")
+    physical_model_group.add_argument(
+        "--fnn-learn-dt", action="store_true",
+        help="Learn a positive global FNN temporal scale instead of fixing --fnn-dt.",
+    )
     physical_model_group.add_argument("--fnn-gamma-init", type=float, default=None, help="Initial FNN damping.")
     physical_model_group.add_argument("--fnn-omega-init", type=float, default=None, help="Initial FNN restoring frequency.")
     physical_model_group.add_argument("--fnn-force-scale-init", type=float, default=None, help="Initial FNN force scale.")
@@ -1121,6 +1133,7 @@ def main() -> None:
     physical_synthetic_task = args.dataset == "synthetic" and args.synthetic_task in {
         "diffusion", "wave", "coupled_oscillator"
     }
+    jodie_fnn_task = args.dataset == "jodie" and bool(args.jodie_fnn)
     if (
         args.fnn_force_decoder is not None
         or args.fnn_learn_physical_params
@@ -1129,10 +1142,10 @@ def main() -> None:
         or args.fnn_learn_force_scale
         or args.fnn_oracle_topology
         or args.fnn_alternating_recovery
-    ) and not physical_synthetic_task:
+    ) and not (physical_synthetic_task or jodie_fnn_task):
         raise ValueError(
             "FNN physical-recovery flags are supported only "
-            "for event-only synthetic diffusion, wave, and coupled_oscillator tasks."
+            "for event-only synthetic diffusion/wave/coupled_oscillator tasks or --jodie-fnn."
         )
     if physical_synthetic_task:
         if args.use_node_scorer or args.node_loss_weight != 1.0 or args.node_scorer_hidden != 128:
@@ -1145,19 +1158,19 @@ def main() -> None:
         ):
             raise ValueError("Target-transform flags do not apply to event-only physical force tasks.")
     if args.fnn_alternating_recovery:
-        if not args.fnn_learn_physical_params:
+        if not (args.fnn_learn_physical_params or jodie_fnn_task):
             raise ValueError(
                 "--fnn-alternating-recovery requires --fnn-learn-physical-params; "
                 "it freezes all but one scalar inside each physical subphase."
             )
-        if args.fnn_learn_gamma or args.fnn_learn_omega or args.fnn_learn_force_scale:
+        if not jodie_fnn_task and (args.fnn_learn_gamma or args.fnn_learn_omega or args.fnn_learn_force_scale):
             raise ValueError("--fnn-alternating-recovery does not accept selective --fnn-learn-* flags.")
         if args.fnn_oracle_topology:
             raise ValueError("--fnn-alternating-recovery cannot use --fnn-oracle-topology.")
         topology_epochs = args.fnn_alternating_topology_epochs or 20
         physical_epochs = args.fnn_alternating_physical_epochs or 50
         cycles = args.fnn_alternating_cycles or 2
-        scalar_phases = 2 if args.synthetic_task == "diffusion" else 3
+        scalar_phases = 4 if jodie_fnn_task else (2 if args.synthetic_task == "diffusion" else 3)
         expected_epochs = cycles * (topology_epochs + scalar_phases * physical_epochs)
         if args.epochs != expected_epochs:
             raise ValueError(

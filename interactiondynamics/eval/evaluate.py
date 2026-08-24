@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import math
 from typing import Any, Dict, Iterable, Optional, cast
 import torch
+from tqdm.auto import tqdm
 
 from interactiondynamics.core.events import EventBatch, pack_independent_episode_bins
 from interactiondynamics.core.interfaces import ModelState
@@ -844,6 +845,7 @@ def evaluate_physical_force_rollout(
     cfg,
     *,
     horizon: int = 5,
+    progress_desc: str = "rollout evaluation",
 ) -> Dict[str, Any]:
     """Closed-loop force rollout under an oracle future pair-query schedule.
 
@@ -870,7 +872,7 @@ def evaluate_physical_force_rollout(
     states_after_observed: list[Optional[ModelState]] = [None] * len(events_seq)
     state: Optional[ModelState] = None
     previous_episode: Optional[int] = None
-    for idx, events in enumerate(events_seq):
+    for idx, events in enumerate(tqdm(events_seq, desc=progress_desc, unit="bin", leave=False)):
         episode = None if events.episode is None else int(events.episode[0].item())
         if state is None or (episode is not None and previous_episode is not None and episode != previous_episode):
             state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
@@ -912,7 +914,13 @@ def evaluate_physical_force_rollout(
     persistent_event_by_steps_since_external: dict[int, dict[str, list[torch.Tensor]]] = {}
     windows = 0
     observed_external_events = 0
-    for start_idx in range(len(events_seq) - horizon):
+    for start_idx in tqdm(
+        range(len(events_seq) - horizon),
+        total=len(events_seq) - horizon,
+        desc=f"{progress_desc} windows",
+        unit="window",
+        leave=False,
+    ):
         start_episode = events_seq[start_idx].episode
         if start_episode is None:
             continue
@@ -1130,6 +1138,7 @@ def evaluate_stream_sliced(
     cfg,
     *,
     slices: EvalSlices = EvalSlices(),
+    progress_desc: str = "evaluation",
 ) -> Dict[str, float]:
     """
     Evaluate ranking metrics over a binned stream, returning:
@@ -1170,7 +1179,7 @@ def evaluate_stream_sliced(
     prev_prev_edge_target: Optional[torch.Tensor] = None
     sanity_done = bool(getattr(cfg, "ift_batch_sanity_done", False))
 
-    for events in bins:
+    for events in tqdm(bins, total=len(bins), desc=progress_desc, unit="bin", leave=False):
         events = events.to(device)
         curr_node_target = None if target_iter is None else next(target_iter).to(device)
         curr_edge_target = None if edge_target_iter is None else next(edge_target_iter)

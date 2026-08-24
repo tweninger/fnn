@@ -36,7 +36,9 @@ class FieldNeuralNetwork(InteractionModel):
         gamma_init: float,
         omega_init: float,
         dt: float,
+        learn_dt: bool = False,
         topology_init: float = 0.0,
+        topology_mode: str = "dense",
         order: int = 2,
         force_decoder: str = "mlp",
         learn_physical_params: bool = False,
@@ -44,6 +46,8 @@ class FieldNeuralNetwork(InteractionModel):
         learn_omega: bool = False,
         learn_force_scale: bool = False,
         force_scale_init: float = 1.0,
+        learn_input_force_scale: bool = False,
+        input_force_scale_init: float = 1.0,
     ) -> None:
         super().__init__()
         if force_dim != state_dim:
@@ -54,7 +58,10 @@ class FieldNeuralNetwork(InteractionModel):
         self.num_nodes = int(num_nodes)
         self.force_dim = int(force_dim)
         self.state_dim = int(state_dim)
-        self.dt = float(dt)
+        if topology_mode not in {"dense", "observed_sparse"}:
+            raise ValueError("topology_mode must be 'dense' or 'observed_sparse'.")
+        self.topology_mode = topology_mode
+        self._topology_init = float(topology_init)
         if order not in {1, 2}:
             raise ValueError(f"FieldNeuralNetwork order must be 1 or 2, got {order}.")
         self.order = int(order)
@@ -62,6 +69,7 @@ class FieldNeuralNetwork(InteractionModel):
         self.learn_gamma = bool(learn_physical_params or learn_gamma)
         self.learn_omega = bool(learn_physical_params or learn_omega)
         self.learn_force_scale = bool(learn_physical_params or learn_force_scale)
+        self.learn_input_force_scale = bool(learn_input_force_scale)
         if force_decoder not in {"mlp", "linear", "field_difference"}:
             raise ValueError(
                 "force_decoder must be one of {'mlp', 'linear', 'field_difference'}, "
@@ -69,12 +77,27 @@ class FieldNeuralNetwork(InteractionModel):
             )
         self.force_decoder_mode = force_decoder
 
-        # One persistent symmetric gate per pair.  It is never formed from
-        # current event adjacency, and its scale is fixed to [0, 1] so it
-        # cannot trade an arbitrary coupling constant against force magnitude.
-        logits = torch.full((num_nodes, num_nodes), float(topology_init))
-        logits.fill_diagonal_(-12.0)
-        self.topology_logits = nn.Parameter(logits)
+        # One persistent gate per pair. It is never formed from current event
+        # adjacency, and its scale is fixed to [0, 1]. Dense synthetic gates
+        # are symmetric; sparse observational candidates remain directed.
+        if topology_mode == "dense":
+            logits = torch.full((num_nodes, num_nodes), float(topology_init))
+            logits.fill_diagonal_(-12.0)
+            self.topology_logits: nn.Parameter | None = nn.Parameter(logits)
+        else:
+            self.topology_logits = None
+            self.sparse_topology_logits = nn.Parameter(torch.empty(0))
+            self.register_buffer("sparse_candidate_keys", torch.empty(0, dtype=torch.long))
+        dt_raw = torch.tensor(_inverse_softplus(dt))
+        if learn_dt:
+            self.dt_raw = nn.Parameter(dt_raw)
+        else:
+            self.register_buffer("dt_raw", dt_raw)
+        input_force_scale_raw = torch.tensor(_inverse_softplus(input_force_scale_init))
+        if self.learn_input_force_scale:
+            self.input_force_scale_raw = nn.Parameter(input_force_scale_raw)
+        else:
+            self.register_buffer("input_force_scale_raw", input_force_scale_raw)
 
         gamma_raw = torch.tensor(_inverse_softplus(gamma_init))
         omega_raw = torch.tensor(_inverse_softplus(omega_init))
@@ -129,6 +152,8 @@ class FieldNeuralNetwork(InteractionModel):
         self.event_feature_magnitude_weight = float(magnitude_weight)
 
     def topology_gate(self) -> torch.Tensor:
+        if self.topology_mode != "dense" or self.topology_logits is None:
+            raise RuntimeError("Sparse FNN topology has no dense gate matrix.")
         logits = 0.5 * (self.topology_logits + self.topology_logits.T)
         gate = torch.sigmoid(logits)
         return gate * (1.0 - torch.eye(self.num_nodes, device=gate.device, dtype=gate.dtype))
@@ -142,8 +167,43 @@ class FieldNeuralNetwork(InteractionModel):
         self.topology_logits[adjacency.to(device=self.topology_logits.device, dtype=torch.bool)] = 30.0
         self.topology_logits.requires_grad_(False)
 
+    @torch.no_grad()
+    def set_sparse_topology_candidates(self, src: torch.Tensor, dst: torch.Tensor) -> None:
+        """Initialize directed candidate gates from train-observed pairs only."""
+        if self.topology_mode != "observed_sparse":
+            raise RuntimeError("Sparse candidates require topology_mode='observed_sparse'.")
+        src = src.to(device=self.sparse_candidate_keys.device, dtype=torch.long).remainder(self.num_nodes)
+        dst = dst.to(device=self.sparse_candidate_keys.device, dtype=torch.long).remainder(self.num_nodes)
+        keys = torch.unique(src * self.num_nodes + dst, sorted=True)
+        self.sparse_candidate_keys = keys
+        self.sparse_topology_logits = nn.Parameter(torch.full((keys.numel(),), self._topology_init, device=keys.device))
+
+    def _topology_logits_for(self, src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+        if self.topology_mode == "dense":
+            assert self.topology_logits is not None
+            return self.topology_logits[src.remainder(self.num_nodes), dst.remainder(self.num_nodes)]
+        keys = src.remainder(self.num_nodes) * self.num_nodes + dst.remainder(self.num_nodes)
+        candidates = self.sparse_candidate_keys
+        if candidates.numel() == 0:
+            return torch.full_like(keys, self._topology_init, dtype=self.sparse_topology_logits.dtype)
+        positions = torch.searchsorted(candidates, keys)
+        valid = positions < candidates.numel()
+        found = valid.clone()
+        found[valid] = candidates[positions[valid]] == keys[valid]
+        # Unknown validation/test pairs retain the neutral initialization;
+        # they are never added to the learned candidate table.
+        values = torch.full_like(keys, self._topology_init, dtype=self.sparse_topology_logits.dtype)
+        if bool(found.any()):
+            values[found] = self.sparse_topology_logits[positions[found]]
+        return values
+
     def physical_parameters(self) -> dict[str, torch.Tensor]:
-        params = {"gamma": F.softplus(self.gamma_raw), "omega": F.softplus(self.omega_raw)}
+        params = {
+            "gamma": F.softplus(self.gamma_raw),
+            "omega": F.softplus(self.omega_raw),
+            "dt": F.softplus(self.dt_raw),
+            "input_force_scale": F.softplus(self.input_force_scale_raw),
+        }
         if self.force_decoder_mode == "field_difference":
             params["force_scale"] = F.softplus(self.force_scale_raw)
         return params
@@ -170,7 +230,6 @@ class FieldNeuralNetwork(InteractionModel):
                 f"physical force vector with dimension {self.force_dim}."
             )
         h, v = state.node, state.node_prev
-        gate = self.topology_gate()
         force = events.features.to(device=h.device, dtype=h.dtype)
         is_drop = (
             events.is_external.to(device=h.device, dtype=torch.bool)
@@ -181,21 +240,23 @@ class FieldNeuralNetwork(InteractionModel):
         # physical operator is shared, so map those IDs back to local nodes.
         src_local = events.src.remainder(self.num_nodes)
         dst_local = events.dst.remainder(self.num_nodes)
-        weighted_force = gate[src_local, dst_local].unsqueeze(-1) * force
+        params = self.physical_parameters()
+        edge_gate = torch.sigmoid(self._topology_logits_for(src_local, dst_local))
+        weighted_force = params["input_force_scale"] * edge_gate.unsqueeze(-1) * force
         # An external event is an observed raindrop impulse. It bypasses the
         # learned inter-node operator; no hidden drive signal is available.
         weighted_force = torch.where(is_drop.unsqueeze(-1), force, weighted_force)
         incoming = torch.zeros_like(h)
         incoming.index_add_(0, events.dst, weighted_force)
-        params = self.physical_parameters()
+        dt = params["dt"]
         if self.order == 1:
-            h_next = (1.0 - params["gamma"] * self.dt) * h + self.dt * incoming
+            h_next = (1.0 - params["gamma"] * dt) * h + dt * incoming
             v_next = torch.zeros_like(h_next)
         else:
-            v_next = (1.0 - params["gamma"] * self.dt) * v + self.dt * (
+            v_next = (1.0 - params["gamma"] * dt) * v + dt * (
                 incoming - params["omega"].square() * h
             )
-            h_next = h + self.dt * v_next
+            h_next = h + dt * v_next
         next_state = ModelState(
             node=h_next,
             node_prev=v_next,
@@ -204,8 +265,8 @@ class FieldNeuralNetwork(InteractionModel):
         aux: Dict[str, Any] = {
             "gamma": params["gamma"],
             "omega": params["omega"],
-            "dt": self.dt,
-            "topology_gate_mean": gate.mean(),
+            "dt": dt,
+            "topology_gate_mean": edge_gate.mean(),
         }
         return next_state, aux
 
@@ -226,10 +287,7 @@ class FieldNeuralNetwork(InteractionModel):
             raise ValueError("FieldNeuralNetwork requires a state for next-event scoring.")
         # Event force values are intentionally ignored for destination ranking:
         # they are targets to predict, never clues that identify a candidate.
-        return self.topology_logits[
-            candidate_events.src.remainder(self.num_nodes),
-            candidate_events.dst.remainder(self.num_nodes),
-        ]
+        return self._topology_logits_for(candidate_events.src, candidate_events.dst)
 
     def predict_event_features(self, state: ModelState | None, events: EventBatch) -> torch.Tensor:
         if state is None:

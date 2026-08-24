@@ -145,7 +145,18 @@ class ModelConfig:
     fnn_gamma_init: float = 0.12
     fnn_omega_init: float = 0.70
     fnn_force_scale_init: float = 1.0
+    # Scales observed event impulses before the field update. Kept separate
+    # from ``fnn_force_scale_init``, which belongs to the field-difference
+    # output decoder used by controlled synthetic recovery.
+    fnn_input_force_scale_init: float = 1.0
+    fnn_learn_input_force_scale: bool = False
     fnn_dt: float = 0.10
+    # Observational streams have an unknown temporal scale. This learns one
+    # positive global scale, not a full irregular-time model.
+    fnn_learn_dt: bool = False
+    # ``observed_sparse`` stores a parameter only for train-observed directed
+    # pairs rather than allocating a dense N x N operator.
+    fnn_topology_mode: str = "dense"
     # Keep the physical update law fixed unless an experiment explicitly
     # studies parameter recovery.  The topology and force readout remain
     # trainable in either mode.

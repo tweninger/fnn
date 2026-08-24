@@ -125,6 +125,7 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
     cfg.fnn_learn_physical_params = bool(
         getattr(args, "fnn_learn_physical_params", False)
     ) or bool(cfg.fnn_learn_physical_params)
+    cfg.fnn_learn_dt = bool(getattr(args, "fnn_learn_dt", False)) or bool(cfg.fnn_learn_dt)
     for arg_name, config_name in (
         ("fnn_learn_gamma", "fnn_learn_gamma"),
         ("fnn_learn_omega", "fnn_learn_omega"),
@@ -1095,6 +1096,45 @@ def run_one_experiment(
         train_cfg.prediction_mode = run.prediction_mode
 
     model = build_model_fn(spec, run.model_cfg).to(device)
+    # Sparse FNN topology is deliberately fitted only over train-observed
+    # directed pairs.  Build its candidate table before collecting optimizer
+    # parameters, so the newly created edge-logit parameter is optimized.
+    configure_sparse_candidates = getattr(model, "set_sparse_topology_candidates", None)
+    if callable(configure_sparse_candidates) and getattr(run.model_cfg, "fnn_topology_mode", "dense") == "observed_sparse":
+        train_src, train_dst = [], []
+        for batch in ds.bins("train"):
+            if batch.num_events:
+                train_src.append(batch.src.detach().cpu())
+                train_dst.append(batch.dst.detach().cpu())
+        if not train_src:
+            raise ValueError("Sparse FNN topology requires at least one training interaction.")
+        observed_src = torch.cat(train_src)
+        observed_dst = torch.cat(train_dst)
+        # Add train-only sampled negatives so learned sparse logits represent
+        # plausible alternatives as well as historical positives. Unknown
+        # pairs remain neutral, rather than becoming automatic negatives.
+        generator = torch.Generator(device="cpu").manual_seed(int(run.seed))
+        negative_dst = torch.randint(
+            spec.num_nodes,
+            (observed_src.numel(), train_cfg.num_neg),
+            generator=generator,
+            dtype=torch.long,
+        )
+        negative_dst = torch.where(
+            negative_dst == observed_dst.unsqueeze(1),
+            (negative_dst + 1).remainder(spec.num_nodes),
+            negative_dst,
+        )
+        configure_sparse_candidates(
+            torch.cat([observed_src, observed_src.repeat_interleave(train_cfg.num_neg)]),
+            torch.cat([observed_dst, negative_dst.reshape(-1)]),
+        )
+        observed_pairs = torch.unique(observed_src * spec.num_nodes + observed_dst).numel()
+        print(
+            "  sparse FNN topology"
+            f" | train observed pairs={int(observed_pairs)}"
+            f" | candidate pairs={int(getattr(model, 'sparse_candidate_keys').numel())}"
+        )
     if bool(getattr(run.model_cfg, "fnn_oracle_topology", False)):
         hidden_truth = ds.hidden_truth() if hasattr(ds, "hidden_truth") else None
         set_oracle_topology = getattr(model, "set_oracle_topology", None)
@@ -1155,7 +1195,9 @@ def run_one_experiment(
     # toward zero, changing the corresponding physical coefficient even at an
     # exact zero-loss solution.  Keep ordinary model weights regularized but
     # exempt the recovery scalars from decay.
-    physical_raw_names = {"gamma_raw", "omega_raw", "force_scale_raw"}
+    physical_raw_names = {
+        "gamma_raw", "omega_raw", "force_scale_raw", "input_force_scale_raw", "dt_raw"
+    }
     physical_params = []
     other_params = []
     for name, parameter in model.named_parameters():
@@ -1175,26 +1217,39 @@ def run_one_experiment(
     alternating_recovery = bool(getattr(run.model_cfg, "fnn_alternating_recovery", False))
     topology_optimizer = None
     physical_optimizer = None
+    topology_parameter = None
+    physical_parameter_names: dict[int, str] = {}
     if alternating_recovery:
-        if not bool(getattr(run.model_cfg, "fnn_learn_physical_params", False)):
-            raise ValueError("Alternating FNN recovery requires all physical raw parameters.")
-        if getattr(run.model_cfg, "fnn_force_decoder", None) != "field_difference":
-            raise ValueError("Alternating FNN recovery requires --fnn-force-decoder field_difference.")
-        topology_logits = getattr(model, "topology_logits", None)
-        if not isinstance(topology_logits, torch.nn.Parameter):
+        topology_parameter = getattr(model, "topology_logits", None)
+        if not isinstance(topology_parameter, torch.nn.Parameter):
+            topology_parameter = getattr(model, "sparse_topology_logits", None)
+        if not isinstance(topology_parameter, torch.nn.Parameter):
             raise ValueError("Alternating FNN recovery requires a trainable FNN topology operator.")
-        non_topology_params = [parameter for parameter in other_params if parameter is not topology_logits]
-        if non_topology_params:
-            raise ValueError("Alternating FNN recovery supports only topology logits and one physical scalar.")
+        if not physical_params:
+            raise ValueError("Alternating FNN recovery requires at least one learnable physical scalar.")
+        # The topology phase also trains any nonphysical readout weights (the
+        # sparse JODIE MLP), while all physical raws remain frozen.
+        topology_phase_params = list(other_params)
         topology_optimizer = torch.optim.Adam(
-            [topology_logits], lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
+            topology_phase_params, lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
         )
-        physical_optimizer = _EpochAccumulatingPhysicalOptimizer(
-            [],
-            physical_params,
-            lr=float(getattr(run.model_cfg, "fnn_physical_recovery_lr", 0.1)),
-            weight_decay=0.0,
-        )
+        if getattr(run.model_cfg, "fnn_topology_mode", "dense") == "observed_sparse":
+            # A JODIE stream is one long observational trajectory; full BPTT
+            # for each scalar phase is not memory-safe. The phase schedule is
+            # identical, while ordinary truncated event updates use Adam.
+            physical_optimizer = torch.optim.Adam(physical_params, lr=train_cfg.lr, weight_decay=0.0)
+        else:
+            physical_optimizer = _EpochAccumulatingPhysicalOptimizer(
+                [], physical_params,
+                lr=float(getattr(run.model_cfg, "fnn_physical_recovery_lr", 0.1)),
+                weight_decay=0.0,
+            )
+        physical_parameter_ids = {id(parameter) for parameter in physical_params}
+        physical_parameter_names = {
+            id(parameter): name.rsplit(".", 1)[-1]
+            for name, parameter in model.named_parameters()
+            if id(parameter) in physical_parameter_ids
+        }
         optimizer = physical_optimizer
     elif selective_scalar_recovery and physical_params:
         optimizer = _EpochAccumulatingPhysicalOptimizer(
@@ -1216,9 +1271,11 @@ def run_one_experiment(
         assert topology_optimizer is not None and physical_optimizer is not None
         topology_epochs = int(getattr(run.model_cfg, "fnn_alternating_topology_epochs", 20))
         physical_epochs = int(getattr(run.model_cfg, "fnn_alternating_physical_epochs", 50))
-        scalar_order = ["omega", "gamma", "force_scale"]
-        if int(getattr(model, "order", 2)) == 1:
-            scalar_order.remove("omega")
+        preferred_raw_order = [
+            "omega_raw", "gamma_raw", "force_scale_raw", "input_force_scale_raw", "dt_raw"
+        ]
+        active_raw_names = set(physical_parameter_names.values())
+        scalar_order = [name.removesuffix("_raw") for name in preferred_raw_order if name in active_raw_names]
         cycle_epochs = topology_epochs + physical_epochs * len(scalar_order)
         block_offset = (epoch - 1) % cycle_epochs
         phase = "topology"
@@ -1226,14 +1283,11 @@ def run_one_experiment(
         if block_offset >= topology_epochs:
             active_scalar = scalar_order[(block_offset - topology_epochs) // physical_epochs]
             phase = f"physical_{active_scalar}"
-        topology_logits = getattr(model, "topology_logits")
-        topology_logits.requires_grad_(active_scalar is None)
+        assert topology_parameter is not None
+        for parameter in other_params:
+            parameter.requires_grad_(active_scalar is None)
         for parameter in physical_params:
-            raw_name = next(
-                name.rsplit(".", 1)[-1]
-                for name, candidate in model.named_parameters()
-                if candidate is parameter
-            )
+            raw_name = physical_parameter_names[id(parameter)]
             parameter.requires_grad_(raw_name == f"{active_scalar}_raw")
         return phase, topology_optimizer if active_scalar is None else physical_optimizer
 
@@ -1392,6 +1446,7 @@ def run_one_experiment(
                 val_edge_targets,
                 train_cfg,
                 slices=eval_slices,
+                progress_desc="baseline validation",
             )
             baseline_test = evaluate_stream_sliced(
                 model,
@@ -1400,6 +1455,7 @@ def run_one_experiment(
                 test_edge_targets,
                 train_cfg,
                 slices=eval_slices,
+                progress_desc="baseline test",
             )
             run_primary_name = infer_primary_metric(baseline_val, baseline_test)
             baseline_str = (
@@ -1446,6 +1502,7 @@ def run_one_experiment(
                 train_edge_targets,
                 train_cfg,
                 slices=eval_slices,
+                progress_desc="train evaluation",
             ),
         )
         val_stats = timed(
@@ -1457,6 +1514,7 @@ def run_one_experiment(
                 val_edge_targets,
                 train_cfg,
                 slices=eval_slices,
+                progress_desc="validation",
             ),
         )
         test_stats = timed(
@@ -1468,6 +1526,7 @@ def run_one_experiment(
                 test_edge_targets,
                 train_cfg,
                 slices=eval_slices,
+                progress_desc="test",
             ),
         )
         # Keep recovery quantities alongside test metrics so normal JSONL
@@ -1579,13 +1638,15 @@ def run_one_experiment(
             rollout_val_stats = timed(
                 "rollout_val",
                 lambda: evaluate_physical_force_rollout(
-                    model, ds.bins("val"), train_cfg, horizon=rollout_horizon
+                    model, ds.bins("val"), train_cfg, horizon=rollout_horizon,
+                    progress_desc="validation rollout",
                 ),
             )
             rollout_test_stats = timed(
                 "rollout_test",
                 lambda: evaluate_physical_force_rollout(
-                    model, ds.bins("test"), train_cfg, horizon=rollout_horizon
+                    model, ds.bins("test"), train_cfg, horizon=rollout_horizon,
+                    progress_desc="test rollout",
                 ),
             )
 

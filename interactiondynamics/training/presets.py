@@ -720,31 +720,59 @@ def build_suite(
                 save_jsonl_path=None,
             )
 
-        jodie_cfg = JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
+        jodie_fnn = bool(getattr(args, "jodie_fnn", False)) if args is not None else False
+        jodie_cfg = JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device, unit_force=jodie_fnn)
         train_cfg = _default_train_config(num_nodes=0, num_neg=10, log_every=500, device=device)
         model_cfg = _base_model_config(small=False)
-        model_cfg.event_dim = None
+        model_cfg.event_dim = 1 if jodie_fnn else None
+        if jodie_fnn:
+            model_cfg.fnn = True
+            model_cfg.fnn_state_dim = 1
+            model_cfg.fnn_order = 2
+            model_cfg.fnn_topology_mode = "observed_sparse"
+            model_cfg.fnn_learn_dt = True
+            model_cfg.fnn_learn_gamma = True
+            model_cfg.fnn_learn_omega = True
+            model_cfg.fnn_learn_input_force_scale = True
+            model_cfg.predict_event_features = True
+            runs = [SweepRun(name="fnn_sparse_unit", model_cfg=model_cfg, lr=3e-3, seed=int(getattr(args, "seed", 0)))]
+        else:
+            runs = _focused_runs(model_cfg)
         return RunSuite(
             dataset="jodie",
             dataset_kwargs=asdict(jodie_cfg),
             train_cfg=train_cfg,
             model_cfg=model_cfg,
-            runs=_focused_runs(model_cfg),
+            runs=runs,
             epochs=2,
             eval_slices=EvalSlices(early_steps=10),
             save_jsonl_path=None,
         )
 
-    jodie_cfg = JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device)
+    jodie_fnn = bool(getattr(args, "jodie_fnn", False)) if args is not None else False
+    jodie_cfg = JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device, unit_force=jodie_fnn)
     train_cfg = _default_train_config(num_nodes=0, num_neg=20, log_every=2000, device=device)
     model_cfg = _base_model_config(small=False)
-    model_cfg.event_dim = None
+    model_cfg.event_dim = 1 if jodie_fnn else None
+    if jodie_fnn:
+        model_cfg.fnn = True
+        model_cfg.fnn_state_dim = 1
+        model_cfg.fnn_order = 2
+        model_cfg.fnn_topology_mode = "observed_sparse"
+        model_cfg.fnn_learn_dt = True
+        model_cfg.fnn_learn_gamma = True
+        model_cfg.fnn_learn_omega = True
+        model_cfg.fnn_learn_input_force_scale = True
+        model_cfg.predict_event_features = True
+        runs = [SweepRun(name="fnn_sparse_unit", model_cfg=model_cfg, lr=3e-3, seed=int(getattr(args, "seed", 0)))]
+    else:
+        runs = _full_runs(model_cfg)
     return RunSuite(
         dataset="jodie",
         dataset_kwargs=asdict(jodie_cfg),
         train_cfg=train_cfg,
         model_cfg=model_cfg,
-        runs=_full_runs(model_cfg),
+        runs=runs,
         epochs=6,
         eval_slices=EvalSlices(early_steps=10),
         save_jsonl_path=None,
