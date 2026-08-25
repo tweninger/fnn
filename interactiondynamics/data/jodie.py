@@ -58,6 +58,22 @@ class JODIEBinnedDataset(EventStreamDataset):
         self._num_bins = self._max_bin + 1
         self._t0 = t0
 
+        # JODIE interactions are chronological.  Record the contiguous span of
+        # each nonempty bin once, rather than scanning every event with a
+        # boolean mask for every requested bin.  The latter becomes especially
+        # costly on Reddit, whose hourly stream contains many bins.
+        if self._bin_id_all.numel() > 1 and bool((self._bin_id_all[1:] < self._bin_id_all[:-1]).any()):
+            raise ValueError("JODIE interactions must be sorted by timestamp before binning.")
+        self._active_bin_ids, counts = torch.unique_consecutive(
+            self._bin_id_all, return_counts=True
+        )
+        self._active_bin_offsets = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.long),
+                torch.cumsum(counts, dim=0),
+            ]
+        )
+
         # Compute split ranges in bin-space
         f_tr, f_va, f_te = cfg.split_fracs
         assert abs((f_tr + f_va + f_te) - 1.0) < 1e-6, "split_fracs must sum to 1.0"
@@ -89,14 +105,15 @@ class JODIEBinnedDataset(EventStreamDataset):
     def bins(self, split: str = "train") -> Iterable[EventBatch]:
         assert split in self._split_bins, f"unknown split={split}"
         b0, b1 = self._split_bins[split]
+        first = int(torch.searchsorted(self._active_bin_ids, torch.tensor(b0)).item())
+        last = int(torch.searchsorted(self._active_bin_ids, torch.tensor(b1), right=True).item())
         return _JODIEBinnedStream(
             src_all=self._src_all,
             dst_all=self._dst_all,
-            bin_id_all=self._bin_id_all,
             msg_all=self._msg_all,
+            active_bin_ids=self._active_bin_ids[first:last],
+            active_bin_offsets=self._active_bin_offsets[first : last + 1],
             unit_force=self.cfg.unit_force,
-            b0=b0,
-            b1=b1,
             device=self.cfg.device,
         )
 
@@ -105,31 +122,31 @@ class JODIEBinnedDataset(EventStreamDataset):
 class _JODIEBinnedStream(Iterable[EventBatch]):
     src_all: torch.Tensor
     dst_all: torch.Tensor
-    bin_id_all: torch.Tensor
     msg_all: Optional[torch.Tensor]
-    b0: int
-    b1: int
+    active_bin_ids: torch.Tensor
+    active_bin_offsets: torch.Tensor
     unit_force: bool = False
     device: Optional[torch.device] = None
 
-    def __iter__(self) -> Iterator[EventBatch]:
-        for b in range(self.b0, self.b1 + 1):
-            mask = (self.bin_id_all == b)
-            if not mask.any():
-                continue
+    def __len__(self) -> int:
+        return int(self.active_bin_ids.numel())
 
-            src = self.src_all[mask]
-            dst = self.dst_all[mask]
+    def __iter__(self) -> Iterator[EventBatch]:
+        for index, bin_id in enumerate(self.active_bin_ids.tolist()):
+            start = int(self.active_bin_offsets[index].item())
+            end = int(self.active_bin_offsets[index + 1].item())
+            src = self.src_all[start:end]
+            dst = self.dst_all[start:end]
             feats = (
                 torch.ones((src.numel(), 1), dtype=torch.float32)
                 if self.unit_force
-                else (self.msg_all[mask] if self.msg_all is not None else None)
+                else (self.msg_all[start:end] if self.msg_all is not None else None)
             )
 
             eb = EventBatch(
                 src=cast(torch.LongTensor, src),
                 dst=cast(torch.LongTensor, dst),
-                t=cast(torch.LongTensor, torch.full((src.numel(),), b, dtype=torch.long)),
+                t=cast(torch.LongTensor, torch.full((src.numel(),), bin_id, dtype=torch.long)),
                 features=feats,
             )
             if self.device is not None:

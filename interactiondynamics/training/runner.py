@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from interactiondynamics.core.config import ModelConfig
 from interactiondynamics.core.events import EventBatch, pack_independent_episode_bins
@@ -1119,7 +1120,9 @@ def run_one_experiment(
     configure_sparse_candidates = getattr(model, "set_sparse_topology_candidates", None)
     if callable(configure_sparse_candidates) and getattr(run.model_cfg, "fnn_topology_mode", "dense") == "observed_sparse":
         train_src, train_dst = [], []
-        for batch in ds.bins("train"):
+        train_bins = ds.bins("train")
+        print("  sparse FNN topology | collecting train interactions...", flush=True)
+        for batch in tqdm(train_bins, total=len(train_bins), desc="  collecting train bins", unit="bin", leave=False):
             if batch.num_events:
                 train_src.append(batch.src.detach().cpu())
                 train_dst.append(batch.dst.detach().cpu())
@@ -1142,6 +1145,7 @@ def run_one_experiment(
             (negative_dst + 1).remainder(spec.num_nodes),
             negative_dst,
         )
+        print("  sparse FNN topology | deduplicating train candidates...", flush=True)
         configure_sparse_candidates(
             torch.cat([observed_src, observed_src.repeat_interleave(train_cfg.num_neg)]),
             torch.cat([observed_dst, negative_dst.reshape(-1)]),

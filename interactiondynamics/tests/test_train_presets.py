@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
+from interactiondynamics.data.jodie import _JODIEBinnedStream
 from interactiondynamics.training.presets import (
     DIFFUSION_COMPARISON_PANEL,
     FIELD_COMPARISON_PANEL,
@@ -78,6 +79,22 @@ def test_physical_tasks_use_the_shared_event_prediction_panel() -> None:
     assert pairs == set(PHYSICAL_EVENT_COMPARISON_PANEL)
     assert all(run.model_cfg.predict_event_features for run in suite.runs)
     assert suite.runs[0].model_cfg.fnn
+
+
+def test_jodie_binned_stream_uses_precomputed_contiguous_offsets() -> None:
+    stream = _JODIEBinnedStream(
+        src_all=torch.tensor([0, 1, 2, 3]),
+        dst_all=torch.tensor([1, 2, 3, 0]),
+        msg_all=torch.tensor([[1.0], [2.0], [3.0], [4.0]]),
+        active_bin_ids=torch.tensor([2, 5]),
+        active_bin_offsets=torch.tensor([0, 3, 4]),
+    )
+
+    batches = list(stream)
+    assert len(stream) == 2
+    assert [batch.t[0].item() for batch in batches] == [2, 5]
+    assert [batch.num_events for batch in batches] == [3, 1]
+    assert torch.equal(batches[0].features, torch.tensor([[1.0], [2.0], [3.0]]))
 
 
 def test_wave_uses_the_shared_event_panel() -> None:

@@ -1097,8 +1097,13 @@ def main() -> None:
     _normalize_ift_variant_args(args)
     preset = "full" if args.command == "sweep" else args.command
     suite = build_suite(preset, device, dataset_override=args.dataset, args=args)
+    print(f"Loading dataset | preset={preset} dataset={suite.dataset}", flush=True)
     ds = load_dataset(suite.dataset, suite.dataset_kwargs)
     spec = ds.spec()
+    print(
+        f"Loaded dataset | name={spec.name} events={spec.num_events} bins={spec.num_bins}",
+        flush=True,
+    )
     objective_metric = parse_task_metric_spec(
         spec.extra.get("primary_metric") if spec.extra is not None else None
     )
