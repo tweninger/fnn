@@ -34,6 +34,7 @@ def build_model(spec: DataSpec, cfg: ModelConfig):
             omega_init=cfg.fnn_omega_init,
             dt=cfg.fnn_dt,
             learn_dt=cfg.fnn_learn_dt,
+            max_dt_omega=cfg.fnn_max_dt_omega,
             topology_init=cfg.fnn_topology_init,
             topology_mode=cfg.fnn_topology_mode,
             state_score=cfg.fnn_state_score,

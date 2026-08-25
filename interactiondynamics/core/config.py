@@ -151,6 +151,9 @@ class ModelConfig:
     fnn_input_force_scale_init: float = 1.0
     fnn_learn_input_force_scale: bool = False
     fnn_dt: float = 0.10
+    # Optional second-order integration stability bound. When set, the model
+    # enforces dt * omega < this value with a differentiable parameterization.
+    fnn_max_dt_omega: float | None = None
     # Observational streams have an unknown temporal scale. This learns one
     # positive global scale, not a full irregular-time model.
     fnn_learn_dt: bool = False

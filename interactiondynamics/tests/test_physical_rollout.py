@@ -58,3 +58,22 @@ def test_state_score_head_is_an_opt_in_topology_residual() -> None:
         dynamic_model.score(dynamic_state, events),
         dynamic_model._topology_logits_for(events.src, events.dst) + 2.0,
     )
+
+
+def test_fnn_dt_omega_bound_is_differentiable_and_strict() -> None:
+    model = FieldNeuralNetwork(
+        num_nodes=3,
+        force_dim=1,
+        state_dim=1,
+        gamma_init=0.1,
+        omega_init=0.7,
+        dt=0.1,
+        learn_dt=True,
+        learn_omega=True,
+        max_dt_omega=1.5,
+    )
+    assert model.dt_raw.requires_grad
+    with torch.no_grad():
+        model.dt_raw.fill_(30.0)
+    params = model.physical_parameters()
+    assert float((params["dt"] * params["omega"]).item()) < 1.5

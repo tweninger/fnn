@@ -37,6 +37,7 @@ class FieldNeuralNetwork(InteractionModel):
         omega_init: float,
         dt: float,
         learn_dt: bool = False,
+        max_dt_omega: float | None = None,
         topology_init: float = 0.0,
         topology_mode: str = "dense",
         state_score: bool = False,
@@ -63,6 +64,9 @@ class FieldNeuralNetwork(InteractionModel):
             raise ValueError("topology_mode must be 'dense' or 'observed_sparse'.")
         self.topology_mode = topology_mode
         self.state_score_enabled = bool(state_score)
+        self.max_dt_omega = None if max_dt_omega is None else float(max_dt_omega)
+        if self.max_dt_omega is not None and self.max_dt_omega <= 0:
+            raise ValueError("max_dt_omega must be positive when provided.")
         self._topology_init = float(topology_init)
         if order not in {1, 2}:
             raise ValueError(f"FieldNeuralNetwork order must be 1 or 2, got {order}.")
@@ -90,7 +94,15 @@ class FieldNeuralNetwork(InteractionModel):
             self.topology_logits = None
             self.sparse_topology_logits = nn.Parameter(torch.empty(0))
             self.register_buffer("sparse_candidate_keys", torch.empty(0, dtype=torch.long))
-        dt_raw = torch.tensor(_inverse_softplus(dt))
+        if self.max_dt_omega is None:
+            dt_raw = torch.tensor(_inverse_softplus(dt))
+        else:
+            initial_ratio = float(dt) * float(omega_init) / self.max_dt_omega
+            if not 0.0 < initial_ratio < 1.0:
+                raise ValueError(
+                    "dt * omega_init must lie below max_dt_omega when the stability bound is enabled."
+                )
+            dt_raw = torch.tensor(math.log(initial_ratio / (1.0 - initial_ratio)))
         if learn_dt:
             self.dt_raw = nn.Parameter(dt_raw)
         else:
@@ -214,10 +226,18 @@ class FieldNeuralNetwork(InteractionModel):
         return values
 
     def physical_parameters(self) -> dict[str, torch.Tensor]:
+        omega = F.softplus(self.omega_raw)
+        if self.max_dt_omega is None:
+            dt = F.softplus(self.dt_raw)
+        else:
+            # A bounded dt*omega keeps the semi-implicit second-order update
+            # inside a conservative stable region while preserving gradients
+            # at the cap (unlike a hard clamp).
+            dt = (self.max_dt_omega / omega.clamp_min(1e-8)) * torch.sigmoid(self.dt_raw)
         params = {
             "gamma": F.softplus(self.gamma_raw),
-            "omega": F.softplus(self.omega_raw),
-            "dt": F.softplus(self.dt_raw),
+            "omega": omega,
+            "dt": dt,
             "input_force_scale": F.softplus(self.input_force_scale_raw),
         }
         if self.force_decoder_mode == "field_difference":

@@ -730,11 +730,15 @@ def build_suite(
             model_cfg.fnn_order = 2
             model_cfg.fnn_topology_mode = "observed_sparse"
             model_cfg.fnn_state_score = True
+            model_cfg.fnn_max_dt_omega = 1.5
             model_cfg.fnn_learn_dt = True
             model_cfg.fnn_learn_gamma = True
             model_cfg.fnn_learn_omega = True
             model_cfg.fnn_learn_input_force_scale = True
             model_cfg.predict_event_features = True
+            # The FNN must complete its alternating schedule, while ordinary
+            # neural baselines stop after their first failed sparse val check.
+            train_cfg.early_stop_patience = 1
             # Compare the FNN with neural event models under the identical
             # unit-force stream and next-pair/force objective. The helper
             # enables FNN only for its own run, leaving the baselines intact.
@@ -762,11 +766,13 @@ def build_suite(
         model_cfg.fnn_order = 2
         model_cfg.fnn_topology_mode = "observed_sparse"
         model_cfg.fnn_state_score = True
+        model_cfg.fnn_max_dt_omega = 1.5
         model_cfg.fnn_learn_dt = True
         model_cfg.fnn_learn_gamma = True
         model_cfg.fnn_learn_omega = True
         model_cfg.fnn_learn_input_force_scale = True
         model_cfg.predict_event_features = True
+        train_cfg.early_stop_patience = 1
         runs = _physical_event_runs(model_cfg, seed=int(getattr(args, "seed", 0)))
     else:
         runs = _full_runs(model_cfg)

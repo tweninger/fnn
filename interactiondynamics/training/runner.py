@@ -1316,6 +1316,7 @@ def run_one_experiment(
     best_epoch = -1
     best_snapshot: dict[str, Any] = {}
     best_objective_value = float("nan")
+    non_improving_validation_checks = 0
     t0 = time.time()
     train_node_targets = ds.node_targets("train") if hasattr(ds, "node_targets") else None
     val_node_targets = ds.node_targets("val") if hasattr(ds, "node_targets") else None
@@ -1847,6 +1848,9 @@ def run_one_experiment(
             best_epoch = epoch
             best_snapshot = snapshot
             best_objective_value = candidate_objective
+            non_improving_validation_checks = 0
+        else:
+            non_improving_validation_checks += 1
 
         if save_jsonl_path is not None:
             row = {
@@ -1867,6 +1871,21 @@ def run_one_experiment(
             }
             with open(save_jsonl_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
+
+        # FNN alternating recovery is intentionally allowed to traverse its
+        # scheduled scalar phases. Baselines in the JODIE comparison panel
+        # stop after their first failed *sparse* validation check.
+        patience = int(getattr(train_cfg, "early_stop_patience", 0))
+        if (
+            patience > 0
+            and not bool(getattr(run.model_cfg, "fnn", False))
+            and non_improving_validation_checks >= patience
+        ):
+            print(
+                f"  early stop | validation did not improve at the next check "
+                f"(best epoch={best_epoch})"
+            )
+            break
 
     wall = time.time() - t0
     final_snapshot = snapshot

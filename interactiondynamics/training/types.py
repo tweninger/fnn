@@ -79,6 +79,9 @@ class TrainConfig:
     # Evaluate only after training by default. A positive value enables
     # periodic in-loop evaluation at this epoch interval.
     eval_every: Optional[int] = None
+    # Consecutive validation checks without improvement allowed before a
+    # comparison baseline stops. Zero disables early stopping.
+    early_stop_patience: int = 0
     # Opt-in wall-clock breakdown for training and evaluation stages.
     debug_timing: bool = False
 
