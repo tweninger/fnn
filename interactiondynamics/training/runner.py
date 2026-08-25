@@ -159,9 +159,13 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
         value = getattr(args, arg_name, None)
         if value is not None:
             setattr(cfg, config_name, value)
-    cfg.fnn_alternating_recovery = bool(
-        getattr(args, "fnn_alternating_recovery", False)
-    ) or bool(cfg.fnn_alternating_recovery)
+    # A JODIE comparison panel contains neural baselines alongside the FNN.
+    # Alternating scalar recovery is an FNN-specific schedule, so do not
+    # impose it on GRU/SetTransformer/Hopfield/LNN/HNN runs.
+    cfg.fnn_alternating_recovery = bool(cfg.fnn) and (
+        bool(getattr(args, "fnn_alternating_recovery", False))
+        or bool(cfg.fnn_alternating_recovery)
+    )
     return cfg
 
 

@@ -726,7 +726,6 @@ def build_suite(
         model_cfg = _base_model_config(small=False)
         model_cfg.event_dim = 1 if jodie_fnn else None
         if jodie_fnn:
-            model_cfg.fnn = True
             model_cfg.fnn_state_dim = 1
             model_cfg.fnn_order = 2
             model_cfg.fnn_topology_mode = "observed_sparse"
@@ -736,7 +735,10 @@ def build_suite(
             model_cfg.fnn_learn_omega = True
             model_cfg.fnn_learn_input_force_scale = True
             model_cfg.predict_event_features = True
-            runs = [SweepRun(name="fnn_sparse_unit", model_cfg=model_cfg, lr=3e-3, seed=int(getattr(args, "seed", 0)))]
+            # Compare the FNN with neural event models under the identical
+            # unit-force stream and next-pair/force objective. The helper
+            # enables FNN only for its own run, leaving the baselines intact.
+            runs = _physical_event_runs(model_cfg, seed=int(getattr(args, "seed", 0)))
         else:
             runs = _focused_runs(model_cfg)
         return RunSuite(
@@ -756,7 +758,6 @@ def build_suite(
     model_cfg = _base_model_config(small=False)
     model_cfg.event_dim = 1 if jodie_fnn else None
     if jodie_fnn:
-        model_cfg.fnn = True
         model_cfg.fnn_state_dim = 1
         model_cfg.fnn_order = 2
         model_cfg.fnn_topology_mode = "observed_sparse"
@@ -766,7 +767,7 @@ def build_suite(
         model_cfg.fnn_learn_omega = True
         model_cfg.fnn_learn_input_force_scale = True
         model_cfg.predict_event_features = True
-        runs = [SweepRun(name="fnn_sparse_unit", model_cfg=model_cfg, lr=3e-3, seed=int(getattr(args, "seed", 0)))]
+        runs = _physical_event_runs(model_cfg, seed=int(getattr(args, "seed", 0)))
     else:
         runs = _full_runs(model_cfg)
     return RunSuite(
