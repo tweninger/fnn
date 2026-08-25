@@ -141,7 +141,7 @@ Available subcommands:
 
 Common dataset flags:
 
-- `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand.
+- `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand. For JODIE, use `--dataset jodie wikipedia`, `reddit`, `mooc`, or `lastfm`; omitting the benchmark retains the Wikipedia default.
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
 - `--synthetic-topology {ring,grid,torus,doorway,swisscheese}`: choose the domain independently for `diffusion`, `wave`, or `coupled_oscillator`; the default is `ring`.
 - `--synthetic-num-nodes N`: override synthetic node count.

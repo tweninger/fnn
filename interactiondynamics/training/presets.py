@@ -721,7 +721,12 @@ def build_suite(
             )
 
         jodie_fnn = bool(getattr(args, "jodie_fnn", False)) if args is not None else False
-        jodie_cfg = JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device, unit_force=jodie_fnn)
+        jodie_cfg = JODIEConfig(
+            root="./data/JODIE",
+            name=str(getattr(args, "jodie_name", "Wikipedia")),
+            device=device,
+            unit_force=jodie_fnn,
+        )
         train_cfg = _default_train_config(num_nodes=0, num_neg=10, log_every=500, device=device)
         model_cfg = _base_model_config(small=False)
         model_cfg.event_dim = 1 if jodie_fnn else None
@@ -757,7 +762,12 @@ def build_suite(
         )
 
     jodie_fnn = bool(getattr(args, "jodie_fnn", False)) if args is not None else False
-    jodie_cfg = JODIEConfig(root="./data/JODIE", name="Wikipedia", device=device, unit_force=jodie_fnn)
+    jodie_cfg = JODIEConfig(
+        root="./data/JODIE",
+        name=str(getattr(args, "jodie_name", "Wikipedia")),
+        device=device,
+        unit_force=jodie_fnn,
+    )
     train_cfg = _default_train_config(num_nodes=0, num_neg=20, log_every=2000, device=device)
     model_cfg = _base_model_config(small=False)
     model_cfg.event_dim = 1 if jodie_fnn else None

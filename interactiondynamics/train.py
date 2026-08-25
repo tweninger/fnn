@@ -36,6 +36,12 @@ TARGET_MODE_CHOICES = ("raw", "residual")
 EDGE_TARGET_SCALE_CHOICES = ("raw", "zscore")
 PREDICTION_MODE_CHOICES = ("state", "delta", "state_plus_delta")
 DATASET_CHOICES = ("toy", "jodie", "synthetic")
+JODIE_DATASET_CHOICES = {
+    "wikipedia": "Wikipedia",
+    "reddit": "Reddit",
+    "mooc": "MOOC",
+    "lastfm": "LastFM",
+}
 PRESET_CHOICES = ("smoke", "quick", "full")
 LEGACY_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
 PUBLIC_SYNTHETIC_TASKS = tuple(
@@ -43,14 +49,52 @@ PUBLIC_SYNTHETIC_TASKS = tuple(
 )
 
 
+class _DatasetArgumentAction(argparse.Action):
+    """Parse ``--dataset jodie [benchmark]`` while keeping other datasets simple."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Sequence[str],
+        option_string: str | None = None,
+    ) -> None:
+        if not values or len(values) > 2:
+            parser.error("--dataset accepts DATASET, or `jodie` followed by a JODIE benchmark name.")
+        dataset = values[0].lower()
+        if dataset not in DATASET_CHOICES:
+            parser.error(f"unknown dataset {values[0]!r}; choose from {', '.join(DATASET_CHOICES)}")
+        if dataset != "jodie":
+            if len(values) != 1:
+                parser.error(f"--dataset {dataset} does not accept a benchmark name.")
+            setattr(namespace, self.dest, dataset)
+            return
+
+        benchmark = "wikipedia" if len(values) == 1 else values[1].lower()
+        jodie_name = JODIE_DATASET_CHOICES.get(benchmark)
+        if jodie_name is None:
+            parser.error(
+                "unknown JODIE benchmark "
+                f"{benchmark!r}; choose from {', '.join(JODIE_DATASET_CHOICES)}"
+            )
+        setattr(namespace, self.dest, dataset)
+        setattr(namespace, "jodie_name", jodie_name)
+
+
 def _build_common_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
+    common.set_defaults(jodie_name="Wikipedia")
     data_group = common.add_argument_group("dataset")
     data_group.add_argument(
         "--dataset",
-        choices=DATASET_CHOICES,
+        nargs="+",
+        action=_DatasetArgumentAction,
+        metavar="DATASET [JODIE_BENCHMARK]",
         default=None,
-        help="Optional dataset override when supported by the command.",
+        help=(
+            "Optional dataset override. Use `--dataset jodie wikipedia`, "
+            "`reddit`, `mooc`, or `lastfm`; omitting the benchmark uses Wikipedia."
+        ),
     )
     data_group.add_argument(
         "--synthetic-task",

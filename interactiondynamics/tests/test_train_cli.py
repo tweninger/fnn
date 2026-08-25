@@ -38,6 +38,28 @@ def test_parse_args_supports_subcommands_and_common_flags() -> None:
     assert args.prediction_mode == "delta"
 
 
+@pytest.mark.parametrize(
+    ("benchmark", "expected_name"),
+    [("wikipedia", "Wikipedia"), ("reddit", "Reddit"), ("mooc", "MOOC"), ("lastfm", "LastFM")],
+)
+def test_parse_args_selects_jodie_benchmark(benchmark: str, expected_name: str) -> None:
+    args = parse_args(["quick", "--dataset", "jodie", benchmark])
+
+    assert args.dataset == "jodie"
+    assert args.jodie_name == expected_name
+
+
+def test_parse_args_defaults_jodie_to_wikipedia() -> None:
+    args = parse_args(["quick", "--dataset", "jodie"])
+
+    assert args.jodie_name == "Wikipedia"
+
+
+def test_parse_args_rejects_unknown_jodie_benchmark() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["quick", "--dataset", "jodie", "github"])
+
+
 def test_parse_args_supports_repeated_raindrop_flag() -> None:
     args = parse_args(
         [
