@@ -89,11 +89,18 @@ def _linear_hvf_readout_snapshot(model) -> dict[str, float]:
 
 
 def _parameter_recovery_snapshot(model, hidden_truth: Optional[dict[str, Any]], device: torch.device) -> dict[str, float]:
-    """Return cheap synthetic-parameter recovery metrics without stream evaluation."""
+    """Return current FNN physical scalars plus synthetic recovery errors when known."""
+    snapshot: dict[str, float] = {}
+    physical_parameters_fn = getattr(model, "physical_parameters", None)
+    if callable(physical_parameters_fn):
+        for name, value in physical_parameters_fn().items():
+            snapshot[f"learned_{name}"] = float(value.detach().item())
+
     recovery_fn = getattr(model, "recovery_metrics", None)
     if hidden_truth is None or not callable(recovery_fn):
-        return {}
-    return recovery_fn(hidden_truth["adjacency"].to(device), hidden_truth["params"])
+        return snapshot
+    snapshot.update(recovery_fn(hidden_truth["adjacency"].to(device), hidden_truth["params"]))
+    return snapshot
 
 
 def short_run_label(run: SweepRun) -> str:
