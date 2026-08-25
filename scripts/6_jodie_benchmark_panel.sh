@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Experiment 6: JODIE benchmark panel with one full baseline comparison.
+# Experiment 6: full JODIE benchmark panels.
 #
-# Wikipedia runs the FNN plus every neural baseline once.  The remaining JODIE
-# datasets run the same alternating FNN recovery schedule alone, so they test
-# transfer across datasets without multiplying the expensive baseline panel.
+# Each requested JODIE dataset runs the FNN plus every neural baseline once.
 set -euo pipefail
 
 PYTHON="${PYTHON:-venv/bin/python}"
@@ -12,12 +10,10 @@ MAX_PARALLEL="${MAX_PARALLEL:-2}"
 RESULTS_DIR="${RESULTS_DIR:-derived/results/jodie_benchmark_panel}"
 LOG_DIR="${LOG_DIR:-derived/logs/jodie_benchmark_panel}"
 read -r -a BENCHMARKS <<< "${BENCHMARKS:-wikipedia reddit mooc lastfm}"
-FULL_BENCHMARK="${FULL_BENCHMARK:-wikipedia}"
 # The panel order is FNN, sum-GRU, DeepSets-GRU, SetTransformer-GRU, Hopfield,
 # SetTransformer-LNN, SetTransformer-HNN.  Seven includes every comparator;
 # set this to six to omit only the final HNN run.
-WIKIPEDIA_MAX_RUNS="${WIKIPEDIA_MAX_RUNS:-7}"
-OTHER_MAX_RUNS="${OTHER_MAX_RUNS:-1}"
+MAX_RUNS="${MAX_RUNS:-7}"
 SEED="${SEED:-0}"
 
 TOPOLOGY_EPOCHS="${TOPOLOGY_EPOCHS:-30}"
@@ -31,10 +27,9 @@ mkdir -p "$RESULTS_DIR" "$LOG_DIR"
 read -r -a GPU_ID_LIST <<< "$GPU_IDS"
 (( ${#GPU_ID_LIST[@]} > 0 )) || { echo "GPU_IDS must contain at least one GPU ID" >&2; exit 2; }
 (( MAX_PARALLEL > 0 )) || { echo "MAX_PARALLEL must be at least one" >&2; exit 2; }
-(( WIKIPEDIA_MAX_RUNS >= 1 && WIKIPEDIA_MAX_RUNS <= 7 )) || {
-  echo "WIKIPEDIA_MAX_RUNS must be between 1 and 7" >&2; exit 2;
+(( MAX_RUNS >= 1 && MAX_RUNS <= 7 )) || {
+  echo "MAX_RUNS must be between 1 and 7" >&2; exit 2;
 }
-(( OTHER_MAX_RUNS == 1 )) || { echo "OTHER_MAX_RUNS must be 1 so non-Wikipedia datasets run FNN only" >&2; exit 2; }
 
 active_jobs=0
 launch_count=0
@@ -65,11 +60,9 @@ run_one() {
 }
 
 for benchmark in "${BENCHMARKS[@]}"; do
-  max_runs="$OTHER_MAX_RUNS"
-  [[ "$benchmark" == "$FULL_BENCHMARK" ]] && max_runs="$WIKIPEDIA_MAX_RUNS"
   wait_for_slot
   gpu_id="${GPU_ID_LIST[$((launch_count % ${#GPU_ID_LIST[@]}))]}"
-  run_one "$gpu_id" "$benchmark" "$max_runs" &
+  run_one "$gpu_id" "$benchmark" "$MAX_RUNS" &
   active_jobs=$((active_jobs + 1))
   launch_count=$((launch_count + 1))
 done
