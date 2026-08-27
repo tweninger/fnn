@@ -14,12 +14,17 @@ read -r -a BENCHMARKS <<< "${BENCHMARKS:-wikipedia reddit mooc lastfm}"
 # SetTransformer-LNN, SetTransformer-HNN.  Seven includes every comparator;
 # set this to six to omit only the final HNN run.
 MAX_RUNS="${MAX_RUNS:-7}"
+# Set RUN_OFFSET=1 and MAX_RUNS=6 to restart after an already-completed FNN.
+RUN_OFFSET="${RUN_OFFSET:-0}"
 SEED="${SEED:-0}"
 
 TOPOLOGY_EPOCHS="${TOPOLOGY_EPOCHS:-30}"
 PHYSICAL_EPOCHS="${PHYSICAL_EPOCHS:-10}"
 CYCLES="${CYCLES:-2}"
-EPOCHS=$(( CYCLES * (TOPOLOGY_EPOCHS + 4 * PHYSICAL_EPOCHS) ))
+# One initial topology fit, followed by each physical sweep and its topology
+# recovery block.  This ensures the selected run ends with the scorer adapted
+# to the latest physical parameters.
+EPOCHS=$(( TOPOLOGY_EPOCHS + CYCLES * (4 * PHYSICAL_EPOCHS + TOPOLOGY_EPOCHS) ))
 EVAL_EVERY="${EVAL_EVERY:-10}"
 ROLLOUT_HORIZON="${ROLLOUT_HORIZON:-20}"
 
@@ -29,6 +34,9 @@ read -r -a GPU_ID_LIST <<< "$GPU_IDS"
 (( MAX_PARALLEL > 0 )) || { echo "MAX_PARALLEL must be at least one" >&2; exit 2; }
 (( MAX_RUNS >= 1 && MAX_RUNS <= 7 )) || {
   echo "MAX_RUNS must be between 1 and 7" >&2; exit 2;
+}
+(( RUN_OFFSET >= 0 && RUN_OFFSET + MAX_RUNS <= 7 )) || {
+  echo "RUN_OFFSET + MAX_RUNS must select between 1 and 7 panel runs" >&2; exit 2;
 }
 
 active_jobs=0
@@ -42,15 +50,17 @@ wait_for_slot() {
 
 run_one() {
   local gpu_id="$1" benchmark="$2" max_runs="$3"
-  local label="jodie_${benchmark}_seed${SEED}_top${TOPOLOGY_EPOCHS}_phys${PHYSICAL_EPOCHS}_cycles${CYCLES}_epochs${EPOCHS}_runs${max_runs}"
+  local offset_suffix=""
+  (( RUN_OFFSET > 0 )) && offset_suffix="_from${RUN_OFFSET}"
+  local label="jodie_${benchmark}_seed${SEED}_top${TOPOLOGY_EPOCHS}_phys${PHYSICAL_EPOCHS}_cycles${CYCLES}_epochs${EPOCHS}_runs${max_runs}${offset_suffix}"
   local result="$RESULTS_DIR/${label}.jsonl"
   local log="$LOG_DIR/${label}.log"
   [[ -e "$result" ]] && { echo "Skipping existing: $result"; return; }
 
-  echo "=== JODIE ${benchmark} | runs=${max_runs}, seed=${SEED}, gpu=${gpu_id} ==="
+  echo "=== JODIE ${benchmark} | offset=${RUN_OFFSET}, runs=${max_runs}, seed=${SEED}, gpu=${gpu_id} ==="
   OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON" -u -m interactiondynamics.train quick \
     --dataset jodie "$benchmark" --jodie-fnn --seed "$SEED" \
-    --epochs "$EPOCHS" --max-runs "$max_runs" --eval-every "$EVAL_EVERY" \
+    --epochs "$EPOCHS" --run-offset "$RUN_OFFSET" --max-runs "$max_runs" --eval-every "$EVAL_EVERY" \
     --rollout-horizon "$ROLLOUT_HORIZON" \
     --fnn-alternating-recovery \
     --fnn-alternating-topology-epochs "$TOPOLOGY_EPOCHS" \

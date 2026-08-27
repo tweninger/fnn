@@ -869,6 +869,10 @@ def evaluate_physical_force_rollout(
     # Teacher-force only the history needed to establish each rollout start.
     # Keeping cached states lets every window begin from identical observed
     # history while its future is entirely model-generated.
+    # Retaining one full recurrent state per potential rollout start can be
+    # many gigabytes for high-dimensional JODIE baselines. Keep this history
+    # in host memory and bring back only the state for the current window.
+    history_device = torch.device("cpu")
     states_after_observed: list[Optional[ModelState]] = [None] * len(events_seq)
     state: Optional[ModelState] = None
     previous_episode: Optional[int] = None
@@ -877,7 +881,9 @@ def evaluate_physical_force_rollout(
         if state is None or (episode is not None and previous_episode is not None and episode != previous_episode):
             state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
         state, _ = model.step(state, events)
-        states_after_observed[idx] = state.clone(detach=True) if state is not None else None
+        states_after_observed[idx] = (
+            state.clone(detach=True).to(history_device) if state is not None else None
+        )
         if state is not None:
             state.detach_()
         previous_episode = episode
@@ -939,7 +945,7 @@ def evaluate_physical_force_rollout(
         rollout_state = states_after_observed[start_idx]
         if rollout_state is None:
             continue
-        rollout_state = rollout_state.clone(detach=True)
+        rollout_state = rollout_state.clone(detach=True).to(device)
         # Matched no-update baseline: establish the same observed history at
         # the rollout start, then hold the recurrent state fixed. It receives
         # the same future source/destination queries but neither generated

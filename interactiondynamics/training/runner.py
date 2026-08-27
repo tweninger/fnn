@@ -337,9 +337,14 @@ def _train_one_epoch_physical_scalar_recovery(
     if not losses:
         return {"loss": 0.0, "steps": 0}
     objective = torch.stack(losses).sum()
-    objective.backward()
-    if cfg.grad_clip and cfg.grad_clip > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+    # Some scalar phases can begin with a trajectory whose observed force
+    # loss is locally independent of that scalar (for example, damping before
+    # a nonzero field has propagated).  There is simply no update to make for
+    # that epoch; avoid calling backward on a constant tensor.
+    if objective.requires_grad:
+        objective.backward()
+        if cfg.grad_clip and cfg.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
     optimizer.step()
     out = {"loss": float(torch.stack(losses).mean().detach().item()), "steps": len(losses)}
     for key, value in metric_sums.items():
@@ -1239,7 +1244,7 @@ def run_one_experiment(
         not bool(getattr(run.model_cfg, "fnn_learn_physical_params", False))
         and any(
             bool(getattr(run.model_cfg, field, False))
-            for field in ("fnn_learn_gamma", "fnn_learn_omega", "fnn_learn_force_scale")
+            for field in ("fnn_learn_dt", "fnn_learn_gamma", "fnn_learn_omega", "fnn_learn_force_scale")
         )
     )
     alternating_recovery = bool(getattr(run.model_cfg, "fnn_alternating_recovery", False))
@@ -1248,19 +1253,22 @@ def run_one_experiment(
     topology_parameter = None
     physical_parameter_names: dict[int, str] = {}
     if alternating_recovery:
-        topology_parameter = getattr(model, "topology_logits", None)
-        if not isinstance(topology_parameter, torch.nn.Parameter):
-            topology_parameter = getattr(model, "sparse_topology_logits", None)
-        if not isinstance(topology_parameter, torch.nn.Parameter):
-            raise ValueError("Alternating FNN recovery requires a trainable FNN topology operator.")
+        oracle_topology = bool(getattr(run.model_cfg, "fnn_oracle_topology", False))
+        if not oracle_topology:
+            topology_parameter = getattr(model, "topology_logits", None)
+            if not isinstance(topology_parameter, torch.nn.Parameter):
+                topology_parameter = getattr(model, "sparse_topology_logits", None)
+            if not isinstance(topology_parameter, torch.nn.Parameter):
+                raise ValueError("Alternating FNN recovery requires a trainable FNN topology operator.")
         if not physical_params:
             raise ValueError("Alternating FNN recovery requires at least one learnable physical scalar.")
-        # The topology phase also trains any nonphysical readout weights (the
-        # sparse JODIE MLP), while all physical raws remain frozen.
         topology_phase_params = list(other_params)
-        topology_optimizer = torch.optim.Adam(
-            topology_phase_params, lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
-        )
+        if not oracle_topology:
+            # The topology phase also trains any nonphysical readout weights
+            # (the sparse JODIE MLP), while all physical raws remain frozen.
+            topology_optimizer = torch.optim.Adam(
+                topology_phase_params, lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
+            )
         if getattr(run.model_cfg, "fnn_topology_mode", "dense") == "observed_sparse":
             # A JODIE stream is one long observational trajectory; full BPTT
             # for each scalar phase is not memory-safe. The phase schedule is
@@ -1296,28 +1304,48 @@ def run_one_experiment(
 
     def alternating_phase(epoch: int) -> tuple[str, object]:
         """Activate topology or one scheduled physical scalar for ``epoch``."""
-        assert topology_optimizer is not None and physical_optimizer is not None
+        assert physical_optimizer is not None
         topology_epochs = int(getattr(run.model_cfg, "fnn_alternating_topology_epochs", 20))
         physical_epochs = int(getattr(run.model_cfg, "fnn_alternating_physical_epochs", 50))
         preferred_raw_order = [
             "omega_raw", "gamma_raw", "force_scale_raw", "input_force_scale_raw", "dt_raw"
         ]
+        # Omega is stored on every FNN for a uniform parameter interface, but
+        # the first-order diffusion update never reads it.  Excluding it here
+        # keeps the alternating schedule identifiable and consistent with the
+        # CLI's expected phase count.
+        if getattr(model, "order", None) == 1:
+            preferred_raw_order.remove("omega_raw")
         active_raw_names = set(physical_parameter_names.values())
         scalar_order = [name.removesuffix("_raw") for name in preferred_raw_order if name in active_raw_names]
-        cycle_epochs = topology_epochs + physical_epochs * len(scalar_order)
-        block_offset = (epoch - 1) % cycle_epochs
+        oracle_topology = bool(getattr(run.model_cfg, "fnn_oracle_topology", False))
         phase = "topology"
         active_scalar = None
-        if block_offset >= topology_epochs:
-            active_scalar = scalar_order[(block_offset - topology_epochs) // physical_epochs]
+        if oracle_topology:
+            cycle_epochs = physical_epochs * len(scalar_order)
+            block_offset = (epoch - 1) % cycle_epochs
+            active_scalar = scalar_order[block_offset // physical_epochs]
             phase = f"physical_{active_scalar}"
-        assert topology_parameter is not None
+        elif epoch > topology_epochs:
+            # Start with a topology fit, then let every complete physical
+            # sweep be followed by topology recovery.  Ending on topology is
+            # important: the physical pass changes the state dynamics and the
+            # scorer must be allowed to re-align before model selection.
+            physical_sweep_epochs = physical_epochs * len(scalar_order)
+            cycle_epochs = physical_sweep_epochs + topology_epochs
+            block_offset = (epoch - topology_epochs - 1) % cycle_epochs
+            if block_offset < physical_sweep_epochs:
+                active_scalar = scalar_order[block_offset // physical_epochs]
+                phase = f"physical_{active_scalar}"
         for parameter in other_params:
-            parameter.requires_grad_(active_scalar is None)
+            parameter.requires_grad_(active_scalar is None and not oracle_topology)
         for parameter in physical_params:
             raw_name = physical_parameter_names[id(parameter)]
             parameter.requires_grad_(raw_name == f"{active_scalar}_raw")
-        return phase, topology_optimizer if active_scalar is None else physical_optimizer
+        if active_scalar is None:
+            assert topology_optimizer is not None
+            return phase, topology_optimizer
+        return phase, physical_optimizer
 
     if eval_slices is None:
         eval_slices = EvalSlices(early_steps=10)

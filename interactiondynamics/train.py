@@ -177,6 +177,12 @@ def _build_common_parser() -> argparse.ArgumentParser:
         help="Optional cap on the number of runs to execute after filtering.",
     )
     train_group.add_argument(
+        "--run-offset",
+        type=int,
+        default=0,
+        help="Skip this many configured runs before applying --max-runs.",
+    )
+    train_group.add_argument(
         "--epochs",
         type=int,
         default=None,
@@ -303,7 +309,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
         "--fnn-alternating-topology-epochs",
         type=int,
         default=None,
-        help="Topology-only epochs in each alternating-recovery cycle.",
+        help="Initial topology-only epochs and topology-recovery epochs after each physical sweep.",
     )
     physical_model_group.add_argument(
         "--fnn-alternating-physical-epochs",
@@ -315,7 +321,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
         "--fnn-alternating-cycles",
         type=int,
         default=None,
-        help="Number of topology/scalar alternating-recovery cycles.",
+        help="Number of physical sweeps, each followed by topology recovery.",
     )
     physical_model_group.add_argument("--lnn-dt", type=float, default=None, help="LNN integration step.")
     physical_model_group.add_argument("--lnn-hidden", type=int, default=None, help="LNN potential-network width.")
@@ -1214,16 +1220,23 @@ def main() -> None:
             )
         if not jodie_fnn_task and (args.fnn_learn_gamma or args.fnn_learn_omega or args.fnn_learn_force_scale):
             raise ValueError("--fnn-alternating-recovery does not accept selective --fnn-learn-* flags.")
-        if args.fnn_oracle_topology:
-            raise ValueError("--fnn-alternating-recovery cannot use --fnn-oracle-topology.")
         topology_epochs = args.fnn_alternating_topology_epochs or 20
         physical_epochs = args.fnn_alternating_physical_epochs or 50
         cycles = args.fnn_alternating_cycles or 2
         scalar_phases = 4 if jodie_fnn_task else (2 if args.synthetic_task == "diffusion" else 3)
-        expected_epochs = cycles * (topology_epochs + scalar_phases * physical_epochs)
+        if not jodie_fnn_task and args.fnn_learn_dt:
+            scalar_phases += 1
+        physical_sweep_epochs = scalar_phases * physical_epochs
+        if args.fnn_oracle_topology:
+            expected_epochs = cycles * physical_sweep_epochs
+        else:
+            # Initial topology fit, then each physical sweep is followed by a
+            # topology-recovery block so the schedule ends on topology.
+            expected_epochs = topology_epochs + cycles * (physical_sweep_epochs + topology_epochs)
         if args.epochs != expected_epochs:
             raise ValueError(
-                "--epochs must equal cycles × (topology epochs + physical epochs) "
+                "--epochs must equal the alternating schedule (initial topology, each physical sweep, "
+                "and its trailing topology recovery; oracle-fixed runs use physical sweeps only) "
                 f"for alternating recovery; expected {expected_epochs}, got {args.epochs}."
             )
     if args.rollout_train_steps < 1:
@@ -1252,6 +1265,10 @@ def main() -> None:
             )
         )
 
+    if args.run_offset < 0:
+        raise ValueError("--run-offset must be nonnegative.")
+    if args.run_offset:
+        runs = runs[args.run_offset :]
     if args.max_runs is not None:
         runs = runs[: args.max_runs]
     _validate_rollout_training_selection(runs, base_train_cfg.rollout_train_steps)

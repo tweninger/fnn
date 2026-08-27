@@ -113,6 +113,24 @@ class ModelState:
             aux=_copy(self.aux), # type: ignore
         )
 
+    def to(self, device: torch.device | str) -> "ModelState":
+        """Move all tensor-backed state, including auxiliary history, in place."""
+        def _move(x):
+            if x is None:
+                return None
+            if torch.is_tensor(x):
+                return x.to(device)
+            if isinstance(x, dict):
+                return {key: _move(value) for key, value in x.items()}
+            if isinstance(x, (list, tuple)):
+                return type(x)(_move(value) for value in x)
+            return x
+
+        self.node = _move(self.node)
+        self.node_prev = _move(self.node_prev)
+        self.aux = _move(self.aux)
+        return self
+
 
 class EventEncoder(nn.Module, ABC):
     """
