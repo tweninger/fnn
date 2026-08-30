@@ -363,6 +363,11 @@ class FieldNeuralNetwork(InteractionModel):
             "true_gamma": float(truth_params["gamma"]),
             "gamma_abs_error": abs(learned_gamma - float(truth_params["gamma"])),
         }
+        if "dt" in truth_params:
+            learned_dt = float(params["dt"].item())
+            metrics["learned_dt"] = learned_dt
+            metrics["true_dt"] = float(truth_params["dt"])
+            metrics["dt_abs_error"] = abs(learned_dt - float(truth_params["dt"]))
         if "omega" in truth_params:
             learned_omega = float(params["omega"].item())
             metrics["learned_omega"] = learned_omega
