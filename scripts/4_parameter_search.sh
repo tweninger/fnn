@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Experiment 4: staged FNN physical-parameter recovery.
+# Experiment 4: FNN physical-parameter recovery with oracle topology.
 #
-# The identifiable stages hold the binary topology oracle fixed while learning
-# exactly one scalar.  Topology is then recovered with true scalar parameters.
-# ``joint`` is available as an explicit opt-in once the controlled stages pass.
-# Every JSONL row includes parameter_trace without costly per-epoch evaluation.
+# The default joint stage co-trains every applicable physical scalar.  Each
+# sweep member perturbs one scalar initially, making convergence trajectories
+# directly comparable while the binary topology remains fixed at truth.
 set -euo pipefail
 
 PYTHON="${PYTHON:-venv/bin/python}"
@@ -13,9 +12,9 @@ MAX_PARALLEL="${MAX_PARALLEL:-4}"
 RESULTS_DIR="${RESULTS_DIR:-derived/results/parameter_recovery}"
 LOG_DIR="${LOG_DIR:-derived/logs/parameter_recovery}"
 read -r -a SEEDS <<< "${SEEDS:-0 1 2 3 4}"
-# Gamma and topology recovery are already validated. Recheck the two scalars
-# whose full-trajectory curvature needs a smaller step size.
-read -r -a STAGES <<< "${STAGES:-omega force_scale}"
+# Learn the identifiable physical scalars jointly while the topology oracle is
+# fixed.  Each run perturbs one scalar initially, then co-trains every scalar.
+read -r -a STAGES <<< "${STAGES:-joint}"
 EPOCHS="${EPOCHS:-100}"
 NUM_NODES="${NUM_NODES:-64}"
 NUM_EPISODES="${NUM_EPISODES:-10}"
@@ -23,6 +22,7 @@ NUM_BINS="${NUM_BINS:-72}"
 # Gamma uses the previously validated scaled step. Omega and force scale have
 # sharper recovery curvature, so they use a conservative per-epoch SGD step.
 GAMMA_RECOVERY_LR="${GAMMA_RECOVERY_LR:-$(awk -v bins="$NUM_BINS" 'BEGIN { printf "%.8g", 0.003 * (bins - 1) }')}"
+DT_RECOVERY_LR="${DT_RECOVERY_LR:-0.01}"
 OMEGA_RECOVERY_LR="${OMEGA_RECOVERY_LR:-0.01}"
 FORCE_SCALE_RECOVERY_LR="${FORCE_SCALE_RECOVERY_LR:-0.01}"
 EVENTS_PER_BIN="${EVENTS_PER_BIN:-257}"
@@ -41,17 +41,18 @@ wait_for_slot() { if (( active_jobs >= MAX_PARALLEL )); then wait -n; active_job
 
 run_one() {
   local gpu_id="$1" stage="$2" dynamic="$3" parameter="$4" initial_value="$5" seed="$6"
-  local true_gamma true_omega true_force init_gamma init_omega init_force init_topology
+  local true_dt true_gamma true_omega true_force init_dt init_gamma init_omega init_force init_topology
   case "$dynamic" in
     # Diffusion is first order. Omega is unused by its update but must remain
     # positive because the FNN parameterization uses a positive transform.
-    diffusion) true_gamma=0.18; true_omega=0.70; true_force=0.80 ;;
-    wave) true_gamma=0.15; true_omega=0.80; true_force=0.80 ;;
-    coupled_oscillator) true_gamma=0.10; true_omega=1.15; true_force=0.65 ;;
+    diffusion) true_dt=0.10; true_gamma=0.18; true_omega=0.70; true_force=0.80 ;;
+    wave) true_dt=0.10; true_gamma=0.15; true_omega=0.80; true_force=0.80 ;;
+    coupled_oscillator) true_dt=0.10; true_gamma=0.10; true_omega=1.15; true_force=0.65 ;;
     *) echo "Unknown dynamic: $dynamic" >&2; return 2 ;;
   esac
-  init_gamma="$true_gamma"; init_omega="$true_omega"; init_force="$true_force"; init_topology=0.0
+  init_dt="$true_dt"; init_gamma="$true_gamma"; init_omega="$true_omega"; init_force="$true_force"; init_topology=0.0
   case "$parameter" in
+    dt) init_dt="$initial_value" ;;
     gamma) init_gamma="$initial_value" ;;
     omega) init_omega="$initial_value" ;;
     force_scale) init_force="$initial_value" ;;
@@ -60,6 +61,7 @@ run_one() {
   esac
   local scalar_lr
   case "$stage" in
+    dt) scalar_lr="$DT_RECOVERY_LR" ;;
     gamma) scalar_lr="$GAMMA_RECOVERY_LR" ;;
     omega) scalar_lr="$OMEGA_RECOVERY_LR" ;;
     force_scale) scalar_lr="$FORCE_SCALE_RECOVERY_LR" ;;
@@ -69,15 +71,16 @@ run_one() {
   local label="paramrecovery_${stage}_${dynamic}_ring_${parameter}init${value_tag}_recoverylr${lr_tag}_models1_epochs${EPOCHS}_nodes${NUM_NODES}_episodes${NUM_EPISODES}_bins${NUM_BINS}_events${EVENTS_PER_BIN}_dropint${RAINDROP_INTERVAL}_tau0_trainroll1_rollhorizon${ROLLOUT_HORIZON}_seed${seed}"
   local result="$RESULTS_DIR/${label}.jsonl" log="$LOG_DIR/${label}.log"
   [[ -e "$result" ]] && { echo "Skipping existing: $result"; return; }
-  local physics_args=(--synthetic-dt 0.10 --synthetic-gamma "$true_gamma" --synthetic-force-scale "$true_force")
+  local physics_args=(--synthetic-dt "$true_dt" --synthetic-gamma "$true_gamma" --synthetic-force-scale "$true_force")
   [[ "$dynamic" != diffusion ]] && physics_args+=(--synthetic-omega "$true_omega")
   local recovery_args=()
   case "$stage" in
+    dt) recovery_args=(--fnn-learn-dt --fnn-oracle-topology) ;;
     gamma) recovery_args=(--fnn-learn-gamma --fnn-oracle-topology) ;;
     omega) recovery_args=(--fnn-learn-omega --fnn-oracle-topology) ;;
     force_scale) recovery_args=(--fnn-learn-force-scale --fnn-oracle-topology) ;;
     topology) recovery_args=() ;;
-    joint) recovery_args=(--fnn-learn-physical-params --fnn-oracle-topology) ;;
+    joint) recovery_args=(--fnn-learn-physical-params --fnn-learn-dt --fnn-oracle-topology) ;;
     *) echo "Unknown recovery stage: $stage" >&2; return 2 ;;
   esac
   echo "=== ${stage} | ${dynamic}: ${parameter}_init=${initial_value}, seed=${seed}, gpu=${gpu_id} ==="
@@ -89,7 +92,7 @@ run_one() {
     --max-runs 1 --num-bins "$NUM_BINS" --rollout-train-steps 1 --rollout-horizon "$ROLLOUT_HORIZON" \
     --fnn-force-decoder field_difference "${recovery_args[@]}" \
     --fnn-physical-recovery-lr "$scalar_lr" \
-    --fnn-gamma-init "$init_gamma" --fnn-omega-init "$init_omega" --fnn-force-scale-init "$init_force" --fnn-topology-init "$init_topology" \
+    --fnn-dt "$init_dt" --fnn-gamma-init "$init_gamma" --fnn-omega-init "$init_omega" --fnn-force-scale-init "$init_force" --fnn-topology-init "$init_topology" \
     --save-jsonl "$result" 2>&1 | tee "$log"
 }
 
@@ -97,6 +100,7 @@ for seed in "${SEEDS[@]}"; do
   for stage in "${STAGES[@]}"; do
     for dynamic in diffusion wave; do
       case "${stage}/${dynamic}" in
+        dt/diffusion|dt/wave) starts=("dt:0.025" "dt:0.05" "dt:0.10" "dt:0.20" "dt:0.40") ;;
         gamma/diffusion) starts=("gamma:0.045" "gamma:0.09" "gamma:0.18" "gamma:0.36" "gamma:0.72") ;;
         gamma/wave) starts=("gamma:0.0375" "gamma:0.075" "gamma:0.15" "gamma:0.30" "gamma:0.60") ;;
         omega/wave) starts=("omega:0.20" "omega:0.40" "omega:0.80" "omega:1.60" "omega:3.20") ;;
@@ -104,8 +108,8 @@ for seed in "${SEEDS[@]}"; do
         force_scale/diffusion) starts=("force_scale:0.20" "force_scale:0.40" "force_scale:0.80" "force_scale:1.60" "force_scale:3.20") ;;
         force_scale/wave) starts=("force_scale:0.20" "force_scale:0.40" "force_scale:0.80" "force_scale:1.60" "force_scale:3.20") ;;
         topology/diffusion|topology/wave) starts=("topology:-2" "topology:0" "topology:2") ;;
-        joint/diffusion) starts=("gamma:0.045" "gamma:0.09" "gamma:0.18" "gamma:0.36" "gamma:0.72" "force_scale:0.20" "force_scale:0.40" "force_scale:0.80" "force_scale:1.60" "force_scale:3.20") ;;
-        joint/wave) starts=("gamma:0.0375" "gamma:0.075" "gamma:0.15" "gamma:0.30" "gamma:0.60" "omega:0.20" "omega:0.40" "omega:0.80" "omega:1.60" "omega:3.20" "force_scale:0.20" "force_scale:0.40" "force_scale:0.80" "force_scale:1.60" "force_scale:3.20") ;;
+        joint/diffusion) starts=("dt:0.025" "dt:0.05" "dt:0.10" "dt:0.20" "dt:0.40" "gamma:0.045" "gamma:0.09" "gamma:0.18" "gamma:0.36" "gamma:0.72" "force_scale:0.20" "force_scale:0.40" "force_scale:0.80" "force_scale:1.60" "force_scale:3.20") ;;
+        joint/wave) starts=("dt:0.025" "dt:0.05" "dt:0.10" "dt:0.20" "dt:0.40" "gamma:0.0375" "gamma:0.075" "gamma:0.15" "gamma:0.30" "gamma:0.60" "omega:0.20" "omega:0.40" "omega:0.80" "omega:1.60" "omega:3.20" "force_scale:0.20" "force_scale:0.40" "force_scale:0.80" "force_scale:1.60" "force_scale:3.20") ;;
         *) echo "Unsupported stage/dynamic combination: ${stage}/${dynamic}" >&2; exit 2 ;;
       esac
       for start in "${starts[@]}"; do

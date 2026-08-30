@@ -26,3 +26,10 @@ exports_suite/
 results/
 sweep_results.jsonl
 /data/
+
+# Local experiment artefacts and external working data
+.matplotlib/
+derived/
+ratethenews/
+docs/
+output.png
