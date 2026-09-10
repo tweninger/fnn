@@ -43,6 +43,10 @@ class RunResult:
 class TrainConfig:
     num_nodes: int
     num_neg: int = 20
+    # Half-open ID partitions for type-aware negative sampling. None means
+    # the homogeneous default ``[0, num_nodes)`` for both sources and dests.
+    src_id_range: Optional[tuple[int, int]] = None
+    dst_id_range: Optional[tuple[int, int]] = None
     node_loss_weight: float = 0.0
     node_target_type: str = "regression"
     edge_target_type: str = "regression"

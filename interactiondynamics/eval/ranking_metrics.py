@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Tuple, cast
+from typing import Any, Dict, Tuple, cast
 
 import torch
 import torch.nn.functional as F
@@ -22,6 +22,38 @@ class RankingBatch:
     features: torch.Tensor | None = None
 
 
+def resolve_id_range(
+    num_nodes: int,
+    id_range: tuple[int, int] | None = None,
+    *,
+    start: int = 0,
+    end: int | None = None,
+) -> tuple[int, int]:
+    """Return a half-open ``[start, end)`` partition inside ``[0, num_nodes)``."""
+    if id_range is not None:
+        start, end = int(id_range[0]), int(id_range[1])
+    resolved_end = int(num_nodes if end is None else end)
+    start = int(start)
+    if start < 0 or resolved_end > num_nodes or start >= resolved_end:
+        raise ValueError(
+            f"Invalid id range [{start}, {resolved_end}) for num_nodes={num_nodes}."
+        )
+    return start, resolved_end
+
+
+def ranking_partition_kwargs(cfg: Any) -> dict[str, tuple[int, int] | None]:
+    """Pass TrainConfig bipartite partitions through to ranking helpers."""
+    return {
+        "src_id_range": getattr(cfg, "src_id_range", None),
+        "dst_id_range": getattr(cfg, "dst_id_range", None),
+    }
+
+
+def _advance_within_range(ids: torch.Tensor, start: int, size: int) -> torch.Tensor:
+    """Step an ID by one, wrapping inside ``[start, start + size)``."""
+    return start + (ids - start + 1) % size
+
+
 def sample_negative_dsts(
     num_nodes: int,
     pos_dst: torch.Tensor,
@@ -29,13 +61,21 @@ def sample_negative_dsts(
     device: torch.device,
     avoid: torch.Tensor | None = None,   # (M,) optional (e.g., src)
     batch: torch.Tensor | None = None,
+    dst_start: int = 0,
+    dst_end: int | None = None,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
-    Uniform negative sampling over node ids, avoiding collisions with pos_dst (and optionally avoid).
+    Uniform negative sampling over destination ids, avoiding collisions with pos_dst (and optionally avoid).
     Returns (M, num_neg) LongTensor on `device`.
+
+    Homogeneous graphs keep the default ``[0, num_nodes)``. Bipartite graphs
+    pass the item partition so negatives never wrap into the source type.
     """
     M = pos_dst.numel()
-    if num_nodes <= 1:
+    dst_start, dst_end = resolve_id_range(num_nodes, start=dst_start, end=dst_end)
+    num_dst = dst_end - dst_start
+    if num_nodes <= 1 or num_dst <= 0:
         return torch.zeros((M, num_neg), device=device, dtype=torch.long)
 
     base = (
@@ -44,18 +84,21 @@ def sample_negative_dsts(
         else batch.to(device=device, dtype=torch.long).view(-1, 1) * num_nodes
     )
     local_pos = pos_dst.view(-1, 1) - base
-    neg = torch.randint(0, num_nodes, (M, num_neg), device=device, dtype=torch.long)
+    rand_kwargs: dict[str, Any] = {} if generator is None else {"generator": generator}
+    neg = torch.randint(
+        0, num_dst, (M, num_neg), device=device, dtype=torch.long, **rand_kwargs
+    ) + dst_start
 
     # Fix collisions with pos_dst (one pass is usually fine)
     collide = neg.eq(local_pos)
     if collide.any():
-        neg[collide] = (neg[collide] + 1) % num_nodes
+        neg[collide] = _advance_within_range(neg[collide], dst_start, num_dst)
 
     # Optional: avoid another id (e.g., src for no self-loop negatives)
     if avoid is not None:
         collide2 = neg.eq(avoid.view(-1, 1) - base)
         if collide2.any():
-            neg[collide2] = (neg[collide2] + 1) % num_nodes
+            neg[collide2] = _advance_within_range(neg[collide2], dst_start, num_dst)
             # might re-collide with pos_dst in rare cases; acceptable for now
 
     return cast(torch.LongTensor, neg + base)
@@ -68,6 +111,8 @@ def sample_filtered_negative_dsts(
     num_neg: int,
     device: torch.device,
     batch: torch.Tensor | None = None,
+    dst_start: int = 0,
+    dst_end: int | None = None,
 ) -> tuple[torch.LongTensor, torch.BoolTensor]:
     """Sample destinations that are not active positives in the same bin.
 
@@ -77,14 +122,16 @@ def sample_filtered_negative_dsts(
     another true simultaneous interaction must never be treated as a negative.
 
     Returns sampled destinations and a row-validity mask. A row is invalid only
-    when its source is connected to every node in the current bin, leaving no
-    true negative destination to sample.
+    when its source is connected to every *legal* destination in the current
+    bin, leaving no true negative destination to sample. For bipartite JODIE
+    graphs the legal destinations are items, not the full node set.
     """
     M = int(src.numel())
     neg = torch.empty((M, num_neg), dtype=torch.long, device=device)
     valid = torch.zeros((M,), dtype=torch.bool, device=device)
     if num_nodes <= 0 or M == 0:
         return neg, valid
+    dst_start, dst_end = resolve_id_range(num_nodes, start=dst_start, end=dst_end)
 
     # Build the same per-source exclusion set as the former Python loop, but
     # sample every row on-device at once. The old implementation synchronized
@@ -93,7 +140,16 @@ def sample_filtered_negative_dsts(
     total_nodes = num_nodes if batch is None else num_nodes * (int(batch.max().item()) + 1)
     active = torch.zeros((total_nodes, total_nodes), dtype=torch.bool, device=device)
     active[src, dst] = True
-    source_has_candidate = (~active).any(dim=1)
+    if batch is None:
+        source_has_candidate = (~active[:, dst_start:dst_end]).any(dim=1)
+    else:
+        # Packed streams offset each graph by ``num_nodes``. Validity must use
+        # that graph's destination partition, otherwise a fully-active local
+        # source could look valid because another graph still has holes.
+        graph = torch.arange(total_nodes, device=device, dtype=torch.long) // num_nodes
+        dst_local = torch.arange(dst_start, dst_end, device=device, dtype=torch.long)
+        dest_index = graph.unsqueeze(1) * num_nodes + dst_local.unsqueeze(0)
+        source_has_candidate = (~active.gather(1, dest_index)).any(dim=1)
     valid = source_has_candidate[src]
 
     # Rejection sampling is exactly uniform over inactive destinations. Field
@@ -105,10 +161,10 @@ def sample_filtered_negative_dsts(
         if batch is None
         else batch.to(device=device, dtype=torch.long).view(-1, 1) * num_nodes
     )
-    neg = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long) + base
+    neg = torch.randint(dst_start, dst_end, (M, num_neg), device=device, dtype=torch.long) + base
     blocked = active[src.view(-1, 1), neg] & valid.view(-1, 1)
     while bool(blocked.any()):
-        redraw = torch.randint(num_nodes, (M, num_neg), device=device, dtype=torch.long) + base
+        redraw = torch.randint(dst_start, dst_end, (M, num_neg), device=device, dtype=torch.long) + base
         neg = torch.where(blocked, redraw, neg)
         blocked = active[src.view(-1, 1), neg] & valid.view(-1, 1)
     return cast(torch.LongTensor, neg), cast(torch.BoolTensor, valid)
@@ -121,6 +177,10 @@ def sample_balanced_inactive_pairs(
     device: torch.device,
     *,
     return_batch: bool = False,
+    src_start: int = 0,
+    src_end: int | None = None,
+    dst_start: int = 0,
+    dst_end: int | None = None,
 ) -> tuple[torch.LongTensor, torch.LongTensor] | tuple[torch.LongTensor, torch.LongTensor, torch.LongTensor | None]:
     """Uniformly sample currently unobserved directed pairs.
 
@@ -133,14 +193,31 @@ def sample_balanced_inactive_pairs(
     Sampling without replacement makes the 1:1 protocol exact whenever the
     graph has enough inactive pairs.  It deliberately does not condition on a
     known active source, unlike destination-ranking/MRR evaluation.
+
+    Homogeneous graphs sample from ``V x V``. Bipartite graphs sample from
+    ``V_src x V_dst`` so user-user and item-item pairs are never treated as
+    legal negatives.
     """
     if num_nodes <= 0 or num_samples <= 0:
         empty = torch.empty((0,), dtype=torch.long, device=device)
         return (empty, empty, None) if return_batch else (empty, empty)
+    src_start, src_end = resolve_id_range(num_nodes, start=src_start, end=src_end)
+    dst_start, dst_end = resolve_id_range(num_nodes, start=dst_start, end=dst_end)
+    num_src = src_end - src_start
+    num_dst = dst_end - dst_start
+    total_pairs = num_src * num_dst
+
+    def encode_pair_ids(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+        in_range = (
+            (src >= src_start) & (src < src_end) & (dst >= dst_start) & (dst < dst_end)
+        )
+        return (src[in_range] - src_start) * num_dst + (dst[in_range] - dst_start)
+
+    def decode_pair_ids(chosen: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return chosen // num_dst + src_start, chosen % num_dst + dst_start
 
     def sample_missing_pair_ids(observed_ids: torch.Tensor, count: int) -> torch.LongTensor:
         """Sample distinct ranks in the complement without building N² pairs."""
-        total_pairs = num_nodes * num_nodes
         observed_ids = torch.unique(observed_ids.to(device=device, dtype=torch.long), sorted=True)
         observed_ids = observed_ids[(observed_ids >= 0) & (observed_ids < total_pairs)]
         available = total_pairs - int(observed_ids.numel())
@@ -167,12 +244,13 @@ def sample_balanced_inactive_pairs(
 
     batch = observed_events.batch
     if batch is None:
-        observed_ids = observed_events.src * num_nodes + observed_events.dst
+        observed_ids = encode_pair_ids(observed_events.src, observed_events.dst)
         chosen = sample_missing_pair_ids(observed_ids, int(num_samples))
         if chosen.numel() == 0:
             empty = torch.empty((0,), dtype=torch.long, device=device)
             return (empty, empty, None) if return_batch else (empty, empty)
-        result = (cast(torch.LongTensor, chosen // num_nodes), cast(torch.LongTensor, chosen % num_nodes), None)
+        neg_src, neg_dst = decode_pair_ids(chosen)
+        result = (cast(torch.LongTensor, neg_src), cast(torch.LongTensor, neg_dst), None)
         return result if return_batch else result[:2]
 
     # Packed streams have disjoint node ID ranges. Draw one negative within
@@ -182,13 +260,16 @@ def sample_balanced_inactive_pairs(
     for batch_id in torch.unique(target_batch).tolist():
         count = int((target_batch == batch_id).sum().item())
         observed = batch == batch_id
-        observed_ids = (
-            observed_events.src[observed] - batch_id * num_nodes
-        ) * num_nodes + (observed_events.dst[observed] - batch_id * num_nodes)
+        offset = batch_id * num_nodes
+        observed_ids = encode_pair_ids(
+            observed_events.src[observed] - offset,
+            observed_events.dst[observed] - offset,
+        )
         chosen = sample_missing_pair_ids(observed_ids, count)
         if chosen.numel():
-            neg_src_parts.append(chosen // num_nodes + batch_id * num_nodes)
-            neg_dst_parts.append(chosen % num_nodes + batch_id * num_nodes)
+            local_src, local_dst = decode_pair_ids(chosen)
+            neg_src_parts.append(local_src + offset)
+            neg_dst_parts.append(local_dst + offset)
             neg_batch_parts.append(torch.full_like(chosen, batch_id))
     if not neg_src_parts:
         empty = torch.empty((0,), dtype=torch.long, device=device)
@@ -207,6 +288,9 @@ def balanced_event_detection_metrics(
     state,
     events: EventBatch,
     num_nodes: int,
+    *,
+    src_id_range: tuple[int, int] | None = None,
+    dst_id_range: tuple[int, int] | None = None,
 ) -> Dict[str, float]:
     """Score observed events against an equal number of random inactive pairs.
 
@@ -215,7 +299,12 @@ def balanced_event_detection_metrics(
     metric is evaluation-only and does not alter the sampled-softmax training
     objective.
     """
-    query_and_labels = balanced_event_detection_query(events, num_nodes)
+    query_and_labels = balanced_event_detection_query(
+        events,
+        num_nodes,
+        src_id_range=src_id_range,
+        dst_id_range=dst_id_range,
+    )
     if query_and_labels is None:
         return {}
     query, labels = query_and_labels
@@ -229,17 +318,26 @@ def balanced_event_detection_metrics(
 def balanced_event_detection_query(
     events: EventBatch,
     num_nodes: int,
+    *,
+    src_id_range: tuple[int, int] | None = None,
+    dst_id_range: tuple[int, int] | None = None,
 ) -> tuple[EventBatch, torch.Tensor] | None:
     """Build a 1:1 positive/random-inactive query set for reuse in evaluation."""
     positives = internal_events(events)
     if positives.num_events == 0:
         return None
+    src_start, src_end = resolve_id_range(num_nodes, src_id_range)
+    dst_start, dst_end = resolve_id_range(num_nodes, dst_id_range)
     neg_src, neg_dst, neg_batch = sample_balanced_inactive_pairs(
         num_nodes=num_nodes,
         observed_events=events,
         num_samples=positives.num_events,
         device=events.src.device,
         return_batch=True,
+        src_start=src_start,
+        src_end=src_end,
+        dst_start=dst_start,
+        dst_end=dst_end,
     )
     if neg_src.numel() == 0:
         return None
@@ -498,6 +596,8 @@ def ranking_loss_and_metrics(
     include_binary_metrics: bool = True,
     include_event_detection: bool = True,
     compute_metrics: bool = True,
+    src_id_range: tuple[int, int] | None = None,
+    dst_id_range: tuple[int, int] | None = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Given current state, evaluate next_events as positives with negatives.
@@ -517,9 +617,17 @@ def ranking_loss_and_metrics(
             f"batch={None if next_events.batch is None else next_events.batch.numel()}"
         )
     K1 = num_neg + 1
+    src_start, src_end = resolve_id_range(num_nodes, src_id_range)
+    dst_start, dst_end = resolve_id_range(num_nodes, dst_id_range)
 
     neg_dst = sample_negative_dsts(
-        num_nodes, next_events.dst, num_neg, device=device, batch=next_events.batch
+        num_nodes,
+        next_events.dst,
+        num_neg,
+        device=device,
+        batch=next_events.batch,
+        dst_start=dst_start,
+        dst_end=dst_end,
     )
     candidates_dst = cast(torch.LongTensor, torch.cat([next_events.dst.view(M, 1), neg_dst], dim=1))  # (M, K1)
 
@@ -602,6 +710,8 @@ def ranking_loss_and_metrics(
             num_neg=num_neg,
             device=device,
             batch=next_events.batch,
+            dst_start=dst_start,
+            dst_end=dst_end,
         )
         if bool(valid_rows.any()):
             filtered_events = _select_event_rows(next_events, valid_rows)
@@ -637,6 +747,8 @@ def ranking_loss_and_metrics(
                     state=state_eval,
                     events=next_events,
                     num_nodes=num_nodes,
+                    src_id_range=(src_start, src_end),
+                    dst_id_range=(dst_start, dst_end),
                 )
             )
     # Event-only physical models additionally predict the measured force on

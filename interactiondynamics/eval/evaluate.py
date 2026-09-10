@@ -23,6 +23,7 @@ from interactiondynamics.eval.ranking_metrics import (
     event_force_loss_and_metrics,
     internal_events,
     ranking_loss_and_metrics,
+    ranking_partition_kwargs,
 )
 from interactiondynamics.eval.prediction_metrics import binary_metrics_from_logits
 from interactiondynamics.training.targets import (
@@ -990,6 +991,7 @@ def evaluate_physical_force_rollout(
                     include_force=False,
                     include_binary_metrics=False,
                     include_event_detection=False,
+                    **ranking_partition_kwargs(cfg),
                 )
                 combined_metrics = dict(force_metrics)
                 combined_metrics.update(ranking_metrics)
@@ -1018,6 +1020,7 @@ def evaluate_physical_force_rollout(
                     include_force=False,
                     include_binary_metrics=False,
                     include_event_detection=False,
+                    **ranking_partition_kwargs(cfg),
                 )
                 persistent_combined_metrics = dict(persistent_force_metrics)
                 persistent_combined_metrics.update(persistent_ranking_metrics)
@@ -1040,7 +1043,11 @@ def evaluate_physical_force_rollout(
                 # Pool event-detection logits until each final aggregate is
                 # complete. Calling sklearn once per rollout target is both
                 # slow and statistically less useful than a pooled AUROC/AP.
-                event_query = balanced_event_detection_query(target, cfg.num_nodes)
+                event_query = balanced_event_detection_query(
+                    target,
+                    cfg.num_nodes,
+                    **ranking_partition_kwargs(cfg),
+                )
                 if event_query is not None:
                     event_query_batch, event_labels = event_query
                     event_scores = model.score(rollout_state.clone(detach=True), event_query_batch)
@@ -1338,6 +1345,7 @@ def evaluate_stream_sliced(
                 next_events=events,
                 num_nodes=cfg.num_nodes,
                 num_neg=cfg.num_neg,
+                **ranking_partition_kwargs(cfg),
             )
 
         total_loss_t = loss_t
@@ -1498,6 +1506,7 @@ def evaluate_stream_sliced(
                 next_events=events,
                 num_nodes=cfg.num_nodes,
                 num_neg=cfg.num_neg,
+                **ranking_partition_kwargs(cfg),
             )
 
         persistent_total_loss_t = persistent_loss_t

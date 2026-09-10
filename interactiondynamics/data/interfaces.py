@@ -23,6 +23,20 @@ class DataSpec:
     num_bins: Optional[int] = None
     extra: Optional[Dict[str, Any]] = None
 
+    def source_id_range(self) -> tuple[int, int]:
+        extra = self.extra or {}
+        if extra.get("src_id_range") is not None:
+            start, end = extra["src_id_range"]
+            return (int(start), int(end))
+        return (0, int(self.num_nodes))
+
+    def destination_id_range(self) -> tuple[int, int]:
+        extra = self.extra or {}
+        if extra.get("dst_id_range") is not None:
+            start, end = extra["dst_id_range"]
+            return (int(start), int(end))
+        return (0, int(self.num_nodes))
+
 
 @dataclass(frozen=True)
 class EdgeTargetBatch:

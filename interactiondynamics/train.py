@@ -1110,6 +1110,14 @@ def main() -> None:
         f"Loaded dataset | name={spec.name} events={spec.num_events} bins={spec.num_bins}",
         flush=True,
     )
+    extra = spec.extra or {}
+    if extra.get("is_bipartite"):
+        print(
+            "Bipartite id partitions"
+            f" | src={tuple(extra['src_id_range'])}"
+            f" | dst={tuple(extra['dst_id_range'])}",
+            flush=True,
+        )
     objective_metric = parse_task_metric_spec(
         spec.extra.get("primary_metric") if spec.extra is not None else None
     )
@@ -1121,6 +1129,8 @@ def main() -> None:
 
     base_train_cfg = TrainConfig(**asdict(suite.train_cfg))
     base_train_cfg.num_nodes = spec.num_nodes
+    base_train_cfg.src_id_range = spec.source_id_range()
+    base_train_cfg.dst_id_range = spec.destination_id_range()
     base_train_cfg.node_loss_weight = float(args.node_loss_weight)
     metric_family = str(spec.extra.get("metric_family")) if spec.extra is not None else ""
     base_train_cfg.node_target_type = "classification" if metric_family == "node_classification" else "regression"

@@ -36,6 +36,8 @@ from interactiondynamics.eval.ranking_metrics import (
     event_force_loss_and_metrics,
     internal_events,
     ranking_loss_and_metrics,
+    ranking_partition_kwargs,
+    sample_negative_dsts,
 )
 from interactiondynamics.training.reporting import (
     format_edge_classification_bundle,
@@ -416,6 +418,7 @@ def _train_one_epoch_physical_rollout(
                     next_events=target,
                     num_nodes=cfg.num_nodes,
                     num_neg=cfg.num_neg,
+                    **ranking_partition_kwargs(cfg),
                 )
                 step_losses.append(loss)
                 for key, value in metrics.items():
@@ -861,6 +864,7 @@ def _train_one_epoch_standard(
                 num_nodes=cfg.num_nodes,
                 num_neg=cfg.num_neg,
                 compute_metrics=collect_step_metrics,
+                **ranking_partition_kwargs(cfg),
             )
             total_step_loss = loss
         if curr_edge_target is not None and getattr(model, "node_scorer", None) is not None:
@@ -1124,6 +1128,10 @@ def run_one_experiment(
         train_cfg.tbptt_steps = run.tbptt_steps
     if run.prediction_mode is not None:
         train_cfg.prediction_mode = run.prediction_mode
+    if train_cfg.src_id_range is None:
+        train_cfg.src_id_range = spec.source_id_range()
+    if train_cfg.dst_id_range is None:
+        train_cfg.dst_id_range = spec.destination_id_range()
 
     model = build_model_fn(spec, run.model_cfg).to(device)
     # Sparse FNN topology is deliberately fitted only over train-observed
@@ -1146,16 +1154,15 @@ def run_one_experiment(
         # plausible alternatives as well as historical positives. Unknown
         # pairs remain neutral, rather than becoming automatic negatives.
         generator = torch.Generator(device="cpu").manual_seed(int(run.seed))
-        negative_dst = torch.randint(
-            spec.num_nodes,
-            (observed_src.numel(), train_cfg.num_neg),
+        dst_start, dst_end = spec.destination_id_range()
+        negative_dst = sample_negative_dsts(
+            num_nodes=spec.num_nodes,
+            pos_dst=observed_dst,
+            num_neg=train_cfg.num_neg,
+            device=torch.device("cpu"),
+            dst_start=dst_start,
+            dst_end=dst_end,
             generator=generator,
-            dtype=torch.long,
-        )
-        negative_dst = torch.where(
-            negative_dst == observed_dst.unsqueeze(1),
-            (negative_dst + 1).remainder(spec.num_nodes),
-            negative_dst,
         )
         print("  sparse FNN topology | deduplicating train candidates...", flush=True)
         configure_sparse_candidates(

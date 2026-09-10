@@ -49,6 +49,17 @@ class JODIEBinnedDataset(EventStreamDataset):
             self._msg_all = msg
 
         self._num_nodes = int(torch.max(self._src_all.max(), self._dst_all.max()).item()) + 1
+        # PyG offsets item IDs by the user count so user 0 and page 0 occupy
+        # distinct state slots. Keep those partitions; negative sampling must
+        # draw destinations from the item range rather than the full ID space.
+        self._src_end = int(self._src_all.max().item()) + 1
+        self._dst_start = int(self._dst_all.min().item())
+        self._dst_end = int(self._dst_all.max().item()) + 1
+        if self._dst_start < self._src_end:
+            raise ValueError(
+                "JODIE user and item ID ranges overlap: "
+                f"src_end={self._src_end}, dst_start={self._dst_start}."
+            )
         self._event_dim = 1 if cfg.unit_force else (int(self._msg_all.size(-1)) if self._msg_all is not None else 0)
 
         # Bin timestamps once
@@ -99,6 +110,9 @@ class JODIEBinnedDataset(EventStreamDataset):
                 "t0": self._t0,
                 "split_fracs": self.cfg.split_fracs,
                 "unit_force": bool(self.cfg.unit_force),
+                "is_bipartite": True,
+                "src_id_range": (0, self._src_end),
+                "dst_id_range": (self._dst_start, self._dst_end),
             },
         )
 

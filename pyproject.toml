@@ -45,12 +45,10 @@ packages = [
   "interactiondynamics.scorers",
   "interactiondynamics.training",
   "interactiondynamics.updates",
-  "interactionfields",
-  "interactionfields.scripts",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["interactiondynamics/tests", "interactionfields/tests"]
+testpaths = ["interactiondynamics/tests"]
 pythonpath = [
   ".",
 ]
