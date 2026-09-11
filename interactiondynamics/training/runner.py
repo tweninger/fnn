@@ -980,13 +980,18 @@ def _train_one_epoch_standard(
                 aux_sums[key] = aux_sums.get(key, 0.0) + float(value)
                 aux_counts[key] = aux_counts.get(key, 0) + 1
 
-        total_step_loss.backward()
-        if cfg.grad_clip and cfg.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        if collect_step_metrics:
-            grad_norm_sum += global_grad_norm(model.parameters())
-            grad_norm_n += 1
-        optimizer.step()
+        # Quiet event bins still advance the state, but a constant zero loss
+        # has no gradient (notably with frozen physical scalars). Do not apply
+        # optimizer momentum/decay when there is no supervised target.
+        quiet_bin = curr.src.numel() == 0 and curr_edge_target is None and curr_node_target is None
+        if total_step_loss.requires_grad or not quiet_bin:
+            total_step_loss.backward()
+            if cfg.grad_clip and cfg.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            if collect_step_metrics:
+                grad_norm_sum += global_grad_norm(model.parameters())
+                grad_norm_n += 1
+            optimizer.step()
 
         if cfg.tbptt_steps and ((n_steps + 1) % cfg.tbptt_steps == 0) and state is not None:
             state.detach_()

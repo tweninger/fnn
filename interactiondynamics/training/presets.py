@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Dict, Optional, Sequence, cast
 
 import torch
@@ -667,6 +667,20 @@ def build_suite(
     dataset_override: Optional[str] = None,
     args: Optional[argparse.Namespace] = None,
 ) -> RunSuite:
+    if dataset_override in {"college_msg", "email_eu_core", "sociopatterns"}:
+        social_args = argparse.Namespace(**(vars(args) if args is not None else {}))
+        social_args.jodie_fnn = True
+        suite = build_suite("quick" if preset == "smoke" else preset, device, "jodie", social_args)
+        for cfg in [suite.model_cfg, *(run.model_cfg for run in suite.runs)]:
+            cfg.fnn_dt = 1.0
+            cfg.fnn_learn_dt = bool(getattr(args, "fnn_learn_dt", False))
+            cfg.fnn_max_dt_omega = None
+        return replace(suite, dataset="social", dataset_kwargs={
+            "name": dataset_override,
+            "root": getattr(args, "social_root", "data"),
+            "bin_size": getattr(args, "social_bin_size", None),
+            "device": str(device),
+        })
     if dataset_override == "synthetic" and args is not None:
         return _build_synthetic_suite(preset, device, args)
 
@@ -799,6 +813,12 @@ def build_suite(
 
 
 def load_dataset(kind: str, dataset_kwargs: Dict[str, Any]):
+    if kind == "social":
+        from interactiondynamics.data.social import SocialConfig, SocialEventDataset
+        return SocialEventDataset(SocialConfig(**dataset_kwargs))
+    if kind == "traffic":
+        from interactiondynamics.data.traffic import TrafficConfig, TrafficDataset
+        return TrafficDataset(TrafficConfig(**dataset_kwargs))
     if kind == "toy":
         return ToyShiftDataset(ToyShiftConfig(**dataset_kwargs))
     if kind == "jodie":

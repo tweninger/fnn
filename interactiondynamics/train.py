@@ -35,7 +35,8 @@ from interactiondynamics.training.types import PredictionMode, RunResult, SweepR
 TARGET_MODE_CHOICES = ("raw", "residual")
 EDGE_TARGET_SCALE_CHOICES = ("raw", "zscore")
 PREDICTION_MODE_CHOICES = ("state", "delta", "state_plus_delta")
-DATASET_CHOICES = ("toy", "jodie", "synthetic")
+SOCIAL_DATASETS = ("college_msg", "email_eu_core", "sociopatterns")
+DATASET_CHOICES = ("toy", "jodie", "synthetic", *SOCIAL_DATASETS)
 JODIE_DATASET_CHOICES = {
     "wikipedia": "Wikipedia",
     "reddit": "Reddit",
@@ -85,6 +86,9 @@ def _build_common_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.set_defaults(jodie_name="Wikipedia")
     data_group = common.add_argument_group("dataset")
+    data_group.add_argument("--social-root", default="data", help="Parent directory of social datasets.")
+    data_group.add_argument("--social-bin-size", type=float, default=None,
+                            help="Social observation-bin width in seconds; FNN dt defaults to one bin.")
     data_group.add_argument(
         "--dataset",
         nargs="+",
@@ -93,7 +97,8 @@ def _build_common_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional dataset override. Use `--dataset jodie wikipedia`, "
-            "`reddit`, `mooc`, or `lastfm`; omitting the benchmark uses Wikipedia."
+            "`reddit`, `mooc`, or `lastfm`; omitting the benchmark uses Wikipedia. "
+            "Homogeneous social datasets: college_msg, email_eu_core, sociopatterns."
         ),
     )
     data_group.add_argument(
@@ -374,6 +379,18 @@ def _add_subcommands(
     common: argparse.ArgumentParser,
 ) -> None:
     subparsers = parser.add_subparsers(dest="command")
+    tgb = subparsers.add_parser("tgb", help="Event-time FNN with official TGB splits/candidates/evaluator.")
+    tgb.add_argument("--dataset", choices=["tgbl-wiki"], default="tgbl-wiki")
+    tgb.add_argument("--root", default="data/tgb")
+    tgb.add_argument("--epochs", type=int, default=9)
+    tgb.add_argument("--seed", type=int, default=0)
+    tgb.add_argument("--lr", type=float, default=0.003)
+    tgb.add_argument("--num-neg", type=int, default=10)
+    tgb.add_argument("--time-unit", type=float, default=3600., help="Timestamp seconds per model time unit.")
+    tgb.add_argument("--topology-epochs", type=int, default=3)
+    tgb.add_argument("--physical-epochs", type=int, default=1)
+    tgb.add_argument("--threads", type=int, default=2)
+    tgb.add_argument("--save-jsonl", required=True)
     for name, help_text in (
         ("smoke", "Run a tiny smoke test preset."),
         ("quick", "Run the focused shortlist preset."),
@@ -1099,6 +1116,10 @@ def _validate_rollout_training_selection(runs: Sequence[SweepRun], rollout_train
 
 def main() -> None:
     args = parse_args()
+    if args.command == "tgb":
+        from interactiondynamics.training.tgb_runner import run_tgb
+        run_tgb(args)
+        return
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _normalize_ift_variant_args(args)
     preset = "full" if args.command == "sweep" else args.command
@@ -1198,7 +1219,10 @@ def main() -> None:
     physical_synthetic_task = args.dataset == "synthetic" and args.synthetic_task in {
         "diffusion", "wave", "coupled_oscillator"
     }
-    jodie_fnn_task = args.dataset == "jodie" and bool(args.jodie_fnn)
+    social_fnn_task = args.dataset in SOCIAL_DATASETS
+    jodie_fnn_task = (args.dataset == "jodie" and bool(args.jodie_fnn)) or social_fnn_task
+    if social_fnn_task and (args.fnn_oracle_topology or args.fnn_learn_physical_params or args.fnn_learn_force_scale):
+        raise ValueError("Social FNN uses learned gamma, omega and input scale; oracle support and pair-force recovery flags do not apply.")
     if (
         args.fnn_force_decoder is not None
         or args.fnn_learn_physical_params
@@ -1234,6 +1258,8 @@ def main() -> None:
         physical_epochs = args.fnn_alternating_physical_epochs or 50
         cycles = args.fnn_alternating_cycles or 2
         scalar_phases = 4 if jodie_fnn_task else (2 if args.synthetic_task == "diffusion" else 3)
+        if social_fnn_task and not args.fnn_learn_dt:
+            scalar_phases = 3
         if not jodie_fnn_task and args.fnn_learn_dt:
             scalar_phases += 1
         physical_sweep_epochs = scalar_phases * physical_epochs

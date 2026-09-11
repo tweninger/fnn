@@ -306,6 +306,37 @@ class FieldNeuralNetwork(InteractionModel):
         }
         return next_state, aux
 
+    def advance_elapsed(self, state: ModelState, elapsed: float) -> ModelState:
+        """Exact unforced evolution for the opt-in event-time protocol.
+
+        ``elapsed`` is an observed timestamp gap in declared time units, not
+        the learned/binned dt. Existing ``step`` semantics are unchanged.
+        """
+        if not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError("Elapsed time must be finite and nonnegative")
+        p = self.physical_parameters()
+        h, v = state.node, state.node_prev
+        if self.order == 1:
+            return ModelState(node=h * torch.exp(-p['gamma'] * elapsed),
+                              node_prev=torch.zeros_like(v), aux=state.aux)
+        zero = p['gamma'] * 0
+        matrix = torch.stack([torch.stack([zero, zero + 1]),
+                              torch.stack([-p['omega'].square(), -p['gamma']])])
+        transition = torch.matrix_exp(matrix * elapsed)
+        return ModelState(node=transition[0, 0] * h + transition[0, 1] * v,
+                          node_prev=transition[1, 0] * h + transition[1, 1] * v,
+                          aux=state.aux)
+
+    def observe_impulses(self, state: ModelState, events: EventBatch) -> ModelState:
+        """Instantaneous unit-event activation, after scoring at its timestamp."""
+        gate = torch.sigmoid(self._topology_logits_for(events.src, events.dst))
+        incoming = torch.zeros_like(state.node).index_add(
+            0, events.dst, self.physical_parameters()['input_force_scale']
+            * gate[:, None] * events.features)
+        return ModelState(node=state.node + incoming if self.order == 1 else state.node,
+                          node_prev=state.node_prev + incoming if self.order == 2 else state.node_prev,
+                          aux=state.aux)
+
     def _pair_features(self, state: ModelState, events: EventBatch) -> torch.Tensor:
         assert state.node is not None and state.node_prev is not None
         return torch.cat(
