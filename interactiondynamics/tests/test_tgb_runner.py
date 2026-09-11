@@ -28,7 +28,8 @@ def test_timestamp_groups_keep_simultaneous_events_together():
 
 @pytest.mark.parametrize('device', ['cpu', pytest.param('cuda', marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason='CUDA unavailable'))])
-def test_tgb_tiny_end_to_end(tmp_path, device):
+@pytest.mark.parametrize('accumulation', [1, 3, 128])
+def test_tgb_tiny_end_to_end(tmp_path, device, accumulation):
     pytest.importorskip('tgb')
     from tgb.linkproppred.evaluate import Evaluator
     class Sampler:
@@ -43,7 +44,7 @@ def test_tgb_tiny_end_to_end(tmp_path, device):
         test_mask=np.arange(8)>=6,negative_sampler=sampler,eval_metric='mrr')
     args = argparse.Namespace(epochs=5,topology_epochs=1,physical_epochs=1,num_neg=1,
         threads=1,time_unit=1.,lr=.003,seed=0,dataset='tgbl-wiki',root=str(tmp_path),
-        save_jsonl=str(tmp_path/'run.jsonl'),device=device)
+        save_jsonl=str(tmp_path/'run.jsonl'),device=device,accumulate_timestamps=accumulation)
     run_tgb(args,ds,Evaluator(name='tgbl-wiki'))
     rows = [json.loads(line) for line in (tmp_path/'run.jsonl').read_text().splitlines()]
     assert [r['phase'] for r in rows[:-1]] == ['topology','omega_raw','gamma_raw','input_force_scale_raw','topology']
@@ -51,6 +52,14 @@ def test_tgb_tiny_end_to_end(tmp_path, device):
     assert sampler.calls.count('test') == 2
     assert all(r['parameters']['dt'] == 1. for r in rows[:-1])
     assert all(r['device'] == device for r in rows[:-1])
+    for r in rows[:-1]:
+        expected = (4 + accumulation - 1)//accumulation
+        # At the initial zero state no observed impulse exists yet, so input
+        # scale has no gradient on the first timestamp (no spurious update).
+        if r['phase'] == 'input_force_scale_raw' and accumulation == 1:
+            expected -= 1
+        assert r['train_performance']['optimizer_steps'] == expected
+        assert r['train_performance']['timestamps_per_second'] > 0
     with pytest.raises(FileExistsError): run_tgb(args,ds,Evaluator(name='tgbl-wiki'))
 
 

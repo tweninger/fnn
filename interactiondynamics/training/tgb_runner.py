@@ -9,6 +9,8 @@ import math
 import os
 from importlib.metadata import version
 from pathlib import Path
+from functools import lru_cache
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -60,6 +62,9 @@ def resolve_device(requested):
 
 def run_tgb(args, dataset=None, evaluator=None):
     device = resolve_device(getattr(args, 'device', 'auto'))
+    accumulation = getattr(args, 'accumulate_timestamps', 1)
+    if accumulation < 1:
+        raise ValueError('accumulate-timestamps must be positive')
     if min(args.epochs, args.topology_epochs, args.physical_epochs, args.num_neg, args.threads) < 1:
         raise ValueError("Epoch counts, negative count and threads must be positive")
     if not math.isfinite(args.time_unit) or args.time_unit <= 0 or not math.isfinite(args.lr) or args.lr <= 0:
@@ -107,15 +112,28 @@ def run_tgb(args, dataset=None, evaluator=None):
     optimizers = {'topology': torch.optim.Adam(other, lr=args.lr)}
     optimizers.update({n:torch.optim.Adam([p], lr=args.lr) for n,p in scalars.items()})
 
+    @lru_cache(maxsize=128)
+    def allowed_destinations(positives):
+        # Bounded cache: repeated interaction patterns need not repeatedly
+        # rebuild the whole destination vocabulary. No evaluation data used.
+        return np.setdiff1d(destinations, np.asarray(positives, dtype=np.int64))
+
     def events(ids):
         return EventBatch(src=torch.from_numpy(src[ids]), dst=torch.from_numpy(dst[ids]),
             t=torch.from_numpy(times[ids]), features=torch.ones((len(ids),1)),
             is_external=torch.zeros(len(ids),dtype=torch.bool)).to(device)
 
     last_validation = None
+    train_performance = {}
 
     def pass_stream(split, state, last_time, optimizer=None, score=True):
-        total, count = 0., 0
+        total, count = (torch.zeros((), device=device) if optimizer is not None else 0.), 0
+        optimizer_steps = 0
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        started = perf_counter()
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
         description = f'TGB {split}' if score else f'TGB {split} history replay'
         progress = tqdm(groups[split], desc=description, unit='timestamp', leave=False)
         for step, ids in enumerate(progress, start=1):
@@ -127,7 +145,7 @@ def run_tgb(args, dataset=None, evaluator=None):
                 # Exclude simultaneous positive destinations for this source.
                 for source in np.unique(src[ids]):
                     selected = src[ids] == source
-                    allowed = np.setdiff1d(destinations, dst[ids][selected])
+                    allowed = allowed_destinations(tuple(np.unique(dst[ids][selected])))
                     if not len(allowed):
                         raise ValueError('No negative destinations for source')
                     negatives[selected] = rng.choice(allowed, size=(selected.sum(), args.num_neg))
@@ -135,14 +153,23 @@ def run_tgb(args, dataset=None, evaluator=None):
                 query = EventBatch(src=batch.src.repeat_interleave(args.num_neg), dst=torch.from_numpy(negatives.ravel()).to(device))
                 scores = torch.cat([pos_score[:,None], model.score(state, query).reshape(len(ids),-1)],dim=1)
                 loss = torch.nn.functional.cross_entropy(scores, torch.zeros(len(ids),dtype=torch.long,device=device))
-                if not torch.isfinite(loss):
-                    raise RuntimeError('Nonfinite TGB training loss')
-                optimizer.zero_grad(set_to_none=True)
+                # Normalize by timestamp count, including a short final
+                # accumulation block. Still truncate state gradients after
+                # every timestamp: this is accumulation, not longer BPTT.
+                block_start = ((step - 1) // accumulation) * accumulation
+                block_size = min(accumulation, len(groups[split]) - block_start)
                 if loss.requires_grad:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
-                    optimizer.step()
-                total += float(loss.detach()) * len(ids)
+                    (loss / block_size).backward()
+                total += loss.detach() * len(ids)
+                boundary = step % accumulation == 0 or step == len(groups[split])
+                if boundary:
+                    if not torch.isfinite(total):
+                        raise RuntimeError('Nonfinite TGB training loss')
+                    if any(p.grad is not None for group in optimizer.param_groups for p in group['params']):
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1., error_if_nonfinite=True)
+                        optimizer.step()
+                        optimizer_steps += 1
+                    optimizer.zero_grad(set_to_none=True)
                 count += len(ids)
                 state.detach_()
             elif score:
@@ -164,6 +191,7 @@ def run_tgb(args, dataset=None, evaluator=None):
                 if optimizer is not None:
                     progress.set_postfix({
                         'loss': f'{total/max(count,1):.4f}',
+                        'updates': optimizer_steps,
                         f'last_val_{dataset.eval_metric}': (
                             'pending' if last_validation is None else f'{last_validation:.4f}'
                         ),
@@ -171,7 +199,14 @@ def run_tgb(args, dataset=None, evaluator=None):
                 elif score:
                     progress.set_postfix({f'running_{dataset.eval_metric}': f'{total/max(count,1):.4f}'},
                                          refresh=False)
-        return state, last_time, total/max(count,1)
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        elapsed = perf_counter() - started
+        if optimizer is not None:
+            train_performance.update(optimizer_steps=optimizer_steps, seconds=elapsed,
+                                     timestamps_per_second=len(groups[split])/elapsed,
+                                     accumulate_timestamps=accumulation)
+        return state, last_time, float(total)/max(count,1)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     best = -float('inf')
@@ -195,7 +230,8 @@ def run_tgb(args, dataset=None, evaluator=None):
         if val > best:
             best,best_epoch = val,epoch
             torch.save(model.state_dict(), checkpoint)
-        row = {'epoch':epoch,'phase':phase,'train_loss':loss,'val':{dataset.eval_metric:val},
+        row = {'epoch':epoch,'phase':phase,'train_loss':loss,'train_performance':dict(train_performance),
+               'val':{dataset.eval_metric:val},
                'parameters':{k:float(v.detach()) for k,v in model.physical_parameters().items()},
                'protocol':'tgb-event-time-unit-impulse','config':vars(args), 'tgb_version':version('py-tgb'),
                'dataset_version':DATA_VERSION_DICT[args.dataset], 'selection_metric':dataset.eval_metric,

@@ -103,6 +103,18 @@ thread count defaults to `--threads 2`. The official evaluator and negative
 sampler remain CPU-side. GPU acceleration is not guaranteed for the many small,
 sequential timestamp updates; compare throughput on the target machine.
 
+To reduce optimizer overhead, add `--accumulate-timestamps 128`. The default
+is 1 for backward compatibility. Events are still scored and observed in
+timestamp order, with state gradients detached at each timestamp. Gradients
+are averaged across timestamps, clipped once and applied once per block; a
+short final block uses its actual size. This changes the optimization schedule,
+not the observation history or official evaluation candidates. It is not
+equivalent to 128 timestamps of backpropagation through time. Train negative
+exclusions use a bounded cache. Training time, timestamp throughput and actual
+optimizer update counts are saved under `train_performance` in each JSONL row.
+Larger accumulation means fewer updates per epoch and may need different
+learning-rate/epoch settings; speed alone does not establish equal accuracy.
+
 This is an **event-time FNN variant**, not the existing binned simulation
 protocol. It ignores original message attributes and treats each observed
 interaction as a unit impulse into the destination velocity, gated by the
