@@ -390,6 +390,8 @@ def _add_subcommands(
     tgb.add_argument("--topology-epochs", type=int, default=3)
     tgb.add_argument("--physical-epochs", type=int, default=1)
     tgb.add_argument("--threads", type=int, default=2)
+    tgb.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
+                     help="TGB compute device; auto uses CUDA when available.")
     tgb.add_argument("--save-jsonl", required=True)
     for name, help_text in (
         ("smoke", "Run a tiny smoke test preset."),

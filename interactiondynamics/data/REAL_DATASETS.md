@@ -96,7 +96,12 @@ venv/bin/python -u -m interactiondynamics.train tgb \
 This separate subcommand uses TGB's official masks, validation/test negative
 candidates and evaluator (MRR for tgbl-wiki). The optional dependency is pinned
 to py-tgb 2.3.0; package and dataset versions are saved in the JSONL. Data are
-downloaded to `data/tgb`. It runs on CPU (`--threads 2` by default).
+downloaded to `data/tgb`. `--device auto` (default) uses CUDA when available;
+use `--device cpu` or `--device cuda` to force a choice. Explicit CUDA requests
+fail clearly if unavailable. The selected device is logged and saved. CPU
+thread count defaults to `--threads 2`. The official evaluator and negative
+sampler remain CPU-side. GPU acceleration is not guaranteed for the many small,
+sequential timestamp updates; compare throughput on the target machine.
 
 This is an **event-time FNN variant**, not the existing binned simulation
 protocol. It ignores original message attributes and treats each observed

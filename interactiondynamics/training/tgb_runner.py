@@ -49,7 +49,17 @@ def load_tgb(name, root):
     return ds, Evaluator(name=name)
 
 
+def resolve_device(requested):
+    if requested not in {'auto', 'cpu', 'cuda'}:
+        raise ValueError(f'Unsupported device: {requested}')
+    if requested == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('--device cuda requested but CUDA is unavailable in this PyTorch environment')
+    return torch.device('cuda' if requested == 'auto' and torch.cuda.is_available()
+                        else 'cpu' if requested == 'auto' else requested)
+
+
 def run_tgb(args, dataset=None, evaluator=None):
+    device = resolve_device(getattr(args, 'device', 'auto'))
     if min(args.epochs, args.topology_epochs, args.physical_epochs, args.num_neg, args.threads) < 1:
         raise ValueError("Epoch counts, negative count and threads must be positive")
     if not math.isfinite(args.time_unit) or args.time_unit <= 0 or not math.isfinite(args.lr) or args.lr <= 0:
@@ -79,7 +89,6 @@ def run_tgb(args, dataset=None, evaluator=None):
     torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    device = torch.device('cpu')
     nodes = max(int(max(src.max(), dst.max())) + 1, int(getattr(dataset, 'num_nodes', 0)))
     model = FieldNeuralNetwork(num_nodes=nodes, force_dim=1, state_dim=1,
         gamma_init=.12, omega_init=.7, dt=1., topology_mode='observed_sparse',
@@ -90,6 +99,9 @@ def run_tgb(args, dataset=None, evaluator=None):
     neg = rng.choice(destinations, size=(masks[0].sum(), args.num_neg))
     model.set_sparse_topology_candidates(torch.from_numpy(np.concatenate([src[masks[0]], np.repeat(src[masks[0]], args.num_neg)])),
         torch.from_numpy(np.concatenate([dst[masks[0]], neg.ravel()])))
+    # Move after sparse parameter creation and before optimizer construction.
+    model = model.to(device)
+    print(f'TGB device={device} | threads={args.threads}', flush=True)
     scalars = {n:p for n,p in model.named_parameters() if n.endswith('_raw')}
     other = [p for n,p in model.named_parameters() if n not in scalars]
     optimizers = {'topology': torch.optim.Adam(other, lr=args.lr)}
@@ -98,7 +110,7 @@ def run_tgb(args, dataset=None, evaluator=None):
     def events(ids):
         return EventBatch(src=torch.from_numpy(src[ids]), dst=torch.from_numpy(dst[ids]),
             t=torch.from_numpy(times[ids]), features=torch.ones((len(ids),1)),
-            is_external=torch.zeros(len(ids),dtype=torch.bool))
+            is_external=torch.zeros(len(ids),dtype=torch.bool)).to(device)
 
     last_validation = None
 
@@ -120,9 +132,9 @@ def run_tgb(args, dataset=None, evaluator=None):
                         raise ValueError('No negative destinations for source')
                     negatives[selected] = rng.choice(allowed, size=(selected.sum(), args.num_neg))
                 pos_score = model.score(state, batch)
-                query = EventBatch(src=batch.src.repeat_interleave(args.num_neg), dst=torch.from_numpy(negatives.ravel()))
+                query = EventBatch(src=batch.src.repeat_interleave(args.num_neg), dst=torch.from_numpy(negatives.ravel()).to(device))
                 scores = torch.cat([pos_score[:,None], model.score(state, query).reshape(len(ids),-1)],dim=1)
-                loss = torch.nn.functional.cross_entropy(scores, torch.zeros(len(ids),dtype=torch.long))
+                loss = torch.nn.functional.cross_entropy(scores, torch.zeros(len(ids),dtype=torch.long,device=device))
                 if not torch.isfinite(loss):
                     raise RuntimeError('Nonfinite TGB training loss')
                 optimizer.zero_grad(set_to_none=True)
@@ -138,8 +150,8 @@ def run_tgb(args, dataset=None, evaluator=None):
                 for index, candidates in enumerate(negatives):
                     destinations_query = np.concatenate([[dst[ids[index]]], np.asarray(candidates,dtype=np.int64)])
                     query = EventBatch(src=torch.full((len(destinations_query),),int(src[ids[index]])),
-                                       dst=torch.from_numpy(destinations_query))
-                    predictions = model.score(state, query).detach().numpy()
+                                       dst=torch.from_numpy(destinations_query)).to(device)
+                    predictions = model.score(state, query).detach().cpu().numpy()
                     value = evaluator.eval({'y_pred_pos': predictions[:1], 'y_pred_neg': predictions[1:],
                                             'eval_metric': [dataset.eval_metric]})[dataset.eval_metric]
                     total += float(np.asarray(value).mean())
@@ -186,10 +198,11 @@ def run_tgb(args, dataset=None, evaluator=None):
         row = {'epoch':epoch,'phase':phase,'train_loss':loss,'val':{dataset.eval_metric:val},
                'parameters':{k:float(v.detach()) for k,v in model.physical_parameters().items()},
                'protocol':'tgb-event-time-unit-impulse','config':vars(args), 'tgb_version':version('py-tgb'),
-               'dataset_version':DATA_VERSION_DICT[args.dataset], 'selection_metric':dataset.eval_metric}
+               'dataset_version':DATA_VERSION_DICT[args.dataset], 'selection_metric':dataset.eval_metric,
+               'device':str(device)}
         with path.open('a') as handle: handle.write(json.dumps(row)+'\n')
         print(f'ep {epoch:03d} | {phase} | loss={loss:.4f} | val {dataset.eval_metric}={val:.4f}',flush=True)
-    model.load_state_dict(torch.load(checkpoint, weights_only=True))
+    model.load_state_dict(torch.load(checkpoint, weights_only=True, map_location=device))
     model.eval()
     with torch.no_grad():
         state = model.init_state(1,nodes,device)
