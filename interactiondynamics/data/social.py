@@ -32,6 +32,8 @@ class SocialConfig:
 
 
 class SocialEventDataset(EventStreamDataset):
+    continuous_stream = True
+
     def __init__(self, cfg: SocialConfig):
         if cfg.name not in {"college_msg", "email_eu_core", "sociopatterns"}:
             raise ValueError(f"Unknown social dataset: {cfg.name}")

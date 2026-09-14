@@ -83,7 +83,7 @@ class HopfieldAggregator(Aggregator):
             eidx  = idx
 
         # Group by node id
-        perm   = torch.argsort(nodes)
+        perm = torch.argsort(nodes * max(M, 1) + eidx, stable=True)
         nodes_s = nodes[perm]
         eidx_s  = eidx[perm]
 
@@ -175,13 +175,12 @@ class HopfieldAggregator(Aggregator):
             scores = scores.masked_fill(attn_mask, float("-inf"))
 
             w = torch.softmax(scores, dim=-1)  # [A,heads,1,K]
-            # w = self.drop(w) # turn this OFF for now
+            w = self.drop(w)
 
             # retrieved: [A,heads,1,head_dim]
             r = torch.matmul(w, v)  # [A,heads,1,head_dim]
 
-            # optionally: update q with retrieved (Hopfield iteration)
-            # q = r # turn this OFF (or use q = q + r)
+            q = r  # Refine the retrieval query, keeping stored patterns fixed.
 
         r = r.squeeze(2)  # [A,heads,head_dim]
         r = r.reshape(-1, self.hidden_dim)  # [A, hidden_dim]

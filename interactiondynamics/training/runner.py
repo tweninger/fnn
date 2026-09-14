@@ -1149,6 +1149,16 @@ def run_one_experiment(
         train_cfg.dst_id_range = spec.destination_id_range()
 
     model = build_model_fn(spec, run.model_cfg).to(device)
+    configure_history = getattr(model, "configure_training_history", None)
+    if callable(configure_history):
+        configure_history(ds.bins("train"))
+
+    def evaluation_history(split):
+        # Whole independent synthetic episodes must never share state.
+        if not getattr(ds, "continuous_stream", False):
+            return ()
+        from itertools import chain
+        return chain(ds.bins("train"), ds.bins("val")) if split == "test" else ds.bins("train")
     if (getattr(model, "parameter_free", False) and objective_metric is not None
             and "force_mse" in objective_metric.path):
         # EdgeBank has no force decoder; do not select it using a missing metric.
@@ -1533,6 +1543,7 @@ def run_one_experiment(
                 train_cfg,
                 slices=eval_slices,
                 progress_desc="baseline validation",
+                history_bins=evaluation_history("val"),
             )
             baseline_test = evaluate_stream_sliced(
                 model,
@@ -1542,6 +1553,7 @@ def run_one_experiment(
                 train_cfg,
                 slices=eval_slices,
                 progress_desc="baseline test",
+                history_bins=evaluation_history("test"),
             )
             run_primary_name = infer_primary_metric(baseline_val, baseline_test)
             baseline_str = (
@@ -1601,6 +1613,7 @@ def run_one_experiment(
                 train_cfg,
                 slices=eval_slices,
                 progress_desc="validation",
+                history_bins=evaluation_history("val"),
             ),
         )
         test_stats = timed(
@@ -1613,6 +1626,7 @@ def run_one_experiment(
                 train_cfg,
                 slices=eval_slices,
                 progress_desc="test",
+                history_bins=evaluation_history("test"),
             ),
         )
         # Keep recovery quantities alongside test metrics so normal JSONL
@@ -1726,6 +1740,7 @@ def run_one_experiment(
                 lambda: evaluate_physical_force_rollout(
                     model, ds.bins("val"), train_cfg, horizon=rollout_horizon,
                     progress_desc="validation rollout",
+                    history_bins=evaluation_history("val"),
                 ),
             )
             rollout_test_stats = timed(
@@ -1733,6 +1748,7 @@ def run_one_experiment(
                 lambda: evaluate_physical_force_rollout(
                     model, ds.bins("test"), train_cfg, horizon=rollout_horizon,
                     progress_desc="test rollout",
+                    history_bins=evaluation_history("test"),
                 ),
             )
 
@@ -1743,6 +1759,11 @@ def run_one_experiment(
 
         snapshot = {
             "epoch": epoch,
+            "implementation_revision": "fidelity_v1",
+            "evaluation_protocol": (
+                "continuous_history_replay_v1" if getattr(ds, "continuous_stream", False)
+                else "independent_split_state"
+            ),
             "alternating_phase": recovery_phase,
             "train_step": train_stats_step,
             "train_eval": train_eval,

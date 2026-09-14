@@ -28,11 +28,11 @@ class MAB(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, Q: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
+    def forward(self, Q: torch.Tensor, K: torch.Tensor, key_padding_mask=None) -> torch.Tensor:
         # Q: [B, nQ, d], K: [B, nK, d]
         x = self.ln1(Q)
         k = self.ln1(K)
-        h, _ = self.attn(x, k, k, need_weights=False)
+        h, _ = self.attn(x, k, k, key_padding_mask=key_padding_mask, need_weights=False)
         Q = Q + self.dropout(h)
 
         y = self.ln2(Q)
@@ -49,11 +49,11 @@ class PMA(nn.Module):
         self.seed = nn.Parameter(torch.randn(1, num_seeds, dim) * 0.02)
         self.mab = MAB(dim=dim, num_heads=num_heads, ff_dim=ff_dim, dropout=dropout)
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
+    def forward(self, X: torch.Tensor, key_padding_mask=None) -> torch.Tensor:
         # X: [B, K, d]
         B = X.size(0)
         S = self.seed.expand(B, -1, -1)  # [B, num_seeds, d]
-        return self.mab(S, X)            # [B, num_seeds, d]
+        return self.mab(S, X, key_padding_mask=key_padding_mask)
 
 
 class SetTransformerAggregator(Aggregator):
@@ -112,7 +112,7 @@ class SetTransformerAggregator(Aggregator):
         # We simulate a running counter by sorting by node, then using arange within group.
 
         # Sort endpoints by node
-        perm = torch.argsort(nodes)
+        perm = torch.argsort(nodes * max(M, 1) + eidx, stable=True)
         nodes_s = nodes[perm]
         eidx_s  = eidx[perm]
 
@@ -156,9 +156,8 @@ class SetTransformerAggregator(Aggregator):
         # Build padded per-node sets
         X, mask = self._build_padded_sets(event_embeddings, events, num_nodes)  # X: [N,K,d]
 
-        # Zero-out padded positions explicitly (already zero) and run self-attn blocks.
-        # NOTE: nn.MultiheadAttention supports key_padding_mask, but we kept MAB simple.
-        # Because padded positions are zeros and LN/FF can leak, we'll re-mask after blocks.
+        # Exclude padding as keys in both self-attention and pooling.
+        # Only active sets enter attention, avoiding all-masked softmax rows.
         # X: [N,K,d], mask: [N,K]
         active = mask.any(dim=1)               # [N] active gating
         if not torch.any(active):
@@ -170,10 +169,10 @@ class SetTransformerAggregator(Aggregator):
 
 
         for blk in self.self_blocks:
-            X_a = blk(X_a, X_a)
+            X_a = blk(X_a, X_a, key_padding_mask=~mask_a)
             X_a = X_a * mask_a.unsqueeze(-1)
 
-        pooled_a = self.pma(X_a).squeeze(1)    # [A,d]           
+        pooled_a = self.pma(X_a, key_padding_mask=~mask_a).squeeze(1)
 
         out = torch.zeros((num_nodes, self.msg_dim), device=X.device, dtype=X.dtype)
         out[active] = pooled_a

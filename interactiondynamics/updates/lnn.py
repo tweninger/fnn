@@ -23,7 +23,10 @@ def _mlp(in_dim: int, hidden: int, layers: int, out_dim: int, dropout: float = 0
 
 class LNNUpdate(UpdateLaw):
     """
-    Discrete-time Lagrangian-style update.
+    Restricted learned-potential Lagrangian update (unit mass).
+
+    L(q, qdot; messages) = 0.5 * ||qdot||^2 - V_theta(q; messages).
+    This is not a general learned L(q, qdot) with a learned mass Hessian.
 
     State:
       node      := q      (N, d)

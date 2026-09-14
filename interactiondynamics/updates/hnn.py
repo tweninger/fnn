@@ -35,9 +35,14 @@ class HNNUpdate(UpdateLaw):
       dq/dt =  dH/dp
       dp/dt = -dH/dq
 
-    Integration (symplectic Euler):
+    Integration (explicit Euler, not symplectic):
       p_{t+1} = p_t + dt * dp/dt
-      q_{t+1} = q_t + dt * dq/dt evaluated at (q_t, p_{t+1})
+      q_{t+1} = q_t + dt * dq/dt
+
+    Both derivatives use (q_t, p_t). The unrestricted, message-conditioned
+    Hamiltonian need not be separable; explicit kick-drift is not generally
+    symplectic for this model. Damping/conditioning also preclude a general
+    energy-conservation claim.
     """
 
     def __init__(
@@ -124,38 +129,10 @@ class HNNUpdate(UpdateLaw):
             if self.damping != 0.0:
                 dpdt = dpdt - self.damping * p
 
-            # ---- symplectic Euler (kick-drift) ----
-            # 1) kick: update momentum
+            # Explicit Euler is well-defined for a general H(q,p,m).
             p_next = p + dt * dpdt
-
-            # 2) drift: recompute dq/dt at (q_t, p_{t+1})
-            qp2 = torch.cat([q, p_next], dim=-1)
-            if not qp2.requires_grad:
-                qp2 = qp2.requires_grad_(True)
-
-            q2, p2 = qp2[:, : self.d], qp2[:, self.d :]
-
-            if drive is not None:
-                drive_in = drive.unsqueeze(-1) if drive.dim() == 1 else drive
-                inp2 = torch.cat([q2, p2, messages, drive_in], dim=-1)
-            else:
-                inp2 = torch.cat([q2, p2, messages], dim=-1)
-
-            H_per2 = self.H(inp2).squeeze(-1)
-            H_tot2 = H_per2.sum()
-
-
-            (dH_dqp2,) = torch.autograd.grad(
-                H_tot2, qp2,
-                create_graph=create_graph,
-                retain_graph=retain,
-                allow_unused=False,
-            )            
-
-            dqdt_next = dH_dqp2[:, self.d :]   # dH/dp evaluated at p_next
-
-            # 3) update position using dq/dt at new momentum
-            q_next = q + dt * dqdt_next
+            dqdt_next = dqdt
+            q_next = q + dt * dqdt
 
             qp_next = torch.cat([q_next, p_next], dim=-1)
 

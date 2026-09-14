@@ -83,7 +83,10 @@ class DyGLibAdapter(EdgeBankAdapter):
         self.num_neighbors = cfg.temporal_num_neighbors
         self.node_dim = cfg.node_dim
         nodes = np.zeros((num_nodes + 1, cfg.node_dim), dtype=np.float32)
-        edges = np.zeros((1, event_dim), dtype=np.float32)
+        # GraphMixer mixes across raw edge channels. Preserve upstream's
+        # minimum width without inventing additional observed features.
+        self.edge_input_dim = max(172, event_dim) if self.kind == "graphmixer" else event_dim
+        edges = np.zeros((1, self.edge_input_dim), dtype=np.float32)
         sampler = NeighborSampler([[] for _ in range(num_nodes + 1)], sample_neighbor_strategy="recent")
         common = dict(node_raw_features=nodes, edge_raw_features=edges,
                       neighbor_sampler=sampler, time_feat_dim=cfg.time_emb_dim, dropout=cfg.dropout)
@@ -109,6 +112,52 @@ class DyGLibAdapter(EdgeBankAdapter):
         self.register_buffer("event_feature_active_threshold", torch.tensor(0.))
         self.register_buffer("event_feature_magnitude_q90", torch.tensor(1.))
         self._history_cache = None
+        if self.kind == "jodie":
+            for name, value in (("src_node_mean_time_shift", 0.), ("src_node_std_time_shift", 1.),
+                                ("dst_node_mean_time_shift_dst", 0.), ("dst_node_std_time_shift", 1.)):
+                self.register_buffer(name, torch.tensor(value, dtype=torch.float64))
+
+    def configure_training_history(self, bins):
+        """Fit JODIE clock normalization on training events only."""
+        if self.kind != "jodie":
+            return
+        from .dyglib_vendor.MemoryModel import compute_src_dst_node_time_shifts
+        batches = [b for b in bins if b.num_events]
+        if not batches:
+            raise ValueError("JODIE time normalization requires training events")
+        groups = []
+        previous_episode = None
+        for batch in batches:
+            if batch.t is None:
+                raise ValueError("JODIE time normalization requires timestamps")
+            episode = None if batch.episode is None else int(batch.episode[0])
+            if not groups or episode != previous_episode:
+                groups.append([])
+            groups[-1].append(batch)
+            previous_episode = episode
+        moments, counts = [], []
+        for group in groups:
+            # Reset last-seen clocks across independent synthetic episodes.
+            stats = compute_src_dst_node_time_shifts(
+                torch.cat([b.src for b in group]).cpu().numpy(),
+                torch.cat([b.dst for b in group]).cpu().numpy(),
+                torch.cat([b.t for b in group]).double().cpu().numpy(),
+            )
+            moments.append(stats)
+            counts.append(sum(b.num_events for b in group))
+        moments = np.asarray(moments)
+        values = []
+        for column in (0, 2):
+            mean = np.average(moments[:, column], weights=counts)
+            second = np.average(moments[:, column + 1] ** 2 + moments[:, column] ** 2, weights=counts)
+            values.extend((mean, np.sqrt(max(0., second - mean ** 2))))
+        names = ("src_node_mean_time_shift", "src_node_std_time_shift",
+                 "dst_node_mean_time_shift_dst", "dst_node_std_time_shift")
+        for i, (name, value) in enumerate(zip(names, values)):
+            # Constant gaps have no dispersion; unit scale avoids division by zero.
+            value = float(value) if i % 2 == 0 or value > 1e-8 else 1.0
+            getattr(self, name).fill_(value)
+            setattr(self.backbone, name, getattr(self, name))
 
     def init_state(self, batch_size, num_nodes, device):
         state = super().init_state(batch_size, num_nodes, device)
@@ -134,7 +183,13 @@ class DyGLibAdapter(EdgeBankAdapter):
                 adj[dst + 1].append((src + 1, eid, time))
             self._sampler = NeighborSampler(adj, sample_neighbor_strategy="recent")
             self._history_cache = a["src"]
-        b.edge_raw_features = torch.cat([self.anchor.new_zeros(1, self.event_dim), a["features"]])
+        features = torch.nn.functional.pad(a["features"], (0, self.edge_input_dim - self.event_dim))
+        b.edge_raw_features = torch.cat([self.anchor.new_zeros(1, self.edge_input_dim), features])
+        if self.kind == "jodie":
+            for name in ("src_node_mean_time_shift", "src_node_std_time_shift",
+                         "dst_node_mean_time_shift_dst", "dst_node_std_time_shift"):
+                if hasattr(self, name):
+                    setattr(b, name, getattr(self, name))
         if self.kind in {"tgn", "jodie"}:
             b.embedding_module.device = str(device)
             b.embedding_module.node_raw_features = b.node_raw_features

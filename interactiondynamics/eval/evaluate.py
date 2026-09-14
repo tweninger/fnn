@@ -847,6 +847,7 @@ def evaluate_physical_force_rollout(
     *,
     horizon: int = 5,
     progress_desc: str = "rollout evaluation",
+    history_bins: Iterable[EventBatch] = (),
 ) -> Dict[str, Any]:
     """Closed-loop force rollout under an oracle future pair-query schedule.
 
@@ -876,6 +877,12 @@ def evaluate_physical_force_rollout(
     history_device = torch.device("cpu")
     states_after_observed: list[Optional[ModelState]] = [None] * len(events_seq)
     state: Optional[ModelState] = None
+    for past in tqdm(history_bins, desc="rollout history replay", unit="bin", leave=False):
+        if state is None:
+            state = model.init_state(batch_size=1, num_nodes=cfg.num_nodes, device=device)
+        state, _ = model.step(state, past.to(device))
+        if state is not None:
+            state.detach_()
     previous_episode: Optional[int] = None
     for idx, events in enumerate(tqdm(events_seq, desc=progress_desc, unit="bin", leave=False)):
         episode = None if events.episode is None else int(events.episode[0].item())
@@ -1155,6 +1162,7 @@ def evaluate_stream_sliced(
     *,
     slices: EvalSlices = EvalSlices(),
     progress_desc: str = "evaluation",
+    history_bins: Iterable[EventBatch] = (),
 ) -> Dict[str, float]:
     """
     Evaluate ranking metrics over a binned stream, returning:
@@ -1162,7 +1170,8 @@ def evaluate_stream_sliced(
       - early (first N scored steps)
       - late (remaining scored steps)
 
-    No warmup. State is initialized fresh.
+    Replay supplied past observations without scoring or fitting parameters.
+    Independent episodes default to a fresh state (no history supplied).
     """
     bins = list(bins)
     if (not getattr(model, "requires_unpacked_episodes", False)
@@ -1184,6 +1193,14 @@ def evaluate_stream_sliced(
     persistent_late = _acc_init()
 
     prev: Optional[EventBatch] = None
+    # Leave the last historical bin pending: the main loop consumes it before
+    # scoring the first held-out bin, exactly like subsequent predictions.
+    for past in tqdm(history_bins, desc="history replay", unit="bin", leave=False):
+        if prev is not None:
+            state, _ = model.step(state, prev)
+            if state is not None:
+                state.detach_()
+        prev = past.to(device)
     scored_step = 0
     persistent_state = None
     target_iter = iter(node_targets) if node_targets is not None else None
