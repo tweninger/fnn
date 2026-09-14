@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Experiment 5.5: non-oracle alternating topology and physical recovery.
-# Synthetic counterpart to the JODIE block-coordinate schedule. Each run
+# Synthetic counterpart to the real-data block-coordinate schedule. Each run
 # starts from a sampled topology logit and perturbed physical coefficients,
 # then follows topology -> physical scalar sweep -> topology readaptation.
 #

@@ -1165,7 +1165,8 @@ def evaluate_stream_sliced(
     No warmup. State is initialized fresh.
     """
     bins = list(bins)
-    if edge_targets is None and node_targets is None and bins and bins[0].features is not None:
+    if (not getattr(model, "requires_unpacked_episodes", False)
+            and edge_targets is None and node_targets is None and bins and bins[0].features is not None):
         bins = pack_independent_episode_bins(bins, num_nodes=cfg.num_nodes)
     model.eval()
     device = torch.device(cfg.device)

@@ -1,3 +1,1 @@
-from .jodie import JODIEConfig, JODIEBinnedDataset
-
-__all__ = ["JODIEConfig", "JODIEBinnedDataset"]
+"""Synthetic, social-event, and traffic dataset loaders."""

@@ -38,7 +38,7 @@ venv/bin/pyright
 
 Use `smoke` to check that a task and its recommended shortlist execute. Use
 `quick` for a small pilot; it is not a paper-scale result. `sweep` retains
-the broader legacy JODIE grid.
+the real-data comparison panel.
 
 ```bash
 venv/bin/python -m interactiondynamics.train smoke --dataset synthetic --synthetic-task deepsets_sum
@@ -136,12 +136,12 @@ venv/bin/python -m interactiondynamics.train <smoke|quick|sweep> [flags]
 Available subcommands:
 
 - `smoke`: tiny toy-dataset check over the focused shortlist.
-- `quick`: focused shortlist run, defaulting to JODIE Wikipedia.
-- `sweep`: broader multi-seed sweep over the larger preset grid.
+- `quick`: real-data comparison panel, defaulting to CollegeMsg.
+- `sweep`: longer real-data panel (or the selected synthetic preset).
 
 Common dataset flags:
 
-- `--dataset {toy,jodie,synthetic}`: override the dataset when supported by the subcommand. For JODIE, use `--dataset jodie wikipedia`, `reddit`, `mooc`, or `lastfm`; omitting the benchmark retains the Wikipedia default.
+- `--dataset {toy,synthetic,college_msg,email_eu_core,sociopatterns}`: override the dataset. JODIE is a model in the panel, not a dataset option.
 - `--synthetic-task TASK`: choose the synthetic benchmark task when `--dataset synthetic`.
 - `--synthetic-topology {ring,grid,torus,doorway,swisscheese}`: choose the domain independently for `diffusion`, `wave`, or `coupled_oscillator`; the default is `ring`.
 - `--synthetic-num-nodes N`: override synthetic node count.

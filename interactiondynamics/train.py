@@ -36,13 +36,7 @@ TARGET_MODE_CHOICES = ("raw", "residual")
 EDGE_TARGET_SCALE_CHOICES = ("raw", "zscore")
 PREDICTION_MODE_CHOICES = ("state", "delta", "state_plus_delta")
 SOCIAL_DATASETS = ("college_msg", "email_eu_core", "sociopatterns")
-DATASET_CHOICES = ("toy", "jodie", "synthetic", *SOCIAL_DATASETS)
-JODIE_DATASET_CHOICES = {
-    "wikipedia": "Wikipedia",
-    "reddit": "Reddit",
-    "mooc": "MOOC",
-    "lastfm": "LastFM",
-}
+DATASET_CHOICES = ("toy", "synthetic", *SOCIAL_DATASETS)
 PRESET_CHOICES = ("smoke", "quick", "full")
 LEGACY_WAVE_TASKS = {"wave_grid", "wave_torus", "wave_doorway", "wave_swisscheese"}
 PUBLIC_SYNTHETIC_TASKS = tuple(
@@ -50,57 +44,14 @@ PUBLIC_SYNTHETIC_TASKS = tuple(
 )
 
 
-class _DatasetArgumentAction(argparse.Action):
-    """Parse ``--dataset jodie [benchmark]`` while keeping other datasets simple."""
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Sequence[str],
-        option_string: str | None = None,
-    ) -> None:
-        if not values or len(values) > 2:
-            parser.error("--dataset accepts DATASET, or `jodie` followed by a JODIE benchmark name.")
-        dataset = values[0].lower()
-        if dataset not in DATASET_CHOICES:
-            parser.error(f"unknown dataset {values[0]!r}; choose from {', '.join(DATASET_CHOICES)}")
-        if dataset != "jodie":
-            if len(values) != 1:
-                parser.error(f"--dataset {dataset} does not accept a benchmark name.")
-            setattr(namespace, self.dest, dataset)
-            return
-
-        benchmark = "wikipedia" if len(values) == 1 else values[1].lower()
-        jodie_name = JODIE_DATASET_CHOICES.get(benchmark)
-        if jodie_name is None:
-            parser.error(
-                "unknown JODIE benchmark "
-                f"{benchmark!r}; choose from {', '.join(JODIE_DATASET_CHOICES)}"
-            )
-        setattr(namespace, self.dest, dataset)
-        setattr(namespace, "jodie_name", jodie_name)
-
-
 def _build_common_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.set_defaults(jodie_name="Wikipedia")
     data_group = common.add_argument_group("dataset")
     data_group.add_argument("--social-root", default="data", help="Parent directory of social datasets.")
     data_group.add_argument("--social-bin-size", type=float, default=None,
                             help="Social observation-bin width in seconds; FNN dt defaults to one bin.")
-    data_group.add_argument(
-        "--dataset",
-        nargs="+",
-        action=_DatasetArgumentAction,
-        metavar="DATASET [JODIE_BENCHMARK]",
-        default=None,
-        help=(
-            "Optional dataset override. Use `--dataset jodie wikipedia`, "
-            "`reddit`, `mooc`, or `lastfm`; omitting the benchmark uses Wikipedia. "
-            "Homogeneous social datasets: college_msg, email_eu_core, sociopatterns."
-        ),
-    )
+    data_group.add_argument("--dataset", choices=DATASET_CHOICES, default=None,
+                            help="Dataset override; defaults to college_msg for quick/full.")
     data_group.add_argument(
         "--synthetic-task",
         choices=PUBLIC_SYNTHETIC_TASKS,
@@ -166,14 +117,6 @@ def _build_common_parser() -> argparse.ArgumentParser:
         help="Number of simulated time bins for synthetic datasets.",
     )
     data_group.add_argument("--seed", type=int, default=0, help="Random seed for simulated datasets.")
-    data_group.add_argument(
-        "--jodie-fnn",
-        action="store_true",
-        help=(
-            "Run the minimal FNN on JODIE: unit interaction impulses, train-observed "
-            "sparse topology candidates, and ranking evaluation."
-        ),
-    )
     train_group = common.add_argument_group("training")
     train_group.add_argument(
         "--max-runs",
@@ -379,22 +322,6 @@ def _add_subcommands(
     common: argparse.ArgumentParser,
 ) -> None:
     subparsers = parser.add_subparsers(dest="command")
-    tgb = subparsers.add_parser("tgb", help="Event-time FNN with official TGB splits/candidates/evaluator.")
-    tgb.add_argument("--dataset", choices=["tgbl-wiki"], default="tgbl-wiki")
-    tgb.add_argument("--root", default="data/tgb")
-    tgb.add_argument("--epochs", type=int, default=9)
-    tgb.add_argument("--seed", type=int, default=0)
-    tgb.add_argument("--lr", type=float, default=0.003)
-    tgb.add_argument("--num-neg", type=int, default=10)
-    tgb.add_argument("--time-unit", type=float, default=3600., help="Timestamp seconds per model time unit.")
-    tgb.add_argument("--topology-epochs", type=int, default=3)
-    tgb.add_argument("--physical-epochs", type=int, default=1)
-    tgb.add_argument("--threads", type=int, default=2)
-    tgb.add_argument("--accumulate-timestamps", type=int, default=1,
-                     help="Average gradients over this many chronological timestamps per optimizer step; try 128.")
-    tgb.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
-                     help="TGB compute device; auto uses CUDA when available.")
-    tgb.add_argument("--save-jsonl", required=True)
     for name, help_text in (
         ("smoke", "Run a tiny smoke test preset."),
         ("quick", "Run the focused shortlist preset."),
@@ -1120,13 +1047,11 @@ def _validate_rollout_training_selection(runs: Sequence[SweepRun], rollout_train
 
 def main() -> None:
     args = parse_args()
-    if args.command == "tgb":
-        from interactiondynamics.training.tgb_runner import run_tgb
-        run_tgb(args)
-        return
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _normalize_ift_variant_args(args)
     preset = "full" if args.command == "sweep" else args.command
+    if args.dataset is None and preset != "smoke":
+        args.dataset = "college_msg"
     suite = build_suite(preset, device, dataset_override=args.dataset, args=args)
     print(f"Loading dataset | preset={preset} dataset={suite.dataset}", flush=True)
     ds = load_dataset(suite.dataset, suite.dataset_kwargs)
@@ -1224,7 +1149,6 @@ def main() -> None:
         "diffusion", "wave", "coupled_oscillator"
     }
     social_fnn_task = args.dataset in SOCIAL_DATASETS
-    jodie_fnn_task = (args.dataset == "jodie" and bool(args.jodie_fnn)) or social_fnn_task
     if social_fnn_task and (args.fnn_oracle_topology or args.fnn_learn_physical_params or args.fnn_learn_force_scale):
         raise ValueError("Social FNN uses learned gamma, omega and input scale; oracle support and pair-force recovery flags do not apply.")
     if (
@@ -1235,10 +1159,10 @@ def main() -> None:
         or args.fnn_learn_force_scale
         or args.fnn_oracle_topology
         or args.fnn_alternating_recovery
-    ) and not (physical_synthetic_task or jodie_fnn_task):
+    ) and not (physical_synthetic_task or social_fnn_task):
         raise ValueError(
             "FNN physical-recovery flags are supported only "
-            "for event-only synthetic diffusion/wave/coupled_oscillator tasks or --jodie-fnn."
+            "for event-only synthetic diffusion/wave/coupled_oscillator tasks or real social datasets."
         )
     if physical_synthetic_task:
         if args.use_node_scorer or args.node_loss_weight != 1.0 or args.node_scorer_hidden != 128:
@@ -1251,20 +1175,20 @@ def main() -> None:
         ):
             raise ValueError("Target-transform flags do not apply to event-only physical force tasks.")
     if args.fnn_alternating_recovery:
-        if not (args.fnn_learn_physical_params or jodie_fnn_task):
+        if not (args.fnn_learn_physical_params or social_fnn_task):
             raise ValueError(
                 "--fnn-alternating-recovery requires --fnn-learn-physical-params; "
                 "it freezes all but one scalar inside each physical subphase."
             )
-        if not jodie_fnn_task and (args.fnn_learn_gamma or args.fnn_learn_omega or args.fnn_learn_force_scale):
+        if not social_fnn_task and (args.fnn_learn_gamma or args.fnn_learn_omega or args.fnn_learn_force_scale):
             raise ValueError("--fnn-alternating-recovery does not accept selective --fnn-learn-* flags.")
         topology_epochs = args.fnn_alternating_topology_epochs or 20
         physical_epochs = args.fnn_alternating_physical_epochs or 50
         cycles = args.fnn_alternating_cycles or 2
-        scalar_phases = 4 if jodie_fnn_task else (2 if args.synthetic_task == "diffusion" else 3)
+        scalar_phases = 4 if social_fnn_task else (2 if args.synthetic_task == "diffusion" else 3)
         if social_fnn_task and not args.fnn_learn_dt:
             scalar_phases = 3
-        if not jodie_fnn_task and args.fnn_learn_dt:
+        if not social_fnn_task and args.fnn_learn_dt:
             scalar_phases += 1
         physical_sweep_epochs = scalar_phases * physical_epochs
         if args.fnn_oracle_topology:

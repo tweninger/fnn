@@ -169,7 +169,7 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
         value = getattr(args, arg_name, None)
         if value is not None:
             setattr(cfg, config_name, value)
-    # A JODIE comparison panel contains neural baselines alongside the FNN.
+    # The real-data comparison panel contains baselines alongside the FNN.
     # Alternating scalar recovery is an FNN-specific schedule, so do not
     # impose it on GRU/SetTransformer/Hopfield/LNN/HNN runs.
     cfg.fnn_alternating_recovery = bool(cfg.fnn) and (
@@ -177,6 +177,15 @@ def apply_model_overrides(model_cfg: ModelConfig, args: argparse.Namespace) -> M
         or bool(cfg.fnn_alternating_recovery)
     )
     return cfg
+
+
+class _NoOpOptimizer:
+    """EdgeBank records history but has no fitted weights."""
+    def zero_grad(self, **kwargs):
+        pass
+
+    def step(self):
+        pass
 
 
 class _EpochAccumulatingPhysicalOptimizer:
@@ -641,7 +650,8 @@ def _train_one_epoch_standard(
     # instead of ten tiny sequential launches. Non-physical and legacy paths
     # retain their original stream representation.
     bins = list(bins)
-    if edge_targets is None and node_targets is None and bins and bins[0].features is not None:
+    if (not getattr(model, "requires_unpacked_episodes", False)
+            and edge_targets is None and node_targets is None and bins and bins[0].features is not None):
         bins = pack_independent_episode_bins(bins, num_nodes=cfg.num_nodes)
     model.train()
     device = torch.device(cfg.device)
@@ -984,7 +994,7 @@ def _train_one_epoch_standard(
         # has no gradient (notably with frozen physical scalars). Do not apply
         # optimizer momentum/decay when there is no supervised target.
         quiet_bin = curr.src.numel() == 0 and curr_edge_target is None and curr_node_target is None
-        if total_step_loss.requires_grad or not quiet_bin:
+        if not getattr(model, "parameter_free", False) and (total_step_loss.requires_grad or not quiet_bin):
             total_step_loss.backward()
             if cfg.grad_clip and cfg.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -1139,6 +1149,10 @@ def run_one_experiment(
         train_cfg.dst_id_range = spec.destination_id_range()
 
     model = build_model_fn(spec, run.model_cfg).to(device)
+    if (getattr(model, "parameter_free", False) and objective_metric is not None
+            and "force_mse" in objective_metric.path):
+        # EdgeBank has no force decoder; do not select it using a missing metric.
+        objective_metric = TaskMetricSpec(path="val.event_auroc", goal="max")
     # Sparse FNN topology is deliberately fitted only over train-observed
     # directed pairs.  Build its candidate table before collecting optimizer
     # parameters, so the newly created edge-logit parameter is optimized.
@@ -1312,7 +1326,8 @@ def run_one_experiment(
             optimizer_groups.append({"params": other_params, "weight_decay": train_cfg.weight_decay})
         if physical_params:
             optimizer_groups.append({"params": physical_params, "weight_decay": 0.0})
-        optimizer = torch.optim.Adam(optimizer_groups, lr=train_cfg.lr)
+        optimizer = (torch.optim.Adam(optimizer_groups, lr=train_cfg.lr)
+                     if optimizer_groups else _NoOpOptimizer())
 
     def alternating_phase(epoch: int) -> tuple[str, object]:
         """Activate topology or one scheduled physical scalar for ``epoch``."""
@@ -1442,6 +1457,8 @@ def run_one_experiment(
     hidden_truth_fn = getattr(ds, "hidden_truth", None)
     hidden_truth = hidden_truth_fn() if callable(hidden_truth_fn) else None
     baseline_printed = False
+    if getattr(model, "parameter_free", False):
+        epochs = 1
     for epoch in range(1, epochs + 1):
         timing_sec: dict[str, float] = {}
         timing_enabled = bool(getattr(train_cfg, "debug_timing", False))

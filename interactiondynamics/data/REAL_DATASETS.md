@@ -51,8 +51,16 @@ these defaults define our protocol, not an official benchmark protocol.
 The loader implements `EventStreamDataset` and can feed the existing training
 API and the regular `train --dataset college_msg`, `email_eu_core`, or
 `sociopatterns` CLI options. These presets include FNN followed by the usual
-six baselines; use `--max-runs 1` for FNN only. `--social-root` selects the
+six baselines, then EdgeBank, GraphMixer, TGN, DyGFormer, and JODIE (the model,
+not its datasets). Use `--max-runs 1` for FNN only. `--social-root` selects the
 parent data directory; `--social-bin-size` overrides bin width in seconds.
+
+`scripts/6_real_benchmark_panel.sh` runs all three social datasets with the
+12-model panel. Use `RUN_OFFSET=7 MAX_RUNS=5` for only the DyGLib additions.
+The default fixed-clock FNN schedule has three physical phases (omega, gamma,
+input scale). JODIE dataset loading and its old benchmark script have been
+removed; downloaded data, old results, and historical notebooks are retained.
+`quick` and `full` without an explicit dataset now default to CollegeMsg.
 
 ### Quick FNN run
 
@@ -83,64 +91,6 @@ adds a dt phase (use `--epochs 10` for that schedule); unlike the old script,
 it does not couple dt to omega. Use a fresh `--save-jsonl` path for each run:
 the regular runner appends records to existing files. This short diagnostic
 is not a converged benchmark. The previous smoke results remain preserved.
-
-## TGB event-time experiment (FNN only)
-
-```bash
-venv/bin/python -m pip install '.[tgb]'
-venv/bin/python -u -m interactiondynamics.train tgb \
-  --dataset tgbl-wiki --epochs 9 --seed 0 \
-  --save-jsonl derived/results/tgb/wiki_fnn_seed0.jsonl
-```
-
-This separate subcommand uses TGB's official masks, validation/test negative
-candidates and evaluator (MRR for tgbl-wiki). The optional dependency is pinned
-to py-tgb 2.3.0; package and dataset versions are saved in the JSONL. Data are
-downloaded to `data/tgb`. `--device auto` (default) uses CUDA when available;
-use `--device cpu` or `--device cuda` to force a choice. Explicit CUDA requests
-fail clearly if unavailable. The selected device is logged and saved. CPU
-thread count defaults to `--threads 2`. The official evaluator and negative
-sampler remain CPU-side. GPU acceleration is not guaranteed for the many small,
-sequential timestamp updates; compare throughput on the target machine.
-
-To reduce optimizer overhead, add `--accumulate-timestamps 128`. The default
-is 1 for backward compatibility. Events are still scored and observed in
-timestamp order, with state gradients detached at each timestamp. Gradients
-are averaged across timestamps, clipped once and applied once per block; a
-short final block uses its actual size. This changes the optimization schedule,
-not the observation history or official evaluation candidates. It is not
-equivalent to 128 timestamps of backpropagation through time. Train negative
-exclusions use a bounded cache. Training time, timestamp throughput and actual
-optimizer update counts are saved under `train_performance` in each JSONL row.
-Larger accumulation means fewer updates per epoch and may need different
-learning-rate/epoch settings; speed alone does not establish equal accuracy.
-
-This is an **event-time FNN variant**, not the existing binned simulation
-protocol. It ignores original message attributes and treats each observed
-interaction as a unit impulse into the destination velocity, gated by the
-existing sparse FNN topology. Between timestamps it uses the exact unforced
-damped-oscillator transition. Actual elapsed seconds divided by `--time-unit`
-(3600 by default) set elapsed model time; no dt parameter is trained. No
-force-regression auxiliary loss or conditional force rollout is used.
-
-All simultaneous events are scored before any is observed. Training uses
-sampled destination softmax, excluding simultaneous positives for that source;
-evaluation uses only the official negative lists and per-event MRR. Candidate
-parameters come from train-observed and train-sampled pairs, never held-out
-edges. The destination vocabulary is transductive. Physical updates truncate
-gradients at timestamp boundaries; no full-history backpropagation is claimed.
-
-The default schedule is 3 topology epochs, one each for omega, gamma and input
-scale, then 3 topology epochs. More generally use epochs = T + R*(T+3P), with
-`--topology-epochs T` and `--physical-epochs P`. Each epoch replays training
-history under fixed weights before validation. The highest-validation-MRR
-checkpoint is saved beside the JSONL as `.best.pt`. At test time it replays
-train and validation observations, then scores and observes test events
-chronologically. Existing result/checkpoint paths are refused, not overwritten.
-
-This uses the official evaluation components, but is not a claim of matching
-every reference model's batching or feature choices. No reference TGN or
-EdgeBank baseline is launched yet. See the [TGB reference implementation](https://github.com/shenyangHuang/TGB/blob/main/examples/linkproppred/tgbl-wiki/tgn.py).
 
 ## Traffic windows
 

@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS
-from interactiondynamics.data.jodie import _JODIEBinnedStream
 from interactiondynamics.training.presets import (
     DIFFUSION_COMPARISON_PANEL,
     FIELD_COMPARISON_PANEL,
@@ -74,27 +73,29 @@ def test_physical_tasks_use_the_shared_event_prediction_panel() -> None:
         "hopfield/hopfield_update",
         "settransformer/lnn",
         "settransformer/hnn",
+        "edgebank",
+        "graphmixer",
+        "tgn",
+        "dygformer",
+        "jodie",
     ]
     pairs = {(run.model_cfg.aggregator, run.model_cfg.update) for run in suite.runs}
     assert pairs == set(PHYSICAL_EVENT_COMPARISON_PANEL)
-    assert all(run.model_cfg.predict_event_features for run in suite.runs)
+    assert all(run.model_cfg.predict_event_features for run in suite.runs if run.name != "edgebank")
+    assert not suite.runs[7].model_cfg.predict_event_features
     assert suite.runs[0].model_cfg.fnn
 
 
-def test_jodie_binned_stream_uses_precomputed_contiguous_offsets() -> None:
-    stream = _JODIEBinnedStream(
-        src_all=torch.tensor([0, 1, 2, 3]),
-        dst_all=torch.tensor([1, 2, 3, 0]),
-        msg_all=torch.tensor([[1.0], [2.0], [3.0], [4.0]]),
-        active_bin_ids=torch.tensor([2, 5]),
-        active_bin_offsets=torch.tensor([0, 3, 4]),
-    )
-
-    batches = list(stream)
-    assert len(stream) == 2
-    assert [batch.t[0].item() for batch in batches] == [2, 5]
-    assert [batch.num_events for batch in batches] == [3, 1]
-    assert torch.equal(batches[0].features, torch.tensor([[1.0], [2.0], [3.0]]))
+@pytest.mark.parametrize("dataset", [None, "college_msg", "email_eu_core", "sociopatterns"])
+def test_real_panel_does_not_depend_on_jodie_dataset(dataset):
+    suite = build_suite("quick", torch.device("cpu"), dataset_override=dataset)
+    assert suite.dataset == "social"
+    assert suite.dataset_kwargs["name"] == (dataset or "college_msg")
+    assert len(suite.runs) == 12
+    assert suite.runs[-1].name == "jodie"
+    assert suite.runs[-1].model_cfg.temporal_model == "jodie"
+    assert not suite.model_cfg.fnn_learn_dt
+    assert suite.model_cfg.fnn_dt == 1.0
 
 
 def test_wave_uses_the_shared_event_panel() -> None:

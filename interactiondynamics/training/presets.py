@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional, Sequence, cast
 import torch
 
 from interactiondynamics.core.config import ModelConfig
-from interactiondynamics.data.jodie import JODIEBinnedDataset, JODIEConfig  # type: ignore
 from interactiondynamics.data.synthetic import SYNTHETIC_TASKS, SyntheticDataset, SyntheticDatasetConfig
 from interactiondynamics.data.toy import ToyShiftConfig, ToyShiftDataset
 from interactiondynamics.eval.evaluate import EvalSlices
@@ -513,6 +512,10 @@ def _physical_event_runs(model_cfg: ModelConfig, *, seed: int) -> list[SweepRun]
         cfg.update = update  # type: ignore[assignment]
         cfg.predict_event_features = True
         runs.append(SweepRun(name=f"{aggregator}/{update}", model_cfg=cfg, seed=seed))
+    for name in ("edgebank", "graphmixer", "tgn", "dygformer", "jodie"):
+        cfg = replace(model_cfg, fnn=False, temporal_model=name,
+                      predict_event_features=name != "edgebank")
+        runs.append(SweepRun(name=name, model_cfg=cfg, seed=seed))
     return runs
 
 
@@ -667,20 +670,33 @@ def build_suite(
     dataset_override: Optional[str] = None,
     args: Optional[argparse.Namespace] = None,
 ) -> RunSuite:
+    if dataset_override is None and preset != "smoke":
+        dataset_override = "college_msg"
     if dataset_override in {"college_msg", "email_eu_core", "sociopatterns"}:
-        social_args = argparse.Namespace(**(vars(args) if args is not None else {}))
-        social_args.jodie_fnn = True
-        suite = build_suite("quick" if preset == "smoke" else preset, device, "jodie", social_args)
-        for cfg in [suite.model_cfg, *(run.model_cfg for run in suite.runs)]:
-            cfg.fnn_dt = 1.0
-            cfg.fnn_learn_dt = bool(getattr(args, "fnn_learn_dt", False))
-            cfg.fnn_max_dt_omega = None
-        return replace(suite, dataset="social", dataset_kwargs={
+        model_cfg = _base_model_config(small=False)
+        model_cfg.event_dim = 1
+        model_cfg.fnn_state_dim = 1
+        model_cfg.fnn_order = 2
+        model_cfg.fnn_topology_mode = "observed_sparse"
+        model_cfg.fnn_state_score = True
+        model_cfg.fnn_dt = 1.0
+        model_cfg.fnn_learn_dt = bool(getattr(args, "fnn_learn_dt", False))
+        model_cfg.fnn_max_dt_omega = None
+        model_cfg.fnn_learn_gamma = True
+        model_cfg.fnn_learn_omega = True
+        model_cfg.fnn_learn_input_force_scale = True
+        model_cfg.predict_event_features = True
+        train_cfg = _default_train_config(num_nodes=0, num_neg=10 if preset != "full" else 20,
+                                          log_every=500, device=device)
+        train_cfg.early_stop_patience = 1
+        return RunSuite(dataset="social", dataset_kwargs={
             "name": dataset_override,
             "root": getattr(args, "social_root", "data"),
-            "bin_size": getattr(args, "social_bin_size", None),
-            "device": str(device),
-        })
+            "bin_size": getattr(args, "social_bin_size", None), "device": str(device),
+        }, train_cfg=train_cfg, model_cfg=model_cfg,
+            runs=_physical_event_runs(model_cfg, seed=int(getattr(args, "seed", 0))),
+            epochs=6 if preset == "full" else 2,
+            eval_slices=EvalSlices(early_steps=10), save_jsonl_path=None)
     if dataset_override == "synthetic" and args is not None:
         return _build_synthetic_suite(preset, device, args)
 
@@ -734,82 +750,7 @@ def build_suite(
                 save_jsonl_path=None,
             )
 
-        jodie_fnn = bool(getattr(args, "jodie_fnn", False)) if args is not None else False
-        jodie_cfg = JODIEConfig(
-            root="./data/JODIE",
-            name=str(getattr(args, "jodie_name", "Wikipedia")),
-            device=device,
-            unit_force=jodie_fnn,
-        )
-        train_cfg = _default_train_config(num_nodes=0, num_neg=10, log_every=500, device=device)
-        model_cfg = _base_model_config(small=False)
-        model_cfg.event_dim = 1 if jodie_fnn else None
-        if jodie_fnn:
-            model_cfg.fnn_state_dim = 1
-            model_cfg.fnn_order = 2
-            model_cfg.fnn_topology_mode = "observed_sparse"
-            model_cfg.fnn_state_score = True
-            model_cfg.fnn_max_dt_omega = 1.5
-            model_cfg.fnn_learn_dt = True
-            model_cfg.fnn_learn_gamma = True
-            model_cfg.fnn_learn_omega = True
-            model_cfg.fnn_learn_input_force_scale = True
-            model_cfg.predict_event_features = True
-            # The FNN must complete its alternating schedule, while ordinary
-            # neural baselines stop after their first failed sparse val check.
-            train_cfg.early_stop_patience = 1
-            # Compare the FNN with neural event models under the identical
-            # unit-force stream and next-pair/force objective. The helper
-            # enables FNN only for its own run, leaving the baselines intact.
-            runs = _physical_event_runs(model_cfg, seed=int(getattr(args, "seed", 0)))
-        else:
-            runs = _focused_runs(model_cfg)
-        return RunSuite(
-            dataset="jodie",
-            dataset_kwargs=asdict(jodie_cfg),
-            train_cfg=train_cfg,
-            model_cfg=model_cfg,
-            runs=runs,
-            epochs=2,
-            eval_slices=EvalSlices(early_steps=10),
-            save_jsonl_path=None,
-        )
-
-    jodie_fnn = bool(getattr(args, "jodie_fnn", False)) if args is not None else False
-    jodie_cfg = JODIEConfig(
-        root="./data/JODIE",
-        name=str(getattr(args, "jodie_name", "Wikipedia")),
-        device=device,
-        unit_force=jodie_fnn,
-    )
-    train_cfg = _default_train_config(num_nodes=0, num_neg=20, log_every=2000, device=device)
-    model_cfg = _base_model_config(small=False)
-    model_cfg.event_dim = 1 if jodie_fnn else None
-    if jodie_fnn:
-        model_cfg.fnn_state_dim = 1
-        model_cfg.fnn_order = 2
-        model_cfg.fnn_topology_mode = "observed_sparse"
-        model_cfg.fnn_state_score = True
-        model_cfg.fnn_max_dt_omega = 1.5
-        model_cfg.fnn_learn_dt = True
-        model_cfg.fnn_learn_gamma = True
-        model_cfg.fnn_learn_omega = True
-        model_cfg.fnn_learn_input_force_scale = True
-        model_cfg.predict_event_features = True
-        train_cfg.early_stop_patience = 1
-        runs = _physical_event_runs(model_cfg, seed=int(getattr(args, "seed", 0)))
-    else:
-        runs = _full_runs(model_cfg)
-    return RunSuite(
-        dataset="jodie",
-        dataset_kwargs=asdict(jodie_cfg),
-        train_cfg=train_cfg,
-        model_cfg=model_cfg,
-        runs=runs,
-        epochs=6,
-        eval_slices=EvalSlices(early_steps=10),
-        save_jsonl_path=None,
-    )
+    raise ValueError(f"Unsupported preset/dataset combination: {preset}/{dataset_override}")
 
 
 def load_dataset(kind: str, dataset_kwargs: Dict[str, Any]):
@@ -821,8 +762,6 @@ def load_dataset(kind: str, dataset_kwargs: Dict[str, Any]):
         return TrafficDataset(TrafficConfig(**dataset_kwargs))
     if kind == "toy":
         return ToyShiftDataset(ToyShiftConfig(**dataset_kwargs))
-    if kind == "jodie":
-        return JODIEBinnedDataset(JODIEConfig(**dataset_kwargs))
     if kind == "synthetic":
         return SyntheticDataset(SyntheticDatasetConfig(**dataset_kwargs))
     raise ValueError(f"Unsupported dataset kind: {kind}")

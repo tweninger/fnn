@@ -23,6 +23,9 @@ IFT2ReadoutInitMode = Literal["zero", "small_random", "near_ar1", "oracle"]
 
 @dataclass
 class ModelConfig:
+    temporal_model: str | None = None
+    temporal_num_neighbors: int = 20
+    temporal_history_length: int = 64
     # Required dims
     node_dim: int = 128
     msg_dim: int = 128

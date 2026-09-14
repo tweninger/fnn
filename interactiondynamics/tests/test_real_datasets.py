@@ -66,8 +66,8 @@ def test_fnn_training_accepts_empty_target_bins(tmp_path):
     with gzip.open(directory / SOURCES['college_msg'][0], 'wt') as handle:
         handle.write('1 2 0\n2 1 20\n1 2 180\n')
     ds = SocialEventDataset(SocialConfig(root=str(tmp_path), bin_size=20, split_by='time'))
-    suite = build_suite('quick', torch.device('cpu'), dataset_override='jodie',
-                        args=argparse.Namespace(jodie_fnn=True, seed=0))
+    suite = build_suite('quick', torch.device('cpu'), dataset_override='college_msg',
+                        args=argparse.Namespace(seed=0))
     cfg = suite.runs[0].model_cfg
     cfg.fnn_topology_mode = 'dense'
     model = build_model(ds.spec(), cfg)

@@ -25,6 +25,12 @@ def build_model(spec: DataSpec, cfg: ModelConfig):
     num_nodes = spec.num_nodes
     event_dim = spec.event_dim if cfg.event_dim is None else cfg.event_dim
 
+    if cfg.temporal_model is not None:
+        from interactiondynamics.models.dyglib_adapter import DyGLibAdapter, EdgeBankAdapter
+        if cfg.temporal_model == "edgebank":
+            return EdgeBankAdapter(num_nodes, event_dim)
+        return DyGLibAdapter(num_nodes, event_dim, cfg)
+
     if cfg.fnn:
         model = FieldNeuralNetwork(
             num_nodes=num_nodes,
