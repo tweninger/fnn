@@ -54,7 +54,6 @@ class HopfieldAggregator(Aggregator):
 
         self.drop = nn.Dropout(dropout)
 
-    @torch.no_grad()
     def _build_padded_sets(
         self,
         event_embeddings: torch.Tensor,  # [M, d_msg]
@@ -125,6 +124,7 @@ class HopfieldAggregator(Aggregator):
 
         X = torch.zeros((num_nodes, K, d), device=device, dtype=dtype)
         mask = torch.zeros((num_nodes, K), device=device, dtype=torch.bool)
+        # Keep this gather/scatter differentiable so the event encoder trains.
         X[nodes_k, slot_k] = event_embeddings[eidx_k]
         mask[nodes_k, slot_k] = True
         return X, mask

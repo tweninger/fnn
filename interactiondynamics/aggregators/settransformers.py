@@ -84,7 +84,6 @@ class SetTransformerAggregator(Aggregator):
         )
         self.pma = PMA(dim=self.msg_dim, num_heads=num_heads, ff_dim=ff_dim, num_seeds=1, dropout=dropout)
 
-    @torch.no_grad()
     def _build_padded_sets(
         self,
         event_embeddings: torch.Tensor,  # [M, d]
@@ -140,6 +139,7 @@ class SetTransformerAggregator(Aggregator):
         X = torch.zeros((num_nodes, K, d), device=device, dtype=dtype)
         mask = torch.zeros((num_nodes, K), device=device, dtype=torch.bool)
 
+        # Keep this gather/scatter differentiable so the event encoder trains.
         X[nodes_k, slot_k] = event_embeddings[eidx_k]
         mask[nodes_k, slot_k] = True
         return X, mask
