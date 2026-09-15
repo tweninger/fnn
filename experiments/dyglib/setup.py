@@ -6,6 +6,38 @@ import subprocess
 COMMIT = "3aacc36b94b8d2d8293d70a74fdf6d39089b4163"
 
 
+def update(target):
+    """Add channel options to an existing bridge without replacing its data."""
+    target = Path(target).resolve()
+    marker = target / "FNN_PATCH.txt"
+    if not marker.exists() or COMMIT not in marker.read_text():
+        raise SystemExit("--update requires a pinned FNN bridge checkout")
+    edits = {}
+    for filename in ("utils/load_configs.py", "train_link_prediction.py", "evaluate_link_prediction.py"):
+        path = target / filename
+        text = path.read_text()
+        if "fnn_state_dim" in text:
+            continue
+        if filename == "utils/load_configs.py":
+            anchor = "    parser.add_argument('--batch_size'"
+            if anchor not in text:
+                raise SystemExit(f"Cannot locate CLI anchor in {path}")
+            text = text.replace(anchor,
+                "    parser.add_argument('--fnn_state_dim', type=int, default=1, help='FNN field channels (positive integer)')\n" + anchor)
+        else:
+            anchor = "dst_node_std_time_shift=dst_node_std_time_shift, device=args.device)"
+            name = "f'{args.model_name}_seed{args.seed}'"
+            if text.count(anchor) != 1 or name not in text:
+                raise SystemExit(f"Cannot locate FNN construction/name anchors in {path}")
+            text = text.replace(anchor, "dst_node_std_time_shift=dst_node_std_time_shift, device=args.device, fnn_state_dim=args.fnn_state_dim)")
+            text = text.replace(name, name + " + (f'_dim{args.fnn_state_dim}' if args.model_name == 'FNN' and args.fnn_state_dim != 1 else '')")
+        edits[path] = text
+    # Preflight all files before writing any changes; leave results/data intact.
+    for path, text in edits.items():
+        path.write_text(text)
+    print(f"Updated channel options in {target}")
+
+
 def install(target, source):
     target = Path(target).resolve()
     if target.exists():
@@ -30,6 +62,7 @@ def install(target, source):
     text = path.read_text().replace("random.sample(test_node_set,", "random.sample(sorted(test_node_set),")
     path.write_text(text)  # Python 3.11 no longer accepts sets in random.sample.
     (target / "FNN_PATCH.txt").write_text(f"Upstream {COMMIT}\nFNN bridge: experiments/dyglib/fnn.py in the parent project.\n")
+    update(target)
     print(f"Installed {target}")
 
 
@@ -37,5 +70,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="derived/dyglib")
     parser.add_argument("--source", default="https://github.com/yule-BUAA/DyGLib.git")
+    parser.add_argument("--update", action="store_true", help="Patch an existing FNN checkout in place; preserve data and results")
     args = parser.parse_args()
-    install(args.target, args.source)
+    if args.update:
+        update(args.target)
+    else:
+        install(args.target, args.source)

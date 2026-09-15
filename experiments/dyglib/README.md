@@ -43,6 +43,40 @@ Do not overlap identical dataset/model/seed jobs: upstream artifact names collid
 
 ## What is preserved and what changes
 
+### Multichannel fields
+
+To enable the new option in an existing checkout (preserving data and results):
+
+```bash
+venv/bin/python -m experiments.dyglib.setup --update
+```
+
+Add `--fnn_state_dim 16` to a run to maintain 16 field and 16 velocity values
+per node. Each channel learns its own positive damping and restoring frequency;
+a learned shared drive vector maps a unit interaction into these channels.
+Initial damping/frequency span approximately 0.5--2 times the scalar defaults
+to break channel symmetry. The drive starts with unit total norm. Topology
+gates, the global input scale, and the integration step remain shared.
+The readout projects all H/V channels to the same upstream embedding width.
+
+For example:
+
+```bash
+bash scripts/7_dyglib.sh --dataset_name college_msg --model_name FNN \
+  --fnn_state_dim 16 --batch_size 200 --num_epochs 10 --num_runs 1 \
+  --learning_rate 0.005 --weight_decay 0.003 --gpu 0
+```
+
+The default `--fnn_state_dim 1` preserves scalar behavior and checkpoint shapes.
+Multichannel artifacts have a `_dim16` (or corresponding width) suffix, so they
+do not overwrite scalar runs. Different hyperparameters at the same width and
+seed still share artifact names. Evaluation must use the training width.
+Compare widths using validation performance, then report held-out results;
+more channels do not guarantee better generalization. State and transition
+memory grow with the number of channels, but transitions remain vectorized.
+
+### Evaluation and dynamics
+
 - Native chronological event batches, negative sampling, binary link loss,
   AP/AUROC metrics, early stopping, and memory checkpoint handling are used.
   This is not our ten-negative MRR objective or auxiliary unit-force loss.
@@ -51,7 +85,7 @@ Do not overlap identical dataset/model/seed jobs: upstream artifact names collid
   boundary are withheld from training. The native loader handles this equally
   for FNN and baselines. Original timestamps are retained (shifted to start at
   zero), without hourly binning or user/item ID duplication.
-- FNN reuses `FieldNeuralNetwork` with scalar H/V, sparse train-derived gates,
+- FNN reuses `FieldNeuralNetwork` with scalar H/V by default, sparse train-derived gates,
   unit interaction drives and destination updates. DyGLib's training sampler
   supplies candidate support in both directions. No test-only gates are created.
 - A learned projection maps H/V to the native node embedding width, followed
@@ -94,7 +128,8 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 venv/bin/python -m pytest \
   interactiondynamics/tests/test_dyglib_native.py -q
 ```
 
-Checks causal buffering, gate gradients and memory restoration. If the local
+Checks causal buffering, scalar/multichannel state and gradient equivalence,
+gate gradients and memory restoration. If the local
 checkout exists, also runs complete one-epoch native FNN and GraphMixer trials
 on temporary generated events, including checkpoint reload and final testing.
 These checks do not establish real-data accuracy or GPU throughput.
