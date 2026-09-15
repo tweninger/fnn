@@ -50,6 +50,42 @@ def update(target):
         "                    model[0].memory_bank.node_raw_messages = tuple(x.to(args.device) for x in pending)\n"
         "            elif args.model_name in ['JODIE', 'DyRep', 'TGN']:\n                for node_id, node_raw_messages")
     edits[path] = text
+    for filename in ("utils/load_configs.py", "train_link_prediction.py", "evaluate_link_prediction.py"):
+        path = target / filename
+        text = edits.get(path, path.read_text())
+        # Migrate experimental real-clock checkouts back to event timing.
+        text = "\n".join(line for line in text.split("\n")
+                         if "parser.add_argument('--fnn_clock'" not in line
+                         and "parser.add_argument('--fnn_time_unit'" not in line)
+        text = text.replace(", fnn_clock=args.fnn_clock", "").replace(", fnn_time_unit=args.fnn_time_unit", "")
+        text = text.replace(" + (f'_real_tu{args.fnn_time_unit:g}' if args.model_name == 'FNN' and args.fnn_clock == 'real' else '')", "")
+        if "fnn_spectral_rank" not in text:
+            if filename == "utils/load_configs.py":
+                anchor = "    parser.add_argument('--batch_size'"
+                if anchor not in text:
+                    raise SystemExit(f"Cannot locate spectral CLI anchor in {path}")
+                text = text.replace(anchor, "    parser.add_argument('--fnn_spectral_rank', type=int, default=0)\n" + anchor)
+            else:
+                anchor = "fnn_state_dim=args.fnn_state_dim)"
+                name = "f'{args.model_name}_seed{args.seed}'"
+                if anchor not in text or name not in text:
+                    raise SystemExit(f"Cannot locate spectral construction anchors in {path}")
+                text = text.replace(anchor, "fnn_state_dim=args.fnn_state_dim, fnn_spectral_rank=args.fnn_spectral_rank)")
+                text = text.replace(name, name + " + (f'_spectral{args.fnn_spectral_rank}' if args.model_name == 'FNN' and args.fnn_spectral_rank > 0 else '')")
+        if "fnn_sparse_propagation" not in text:
+            if filename == "utils/load_configs.py":
+                anchor = "    parser.add_argument('--batch_size'"
+                if anchor not in text:
+                    raise SystemExit(f"Cannot locate sparse CLI anchor in {path}")
+                text = text.replace(anchor, "    parser.add_argument('--fnn_sparse_propagation', action='store_true')\n" + anchor)
+            else:
+                anchor = "fnn_spectral_rank=args.fnn_spectral_rank)"
+                name = "f'{args.model_name}_seed{args.seed}'"
+                if anchor not in text or name not in text:
+                    raise SystemExit(f"Cannot locate sparse construction anchors in {path}")
+                text = text.replace(anchor, "fnn_spectral_rank=args.fnn_spectral_rank, fnn_sparse_propagation=args.fnn_sparse_propagation)")
+                text = text.replace(name, name + " + ('_sparseprop' if args.model_name == 'FNN' and args.fnn_sparse_propagation else '')")
+        edits[path] = text
     # Preflight all files before writing any changes; leave results/data intact.
     for path, text in edits.items():
         path.write_text(text)

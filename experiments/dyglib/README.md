@@ -149,7 +149,73 @@ memory grow with the number of channels, but transitions remain vectorized.
 Do not pool these results with old binned results, or label results on these
 custom exported datasets as reproduction of published DyGLib benchmark scores.
 
-## Small, inspectable upstream patch
+## Optional event-clock Laplacian
+
+`--fnn_spectral_rank 16` enables a low-rank approximation of the symmetric
+normalized Laplacian of the binary, symmetrized training candidate graph.
+The basis is fixed; event gates remain learned, as does a shared positive
+coupling strength initialized at 0.1. This is not learned propagation geometry.
+Rank zero (default) retains the original uncoupled FNN and its checkpoint names.
+
+```bash
+venv/bin/python -m experiments.dyglib.setup --update
+bash scripts/7_dyglib.sh --dataset_name college_msg --model_name FNN \
+  --fnn_state_dim 8 --fnn_spectral_rank 16 --batch_size 200 \
+  --num_epochs 20 --num_runs 1 --learning_rate 0.003 --weight_decay 0.001 --gpu 0
+```
+
+Both local and spatial modes use the SAME semi-implicit event update with
+dt=0.1 per distinct observed timestamp and the SAME event-drive convention.
+Mode k has stiffness `omega_c^2 + kappa * lambda_k`. Batched matrix powers
+compose these updates without sequential graph-wide propagation at each time.
+Actual timestamp gaps do not affect the transition. The experimental real-clock
+options are removed by `setup --update`; no clock flags are needed.
+
+Local H/V are preserved, including for nodes absent from the training graph.
+The spectral correction replaces their retained modes, not duplicates their
+input. The effective Laplacian is `U diag(lambda) U.T`: omitted modes retain
+local dynamics with zero coupling. Truncation can introduce nonlocal effects
+and is not the full sparse Laplacian. Zero eigenmodes provide no propagation;
+a very small rank on disconnected graphs may consist only of zero modes.
+
+Basis construction uses a CPU sparse eigensolver once per construction (dense
+only for at most 256 active nodes). It is saved with modal memory in checkpoints.
+Training work/memory grows with rank and channels, but does not require a dense
+N-by-N operator or a Python loop over timestamps. Degree normalization does not
+guarantee stability for arbitrary learned coefficients; monitor training.
+
+Artifacts include `_spectral16`, and evaluation requires the same rank. They
+are separate from both ordinary and previous real-time spectral results. Old
+real-clock checkpoints are not compatible with this event-clock implementation.
+Compare rank 0 versus 16 with identical settings and validation selection.
+
+## Optional one-hop sparse input propagation
+
+Update the local bridge once, then add `--fnn_sparse_propagation` to your
+usual training command (and to checkpoint evaluation):
+
+```bash
+venv/bin/python -m experiments.dyglib.setup --update
+bash scripts/7_dyglib.sh --dataset_name college_msg --model_name FNN \
+  --fnn_state_dim 8 --fnn_sparse_propagation --batch_size 200 \
+  --learning_rate 0.003 --weight_decay 0.001 --num_epochs 30 --num_runs 5
+```
+
+Each gate-weighted event impulse retains `1-alpha` at its destination and
+spreads `alpha` to that destination's training-graph neighbors, normalized by
+their learned outgoing gates. The learned sigmoid fraction starts at 0.1.
+Isolated destinations retain the full impulse; self edges are excluded from
+spreading. Total input is conserved. This is one hop only: propagated input
+does not trigger additional propagation during the same step.
+
+This option diffuses **event input**, not existing latent fields; it is not a
+full wave Laplacian solver. It retains event-clock oscillator updates and
+causal pending-event buffering. Computation scales with the recipients'
+neighbor counts, with no eigenbasis or per-timestamp graph sweep. High-degree
+recipients can still create large batches. It cannot be combined with spectral
+propagation. Checkpoints/results use a separate `_sparseprop` suffix.
+
+## Upstream bridge
 
 `setup.py` adds FNN to the memory-model dispatch/checkpoint branches and adds
 the three dataset names to the CLI. Native models are not replaced. It also

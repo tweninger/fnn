@@ -13,10 +13,46 @@ from interactiondynamics.core.events import EventBatch
 from interactiondynamics.core.interfaces import ModelState
 
 
-def backbone(state_dim=1):
+def backbone(state_dim=1, rank=0, sparse=False):
     sampler = SimpleNamespace(nodes_neighbor_ids=[np.array([], dtype=int), np.array([2, 3]),
                                                   np.array([1]), np.array([1])])
-    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim)
+    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim, fnn_spectral_rank=rank, fnn_sparse_propagation=sparse)
+
+
+def test_sparse_inputs_dense_reference_and_gradients():
+    model = backbone(4, sparse=True)
+    dst = torch.tensor([0, 1, 2, 1])
+    group = torch.arange(4)
+    amplitude = torch.tensor([1., 2., 3., 4.], requires_grad=True)
+    keys = model.field.sparse_candidate_keys
+    adjacency = torch.zeros(4, 4).index_put((keys // 4, keys % 4), model.field.sparse_topology_logits.sigmoid())
+    degree = adjacency.sum(1)
+    alpha = model.spread_raw.sigmoid() * (degree > 0)
+    transition = torch.diag(1-alpha) + alpha[:, None] * adjacency / degree[:, None].clamp_min(1e-12)
+    expected = amplitude[:, None] * transition[dst]
+    targets, groups, values = model._spread_inputs(dst, group, amplitude)
+    actual = torch.zeros(16).index_add(0, groups*4 + targets, values).reshape(4, 4)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual.sum(1), amplitude)
+    assert actual[2, 3] == 0  # 2 -> 1 -> 3 must not recurse.
+    params = (amplitude, model.spread_raw, model.field.sparse_topology_logits)
+    a = torch.autograd.grad(actual.square().sum(), params, retain_graph=True)
+    b = torch.autograd.grad(expected.square().sum(), params)
+    for x, y in zip(a, b):
+        torch.testing.assert_close(x, y)
+
+
+def test_sparse_zero_spread_matches_original():
+    model, original = backbone(4, sparse=True), backbone(4)
+    original.load_state_dict(model.state_dict(), strict=False)
+    model.spread_raw.data.fill_(-100)
+    src, dst, times = torch.tensor([1, 2, 1]), torch.tensor([2, 1, 0]), torch.tensor([0, 1, 1])
+    model.advance(src, dst, times)
+    original.advance(src, dst, times)
+    torch.testing.assert_close(model.memory_bank.h, original.memory_bank.h)
+    torch.testing.assert_close(model.memory_bank.v, original.memory_bank.v)
+    with pytest.raises(ValueError, match="not both"):
+        backbone(4, rank=2, sparse=True)
 
 
 def embed(model, time, positive=False):
@@ -55,10 +91,10 @@ def test_vectorized_field_composition_matches_steps_and_gradients(state_dim):
             torch.testing.assert_close(actual, expected, atol=2e-4, rtol=2e-4)
 
 
-@pytest.mark.parametrize("state_dim", [1, 8])
-def test_native_fnn_causality_gradients_and_memory_restore(state_dim):
+@pytest.mark.parametrize("state_dim,rank,sparse", [(1, 0, False), (8, 0, False), (4, 3, False), (4, 0, True)])
+def test_native_fnn_causality_gradients_and_memory_restore(state_dim, rank, sparse):
     torch.manual_seed(0)
-    model = backbone(state_dim)
+    model = backbone(state_dim, rank, sparse)
     before = embed(model, 1)
     positive = embed(model, 1, True)
     for a, b in zip(before, positive):
@@ -81,8 +117,8 @@ def test_native_fnn_causality_gradients_and_memory_restore(state_dim):
         torch.testing.assert_close(a, b)
 
 
-@pytest.mark.parametrize("name,state_dim", [("FNN", 1), ("FNN", 8), ("GraphMixer", 1)])
-def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, tmp_path):
+@pytest.mark.parametrize("name,state_dim,rank,sparse", [("FNN", 1, 0, False), ("FNN", 8, 0, False), ("FNN", 4, 4, False), ("FNN", 4, 0, True), ("GraphMixer", 1, 0, False)])
+def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, rank, sparse, tmp_path):
     """Offline integration check once the pinned checkout has been installed."""
     from experiments.dyglib.setup import install
     import pandas as pd
@@ -109,7 +145,7 @@ def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, tmp_
     run = subprocess.run([sys.executable, "train_link_prediction.py", "--dataset_name", "college_msg",
                           "--model_name", name, "--num_epochs", "1", "--num_runs", "1",
                           "--batch_size", "50", "--num_neighbors", "5", "--gpu", "-1",
-                          "--fnn_state_dim", str(state_dim)],
+                          "--fnn_state_dim", str(state_dim), "--fnn_spectral_rank", str(rank)] + (["--fnn_sparse_propagation"] if sparse else []),
                          cwd=target, env=env, capture_output=True, text=True, timeout=90)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-6000:]
     assert list((target / "saved_results").rglob("*.json"))
@@ -120,11 +156,13 @@ def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, tmp_
             evaluation = subprocess.run(["bash", str(root / "scripts/7_dyglib.sh"), "eval",
                 "--dataset_name", "college_msg", "--model_name", name, "--num_runs", "1",
                 "--batch_size", "50", "--gpu", "-1", "--fnn_state_dim", str(state_dim),
-                "--negative_sample_strategy", strategy],
+                "--fnn_spectral_rank", str(rank),
+                "--negative_sample_strategy", strategy] + (["--fnn_sparse_propagation"] if sparse else []),
                 env=dict(env, DYGLIB_DIR=str(target), PYTHON=sys.executable),
                 capture_output=True, text=True, timeout=90)
             assert evaluation.returncode == 0, evaluation.stdout[-2000:] + evaluation.stderr[-6000:]
-            assert list((target / "saved_results").rglob(f"{strategy}_negative_sampling_FNN_seed0_dim{state_dim}.json"))
+            suffix = "_sparseprop" if sparse else (f"_spectral{rank}" if rank else "")
+            assert list((target / "saved_results").rglob(f"{strategy}_negative_sampling_FNN_seed0{suffix}_dim{state_dim}.json"))
 
 
 def test_channel_initialization_and_validation():
@@ -163,3 +201,68 @@ def test_bridge_update_preserves_existing_data_and_preflights(tmp_path):
     update(tmp_path)
     assert data.read_text() == "preserve me"
     assert "fnn_state_dim" in train.read_text()
+
+
+def test_event_spectral_matches_dense_wave_and_gradients():
+    torch.manual_seed(7)
+    model = backbone(4, rank=3)
+    lap = torch.zeros(4, 4)
+    lap[1:, 1:] = torch.eye(3)
+    lap[1, 2] = lap[2, 1] = lap[1, 3] = lap[3, 1] = -1 / 2**0.5
+    torch.testing.assert_close(model.basis @ torch.diag(model.eigenvalues) @ model.basis.T,
+                               lap, atol=1e-6, rtol=1e-6)
+    h, v = torch.zeros(4, 4), torch.zeros(4, 4)
+    src, dst = torch.tensor([1, 2, 1, 1]), torch.tensor([2, 1, 3, 2])
+    times = torch.tensor([0, 3, 3, 100])
+    p = model.field.physical_parameters()
+    kappa = torch.nn.functional.softplus(model.kappa_raw)
+    for t in times.unique():
+        mask = times == t
+        amplitude = p["input_force_scale"] * model.field._topology_logits_for(src[mask], dst[mask]).sigmoid()
+        incoming = torch.zeros_like(h).index_add(0, dst[mask], amplitude[:, None]*model.drive_vector)
+        v = (1-p["gamma"]*p["dt"])*v + p["dt"]*(incoming-p["omega"].square()*h-kappa*(lap@h))
+        h = h+p["dt"]*v
+    parameters = [model.kappa_raw, model.field.gamma_raw, model.field.omega_raw,
+                  model.field.sparse_topology_logits, model.drive_vector]
+    expected_grad = torch.autograd.grad(h.square().sum()+v.square().sum(), parameters)
+    model.advance(src, dst, times)
+    ids = torch.arange(4)
+    actual, _ = model._node_states(ids, ids)
+    torch.testing.assert_close(actual, torch.cat((h, v), -1), atol=1e-6, rtol=1e-5)
+    actual_grad = torch.autograd.grad(actual.square().sum(), parameters)
+    for a, b in zip(actual_grad, expected_grad):
+        torch.testing.assert_close(a, b, atol=1e-6, rtol=1e-4)
+
+
+def test_spectral_zero_strength_and_event_gap_invariance():
+    model = backbone(4, rank=2)
+    with torch.no_grad():
+        model.kappa_raw.fill_(-80)
+    local = backbone(4)
+    local.load_state_dict(model.state_dict(), strict=False)
+    src, dst = torch.tensor([1, 0, 1]), torch.tensor([2, 0, 3])
+    model.advance(src, dst, torch.tensor([0, 1, 2]))
+    local.advance(src, dst, torch.tensor([0, 100, 100000]))
+    ids = torch.arange(4)
+    actual, _ = model._node_states(ids, ids)
+    expected, _ = local._node_states(ids, ids)
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+    assert actual[0].abs().sum() > 0  # Isolated nodes retain their local drive.
+    assert not model.basis.requires_grad
+
+
+def test_spectral_propagation_without_incoming_event():
+    model = backbone(1, rank=3)
+    # Only node 2 receives impulses, but node 1 gains state through the graph.
+    model.advance(torch.tensor([1, 1]), torch.tensor([2, 2]), torch.tensor([0, 1]))
+    actual, _ = model._node_states(torch.tensor([1]), torch.tensor([1]))
+    assert actual[0, 0] > 0
+
+
+def test_sparse_spectral_basis_ring():
+    from experiments.dyglib.spectral import train_basis
+    ids = torch.arange(300)
+    basis, values = train_basis(300, ids*300+(ids+1)%300, 4)
+    torch.testing.assert_close(basis.T@basis, torch.eye(4), atol=1e-5, rtol=1e-5)
+    applied = basis-.5*(basis.roll(1, 0)+basis.roll(-1, 0))
+    torch.testing.assert_close(applied, basis*values, atol=1e-6, rtol=1e-5)
