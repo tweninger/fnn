@@ -100,7 +100,7 @@ memory grow with the number of channels, but transitions remain vectorized.
   without events do not introduce transitions. This is an event-clock model.
 - Gamma, omega, input scale, gates and readout train jointly under the upstream
   optimizer. Our alternating optimizer schedule is **not** ported yet.
-- FNN does not rebuild a temporal-neighbor sampler every batch. With coupling disabled, its linear
+- FNN does not rebuild a temporal-neighbor sampler every batch. Its linear
   transitions are composed with batched matrix powers and scattered event
   contributions, rather than a Python loop over timestamps. This is equivalent
   to successive field steps up to floating-point error, including gradients.
@@ -109,44 +109,6 @@ memory grow with the number of channels, but transitions remain vectorized.
 
 Do not pool these results with old binned results, or label results on these
 custom exported datasets as reproduction of published DyGLib benchmark scores.
-
-## Optional sparse field coupling
-
-Run `venv/bin/python -m experiments.dyglib.setup --update` to add the option to
-an existing checkout. Add `--fnn_coupling 0.1` to enable a learned, positive
-shared coupling coefficient initialized at 0.1. Default zero disables coupling,
-keeps the fast independent-oscillator path, and preserves old checkpoints.
-
-For candidate weights `a_ij = sigmoid(theta_ij)`, coupling adds
-`kappa * sum_i a_ij (H_i - H_j) / (1e-8 + sum_i a_ij)` to node j's acceleration.
-It reuses train-derived candidate gates; there are no new test-only edges.
-Self-edges are excluded from exchange and its normalization; isolated nodes
-receive zero exchange. The same weights continue to gate event impulses.
-This is incoming-degree-normalized, directed coupling, not the simulator's
-unnormalized Laplacian. Channels share the operator and coupling coefficient.
-
-Every observed timestamp advances all node fields, including exchange on
-candidate edges without a current event. The event clock remains fixed at 0.1;
-empty real-time gaps do not add steps. Positive observations remain buffered
-until strictly before the earliest query, as in the uncoupled version.
-
-The coupled path uses a sparse matrix multiply per timestamp, with sequential
-semi-implicit updates and backpropagation through the batch. It never builds
-an N-by-N dense adjacency. Unlike the independent matrix-power shortcut, work
-scales with timestamps times edges times channels; memory and runtime can grow
-substantially. Normalization limits degree effects but does not guarantee
-numerical stability for arbitrary learned coefficients. Start with a small
-coupling strength and check validation and numerical behavior.
-
-```bash
-bash scripts/7_dyglib.sh --dataset_name college_msg --model_name FNN \
-  --fnn_state_dim 8 --fnn_coupling 0.1 --batch_size 200 \
-  --num_epochs 50 --num_runs 1 --learning_rate 0.003 --weight_decay 0.001 --gpu 0
-```
-
-Coupled artifact names include `_coupling0.1`; use the same option and width
-when evaluating the checkpoint. The coupling parameter trains jointly with
-gates, channel dynamics, and readout. The original trainer is unchanged.
 
 ## Small, inspectable upstream patch
 

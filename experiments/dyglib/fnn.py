@@ -1,5 +1,4 @@
 """FNN memory backbone for the pinned upstream DyGLib training loop."""
-import math
 import torch
 from torch import nn
 
@@ -35,18 +34,11 @@ class FieldMemory(nn.Module):
 
 
 class FNN(nn.Module):
-    def __init__(self, node_raw_features, edge_raw_features, neighbor_sampler, fnn_state_dim=1,
-                 fnn_coupling=0.0, **kwargs):
+    def __init__(self, node_raw_features, edge_raw_features, neighbor_sampler, fnn_state_dim=1, **kwargs):
         super().__init__()
         if not isinstance(fnn_state_dim, int) or fnn_state_dim < 1:
             raise ValueError("fnn_state_dim must be a positive integer")
         self.state_dim = fnn_state_dim
-        if not math.isfinite(fnn_coupling) or fnn_coupling < 0:
-            raise ValueError("fnn_coupling must be finite and nonnegative")
-        # Zero disables coupling entirely, preserving legacy checkpoint keys.
-        if fnn_coupling > 0:
-            value = torch.tensor(float(fnn_coupling))
-            self.kappa_raw = nn.Parameter(value + torch.log(-torch.expm1(-value)))
         n, width = node_raw_features.shape
         self.field = FieldNeuralNetwork(
             num_nodes=n, force_dim=fnn_state_dim, state_dim=fnn_state_dim, gamma_init=0.15,
@@ -80,9 +72,6 @@ class FNN(nn.Module):
         """
         if not len(times):
             return
-        if hasattr(self, "kappa_raw"):
-            self._advance_coupled(src, dst, times, torch.nn.functional.softplus(self.kappa_raw))
-            return
         unique, group = torch.unique(times, sorted=True, return_inverse=True)
         steps = len(unique)
         params = self.field.physical_parameters()
@@ -108,45 +97,6 @@ class FNN(nn.Module):
             response = response * self.drive_vector[None, :, None]
         evolved = evolved.index_add(0, dst, response)
         bank.h, bank.v = evolved[..., 0], evolved[..., 1]
-
-    def _advance_coupled(self, src, dst, times, kappa):
-        """Sequential event-clock steps with sparse, incoming-normalized exchange.
-
-        All candidate edges couple fields each step, including edges without
-        an event at that timestamp. Parameters and the sparse operator are
-        shared across steps, while gradients flow through the full recurrence.
-        """
-        if not len(times):
-            return
-        bank = self.memory_bank
-        params = self.field.physical_parameters()
-        dt, gamma, omega = params["dt"], params["gamma"], params["omega"]
-        n = bank.h.shape[0]
-        keys = self.field.sparse_candidate_keys
-        edge_src, edge_dst = keys // n, keys % n
-        weights = torch.sigmoid(self.field.sparse_topology_logits)
-        # Self-edges have zero exchange and do not dilute neighbor coupling.
-        weights = weights * (edge_src != edge_dst)
-        degree = weights.new_zeros(n).index_add(0, edge_dst, weights)
-        normalized = weights / (degree[edge_dst] + 1e-8)
-        operator = torch.sparse_coo_tensor(torch.stack([edge_dst, edge_src]), normalized,
-                                           (n, n)).coalesce()
-        row_mass = degree / (degree + 1e-8)
-        amplitude = params["input_force_scale"] * torch.sigmoid(self.field._topology_logits_for(src, dst))
-        drive = self.drive_vector if self.state_dim > 1 else bank.h.new_ones(1)
-        # Group once, avoiding a scan over every event for every timestamp.
-        order = torch.argsort(times, stable=True)
-        _, counts = torch.unique_consecutive(times[order], return_counts=True)
-        offset = 0
-        h, v = bank.h, bank.v
-        for count in counts.tolist():
-            events = order[offset:offset + count]
-            offset += count
-            incoming = torch.zeros_like(h).index_add(0, dst[events], amplitude[events, None] * drive)
-            exchange = torch.sparse.mm(operator, h) - row_mass[:, None] * h
-            v = (1 - gamma * dt) * v + dt * (incoming + kappa * exchange - omega.square() * h)
-            h = h + dt * v
-        bank.h, bank.v = h, v
 
     def compute_src_dst_node_temporal_embeddings(self, src_node_ids, dst_node_ids,
                                                 node_interact_times, edge_ids=None,
@@ -179,6 +129,5 @@ def MemoryModel(*args, model_name, **kwargs):
     if model_name == "FNN":
         return FNN(*args, **kwargs)
     kwargs.pop("fnn_state_dim", None)
-    kwargs.pop("fnn_coupling", None)
     from models.MemoryModel import MemoryModel as NativeMemoryModel
     return NativeMemoryModel(*args, model_name=model_name, **kwargs)
