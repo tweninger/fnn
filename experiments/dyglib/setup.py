@@ -16,21 +16,26 @@ def update(target):
     for filename in ("utils/load_configs.py", "train_link_prediction.py", "evaluate_link_prediction.py"):
         path = target / filename
         text = path.read_text()
-        if "fnn_state_dim" in text:
-            continue
-        if filename == "utils/load_configs.py":
-            anchor = "    parser.add_argument('--batch_size'"
-            if anchor not in text:
-                raise SystemExit(f"Cannot locate CLI anchor in {path}")
-            text = text.replace(anchor,
-                "    parser.add_argument('--fnn_state_dim', type=int, default=1, help='FNN field channels (positive integer)')\n" + anchor)
-        else:
-            anchor = "dst_node_std_time_shift=dst_node_std_time_shift, device=args.device)"
-            name = "f'{args.model_name}_seed{args.seed}'"
-            if text.count(anchor) != 1 or name not in text:
-                raise SystemExit(f"Cannot locate FNN construction/name anchors in {path}")
-            text = text.replace(anchor, "dst_node_std_time_shift=dst_node_std_time_shift, device=args.device, fnn_state_dim=args.fnn_state_dim)")
-            text = text.replace(name, name + " + (f'_dim{args.fnn_state_dim}' if args.model_name == 'FNN' and args.fnn_state_dim != 1 else '')")
+        for option, kind, default, suffix, condition in (
+            ("fnn_state_dim", "int", "1", "dim", "!= 1"),
+            ("fnn_coupling", "float", "0.0", "coupling", "> 0"),
+        ):
+            if option in text:
+                continue
+            if filename == "utils/load_configs.py":
+                anchor = "    parser.add_argument('--batch_size'"
+                if anchor not in text:
+                    raise SystemExit(f"Cannot locate CLI anchor in {path}")
+                text = text.replace(anchor,
+                    f"    parser.add_argument('--{option}', type={kind}, default={default})\n" + anchor)
+            else:
+                anchor = ("fnn_state_dim=args.fnn_state_dim)" if option == "fnn_coupling" else
+                          "dst_node_std_time_shift=dst_node_std_time_shift, device=args.device)")
+                name = "f'{args.model_name}_seed{args.seed}'"
+                if text.count(anchor) != 1 or name not in text:
+                    raise SystemExit(f"Cannot locate FNN construction/name anchors in {path}")
+                text = text.replace(anchor, anchor[:-1] + f", {option}=args.{option})")
+                text = text.replace(name, name + f" + (f'_{suffix}{{args.{option}}}' if args.model_name == 'FNN' and args.{option} {condition} else '')")
         edits[path] = text
     # Preflight all files before writing any changes; leave results/data intact.
     for path, text in edits.items():

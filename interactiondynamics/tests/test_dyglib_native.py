@@ -13,10 +13,11 @@ from interactiondynamics.core.events import EventBatch
 from interactiondynamics.core.interfaces import ModelState
 
 
-def backbone(state_dim=1):
+def backbone(state_dim=1, coupling=0.0):
     sampler = SimpleNamespace(nodes_neighbor_ids=[np.array([], dtype=int), np.array([2, 3]),
                                                   np.array([1]), np.array([1])])
-    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim)
+    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim,
+               fnn_coupling=coupling)
 
 
 def embed(model, time, positive=False):
@@ -55,10 +56,10 @@ def test_vectorized_field_composition_matches_steps_and_gradients(state_dim):
             torch.testing.assert_close(actual, expected, atol=2e-4, rtol=2e-4)
 
 
-@pytest.mark.parametrize("state_dim", [1, 8])
-def test_native_fnn_causality_gradients_and_memory_restore(state_dim):
+@pytest.mark.parametrize("state_dim,coupling", [(1, 0), (8, 0), (4, 0.1)])
+def test_native_fnn_causality_gradients_and_memory_restore(state_dim, coupling):
     torch.manual_seed(0)
-    model = backbone(state_dim)
+    model = backbone(state_dim, coupling)
     before = embed(model, 1)
     positive = embed(model, 1, True)
     for a, b in zip(before, positive):
@@ -81,8 +82,9 @@ def test_native_fnn_causality_gradients_and_memory_restore(state_dim):
         torch.testing.assert_close(a, b)
 
 
-@pytest.mark.parametrize("name,state_dim", [("FNN", 1), ("FNN", 8), ("GraphMixer", 1)])
-def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, tmp_path):
+@pytest.mark.parametrize("name,state_dim,coupling", [("FNN", 1, 0), ("FNN", 8, 0),
+                                                     ("FNN", 4, 0.1), ("GraphMixer", 1, 0.1)])
+def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, coupling, tmp_path):
     """Offline integration check once the pinned checkout has been installed."""
     from experiments.dyglib.setup import install
     import pandas as pd
@@ -109,12 +111,85 @@ def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, tmp_
     run = subprocess.run([sys.executable, "train_link_prediction.py", "--dataset_name", "college_msg",
                           "--model_name", name, "--num_epochs", "1", "--num_runs", "1",
                           "--batch_size", "50", "--num_neighbors", "5", "--gpu", "-1",
-                          "--fnn_state_dim", str(state_dim)],
+                          "--fnn_state_dim", str(state_dim), "--fnn_coupling", str(coupling)],
                          cwd=target, env=env, capture_output=True, text=True, timeout=90)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-6000:]
     assert list((target / "saved_results").rglob("*.json"))
     if state_dim > 1:
         assert list((target / "saved_results").rglob(f"*_dim{state_dim}.json"))
+
+
+@pytest.mark.parametrize("state_dim", [1, 4])
+def test_zero_coupling_matches_fast_path(state_dim):
+    model = backbone(state_dim)
+    model.memory_bank.h = torch.randn(4, state_dim)
+    model.memory_bank.v = torch.randn(4, state_dim)
+    saved = model.memory_bank.backup_memory_bank()
+    src, dst, times = torch.tensor([1, 2, 1]), torch.tensor([2, 1, 3]), torch.tensor([2, 1, 2])
+    model.advance(src, dst, times)
+    expected = model.memory_bank.backup_memory_bank()
+    model.memory_bank.reload_memory_bank(saved)
+    model._advance_coupled(src, dst, times, 0.0)
+    torch.testing.assert_close(model.memory_bank.h, expected[0])
+    torch.testing.assert_close(model.memory_bank.v, expected[1])
+
+
+def test_coupling_propagates_without_edge_event_and_has_gradients():
+    model = backbone(1, 0.2)
+    model.memory_bank.h[2] = 1
+    # Event at isolated node zero: coupling must independently move 2 -> 1.
+    model.advance(torch.tensor([0]), torch.tensor([0]), torch.tensor([1]))
+    assert model.memory_bank.h[1].item() > 0
+    model.memory_bank.h[1].sum().backward()
+    assert model.kappa_raw.grad.abs() > 0
+    assert model.field.sparse_topology_logits.grad.abs().sum() > 0
+
+
+def test_coupling_matches_dense_reference_and_gradients():
+    model = backbone(4, 0.2)
+    h, v = torch.randn(4, 4), torch.randn(4, 4)
+    model.memory_bank.h, model.memory_bank.v = h.clone(), v.clone()
+    keys = model.field.sparse_candidate_keys
+    src, dst = keys // 4, keys % 4
+    weights = model.field.sparse_topology_logits.sigmoid()
+    adjacency = weights.new_zeros(4, 4).index_put((dst, src), weights)
+    adjacency = adjacency / (adjacency.sum(1, keepdim=True) + 1e-8)
+    p = model.field.physical_parameters()
+    event_gate = model.field._topology_logits_for(torch.tensor([0]), torch.tensor([0])).sigmoid()
+    for _ in range(3):
+        force = torch.zeros_like(h).index_add(0, torch.tensor([0]),
+                    (p["input_force_scale"] * event_gate * model.drive_vector)[None])
+        v = (1-p["gamma"]*p["dt"])*v + p["dt"]*(force + torch.nn.functional.softplus(model.kappa_raw)*
+                    (adjacency @ h - adjacency.sum(1)[:, None]*h) - p["omega"].square()*h)
+        h = h + p["dt"]*v
+    parameters = [model.kappa_raw, model.field.sparse_topology_logits, model.drive_vector,
+                  model.field.gamma_raw, model.field.omega_raw]
+    expected_grad = torch.autograd.grad(h.sum()+v.sum(), parameters)
+    model.advance(torch.zeros(3, dtype=torch.long), torch.zeros(3, dtype=torch.long), torch.arange(3))
+    torch.testing.assert_close(model.memory_bank.h, h)
+    torch.testing.assert_close(model.memory_bank.v, v)
+    actual_grad = torch.autograd.grad(model.memory_bank.h.sum()+model.memory_bank.v.sum(), parameters)
+    for actual, expected in zip(actual_grad, expected_grad):
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-4)
+
+
+def test_invalid_coupling():
+    for value in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="nonnegative"):
+            backbone(coupling=value)
+
+
+def test_empty_support_coupling_is_finite_and_matches_uncoupled():
+    model = backbone(4, 0.1)
+    empty = torch.empty(0, dtype=torch.long)
+    model.field.set_sparse_topology_candidates(empty, empty)
+    model.memory_bank.h.fill_(1)
+    p = model.field.physical_parameters()
+    expected_v = -p["dt"] * p["omega"].square()
+    # Unknown event goes to node zero; other nodes evolve independently.
+    model.advance(torch.tensor([0]), torch.tensor([0]), torch.tensor([1]))
+    assert torch.isfinite(model.memory_bank.h).all()
+    torch.testing.assert_close(model.memory_bank.v[1], expected_v)
 
 
 def test_channel_initialization_and_validation():
