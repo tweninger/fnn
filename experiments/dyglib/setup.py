@@ -32,6 +32,24 @@ def update(target):
             text = text.replace(anchor, "dst_node_std_time_shift=dst_node_std_time_shift, device=args.device, fnn_state_dim=args.fnn_state_dim)")
             text = text.replace(name, name + " + (f'_dim{args.fnn_state_dim}' if args.model_name == 'FNN' and args.fnn_state_dim != 1 else '')")
         edits[path] = text
+    path = target / "evaluate_link_prediction.py"
+    text = edits.get(path, path.read_text())
+    anchor = "dynamic_backbone = MemoryModel(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=full_neighbor_sampler,"
+    if anchor in text:
+        text = text.replace(anchor,
+            "dynamic_backbone = MemoryModel(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, "
+            "neighbor_sampler=(get_neighbor_sampler(data=train_data, sample_neighbor_strategy=args.sample_neighbor_strategy, "
+            "time_scaling_factor=args.time_scaling_factor, seed=0) if args.model_name == 'FNN' else full_neighbor_sampler),")
+    name = "f'{args.negative_sample_strategy}_negative_sampling_{args.model_name}_seed{args.seed}'"
+    text = text.replace(name, "f'{args.negative_sample_strategy}_negative_sampling_{args.load_model_name}'")
+    text = text.replace(
+        "            if args.model_name in ['JODIE', 'DyRep', 'TGN', 'FNN']:\n                for node_id, node_raw_messages",
+        "            if args.model_name == 'FNN':\n"
+        "                pending = model[0].memory_bank.node_raw_messages\n"
+        "                if pending is not None:\n"
+        "                    model[0].memory_bank.node_raw_messages = tuple(x.to(args.device) for x in pending)\n"
+        "            elif args.model_name in ['JODIE', 'DyRep', 'TGN']:\n                for node_id, node_raw_messages")
+    edits[path] = text
     # Preflight all files before writing any changes; leave results/data intact.
     for path, text in edits.items():
         path.write_text(text)

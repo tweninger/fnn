@@ -6,4 +6,9 @@ DYGLIB_DIR="${DYGLIB_DIR:-$project_root/derived/dyglib}"
 PYTHON="${PYTHON:-$project_root/venv/bin/python}"
 export PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}"
 cd "$DYGLIB_DIR"
-exec "$PYTHON" -u train_link_prediction.py "$@"
+entry=train_link_prediction.py
+if [[ "${1:-}" == "eval" ]]; then
+  entry=evaluate_link_prediction.py
+  shift
+fi
+exec "$PYTHON" -u "$entry" "$@"

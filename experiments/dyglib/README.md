@@ -41,6 +41,45 @@ Upstream writes progress plus artifacts under the checkout's `logs/`,
 `saved_models/` and `saved_results/`, **not** our old per-epoch JSONL directory.
 Do not overlap identical dataset/model/seed jobs: upstream artifact names collide.
 
+## Evaluate saved checkpoints with different negatives
+
+Update an existing checkout first:
+
+```bash
+venv/bin/python -m experiments.dyglib.setup --update
+```
+
+The launcher accepts `eval` before the native options. This loads existing
+validation-selected checkpoints; it does not retrain or select using test scores.
+For five existing eight-channel checkpoints:
+
+```bash
+for strategy in random historical inductive; do
+  bash scripts/7_dyglib.sh eval \
+    --dataset_name college_msg --model_name FNN \
+    --fnn_state_dim 8 --batch_size 200 --num_runs 5 --gpu 0 \
+    --negative_sample_strategy "$strategy"
+done
+```
+
+Use the training architecture and split settings, and keep evaluation batch size
+the same across samplers/models. `--num_runs 5` requires checkpoints for seeds
+0--4. Native training remains random-negative training; these alternatives are
+standalone evaluation protocols, not a change to the training sampler.
+
+Historical negatives prefer previously seen pairs inactive in the current
+evaluation window. Inductive negatives further exclude pairs observed up to
+the cutoff (end of training for validation, end of validation for testing).
+Both fill shortages with collision-checked random pairs. These are different
+from the separate new-node evaluation subset. Report each protocol separately.
+
+Results go to `derived/dyglib/saved_results/FNN/college_msg/`, with names such as
+`inductive_negative_sampling_FNN_seed0_dim8.json`. Samplers and widths have
+separate filenames. Repeating the same evaluation overwrites its result file.
+The upstream historical/inductive samplers can be slower and memory-heavy:
+their random fallback uses a Cartesian pair pool. This launcher preserves
+upstream behavior rather than replacing the sampling algorithm.
+
 ## What is preserved and what changes
 
 ### Multichannel fields

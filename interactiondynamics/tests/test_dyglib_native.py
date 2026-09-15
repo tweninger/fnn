@@ -115,6 +115,16 @@ def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, tmp_
     assert list((target / "saved_results").rglob("*.json"))
     if state_dim > 1:
         assert list((target / "saved_results").rglob(f"*_dim{state_dim}.json"))
+    if name == "FNN" and state_dim > 1:
+        for strategy in ("random", "historical", "inductive"):
+            evaluation = subprocess.run(["bash", str(root / "scripts/7_dyglib.sh"), "eval",
+                "--dataset_name", "college_msg", "--model_name", name, "--num_runs", "1",
+                "--batch_size", "50", "--gpu", "-1", "--fnn_state_dim", str(state_dim),
+                "--negative_sample_strategy", strategy],
+                env=dict(env, DYGLIB_DIR=str(target), PYTHON=sys.executable),
+                capture_output=True, text=True, timeout=90)
+            assert evaluation.returncode == 0, evaluation.stdout[-2000:] + evaluation.stderr[-6000:]
+            assert list((target / "saved_results").rglob(f"{strategy}_negative_sampling_FNN_seed0_dim{state_dim}.json"))
 
 
 def test_channel_initialization_and_validation():
