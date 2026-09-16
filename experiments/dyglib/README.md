@@ -189,15 +189,15 @@ are separate from both ordinary and previous real-time spectral results. Old
 real-clock checkpoints are not compatible with this event-clock implementation.
 Compare rank 0 versus 16 with identical settings and validation selection.
 
-## Optional one-hop sparse input propagation
+## Optional K-hop sparse input propagation
 
-Update the local bridge once, then add `--fnn_sparse_propagation` to your
+Update the local bridge once, then add `--fnn_propagate 2` to your
 usual training command (and to checkpoint evaluation):
 
 ```bash
 venv/bin/python -m experiments.dyglib.setup --update
 bash scripts/7_dyglib.sh --dataset_name college_msg --model_name FNN \
-  --fnn_state_dim 8 --fnn_sparse_propagation --batch_size 200 \
+  --fnn_state_dim 8 --fnn_propagate 2 --batch_size 200 \
   --learning_rate 0.003 --weight_decay 0.001 --num_epochs 30 --num_runs 5
 ```
 
@@ -205,17 +205,65 @@ Each gate-weighted event impulse retains `1-alpha` at its destination and
 spreads `alpha` to that destination's training-graph neighbors, normalized by
 their learned outgoing gates. The learned sigmoid fraction starts at 0.1.
 Isolated destinations retain the full impulse; self edges are excluded from
-spreading. Total input is conserved. This is one hop only: propagated input
-does not trigger additional propagation during the same step.
+spreading. At each hop, the arriving input is split again; at the final hop,
+all remaining input is retained. Total input is conserved. Contributions are
+aggregated by timestamp and node between hops rather than enumerating paths.
+The default `--fnn_propagate 0` disables propagation; `1` reproduces the former
+one-hop behavior. `-fnn_propagate` is also accepted. The old boolean flag is removed.
 
 This option diffuses **event input**, not existing latent fields; it is not a
 full wave Laplacian solver. It retains event-clock oscillator updates and
 causal pending-event buffering. Computation scales with the recipients'
 neighbor counts, with no eigenbasis or per-timestamp graph sweep. High-degree
 recipients can still create large batches. It cannot be combined with spectral
-propagation. Checkpoints/results use a separate `_sparseprop` suffix.
+propagation. Checkpoints/results include the hop count (e.g. `_propagate2`).
+Existing `_sparseprop` artifacts are left untouched; they are not automatically
+loaded under the new naming scheme.
+
+## Full official dataset collection
+
+After installing the pinned checkout, download all official benchmark data:
+
+```bash
+venv/bin/python -m experiments.dyglib.download_data
+```
+
+The downloader verifies the checksums from [Zenodo record 7213796](https://zenodo.org/records/7213796),
+caches the 13 individual archives in `data/dyglib/`, and installs their published
+processed CSV/node/edge arrays in `derived/dyglib/processed_data/`. Myket is
+already bundled in the pinned upstream checkout. Existing files must match;
+different local data will not be overwritten. Re-running skips downloads of
+verified archives. The combined archive is not downloaded redundantly.
+Reddit's archive requires the system `unzip` utility with Deflate64 support.
+The command also checks event indices, timestamp ordering, and feature-array
+dimensions, and writes `data/dyglib/validation.json`.
+
+Dataset CLI names are case-sensitive:
+
+- Bipartite: `wikipedia`, `reddit`, `mooc`, `lastfm`, `myket`.
+- Single node type: `enron`, `SocialEvo`, `uci`, `Flights`, `CanParl`,
+  `USLegis`, `UNtrade`, `UNvote`, `Contacts`.
+
+These names remain distinct from our `college_msg`, `email_eu_core`, and
+`sociopatterns` conversions; do not assume those versions have identical
+preprocessing to the official benchmarks. For example:
+
+```bash
+bash scripts/7_dyglib.sh --dataset_name SocialEvo --model_name FNN \
+  --fnn_state_dim 8 --fnn_propagate 0 --num_epochs 20 --num_runs 5 --gpu -1
+```
 
 ## Upstream bridge
+
+Training checkpoint, log, and result names include learning rate, weight decay,
+and batch size for all trained models. For example:
+`FNN_seed0_lr0.003_wd0.001_bs200_propagate2_dim8`.
+Standalone evaluation must receive the **training** values of `--learning_rate`,
+`--weight_decay`, and `--batch_size`, as well as the same FNN architecture options,
+to select that checkpoint. Existing checkpoints with the older naming scheme
+are left untouched and are not automatically selected by the new names.
+Run `venv/bin/python -m experiments.dyglib.setup --update` on other machines
+after pulling these changes.
 
 `setup.py` adds FNN to the memory-model dispatch/checkpoint branches and adds
 the three dataset names to the CLI. Native models are not replaced. It also

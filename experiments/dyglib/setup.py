@@ -72,19 +72,28 @@ def update(target):
                     raise SystemExit(f"Cannot locate spectral construction anchors in {path}")
                 text = text.replace(anchor, "fnn_state_dim=args.fnn_state_dim, fnn_spectral_rank=args.fnn_spectral_rank)")
                 text = text.replace(name, name + " + (f'_spectral{args.fnn_spectral_rank}' if args.model_name == 'FNN' and args.fnn_spectral_rank > 0 else '')")
-        if "fnn_sparse_propagation" not in text:
+        text = "\n".join(line for line in text.split("\n")
+                         if "parser.add_argument('--fnn_sparse_propagation'" not in line)
+        text = text.replace(", fnn_sparse_propagation=args.fnn_sparse_propagation", "")
+        text = text.replace(" + ('_sparseprop' if args.model_name == 'FNN' and args.fnn_sparse_propagation else '')", "")
+        if "fnn_propagate" not in text:
             if filename == "utils/load_configs.py":
                 anchor = "    parser.add_argument('--batch_size'"
                 if anchor not in text:
                     raise SystemExit(f"Cannot locate sparse CLI anchor in {path}")
-                text = text.replace(anchor, "    parser.add_argument('--fnn_sparse_propagation', action='store_true')\n" + anchor)
+                text = text.replace(anchor, "    parser.add_argument('--fnn_propagate', '-fnn_propagate', type=int, default=0, help='FNN input propagation hops; 0 disables')\n" + anchor)
             else:
                 anchor = "fnn_spectral_rank=args.fnn_spectral_rank)"
                 name = "f'{args.model_name}_seed{args.seed}'"
                 if anchor not in text or name not in text:
                     raise SystemExit(f"Cannot locate sparse construction anchors in {path}")
-                text = text.replace(anchor, "fnn_spectral_rank=args.fnn_spectral_rank, fnn_sparse_propagation=args.fnn_sparse_propagation)")
-                text = text.replace(name, name + " + ('_sparseprop' if args.model_name == 'FNN' and args.fnn_sparse_propagation else '')")
+                text = text.replace(anchor, "fnn_spectral_rank=args.fnn_spectral_rank, fnn_propagate=args.fnn_propagate)")
+                text = text.replace(name, name + " + (f'_propagate{args.fnn_propagate}' if args.model_name == 'FNN' and args.fnn_propagate > 0 else '')")
+        if filename != "utils/load_configs.py" and "_lr{args.learning_rate}" not in text:
+            name = "f'{args.model_name}_seed{args.seed}'"
+            if name not in text:
+                raise SystemExit(f"Cannot locate hyperparameter naming anchor in {path}")
+            text = text.replace(name, name + " + f'_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}'")
         edits[path] = text
     # Preflight all files before writing any changes; leave results/data intact.
     for path, text in edits.items():

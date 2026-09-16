@@ -16,7 +16,7 @@ from interactiondynamics.core.interfaces import ModelState
 def backbone(state_dim=1, rank=0, sparse=False):
     sampler = SimpleNamespace(nodes_neighbor_ids=[np.array([], dtype=int), np.array([2, 3]),
                                                   np.array([1]), np.array([1])])
-    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim, fnn_spectral_rank=rank, fnn_sparse_propagation=sparse)
+    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim, fnn_spectral_rank=rank, fnn_propagate=int(sparse))
 
 
 def test_sparse_inputs_dense_reference_and_gradients():
@@ -53,6 +53,35 @@ def test_sparse_zero_spread_matches_original():
     torch.testing.assert_close(model.memory_bank.v, original.memory_bank.v)
     with pytest.raises(ValueError, match="not both"):
         backbone(4, rank=2, sparse=True)
+
+
+@pytest.mark.parametrize("hops", [0, 1, 2, 4])
+def test_multihop_matches_dense_conservative_diffusion(hops):
+    model = backbone(4, sparse=hops)
+    dst, group, amplitude = torch.tensor([0, 2, 2]), torch.tensor([0, 1, 1]), torch.tensor([2., 1., 3.])
+    if hops == 0:
+        assert not hasattr(model, "spread_raw")
+        return
+    keys = model.field.sparse_candidate_keys
+    adjacency = torch.zeros(4, 4).index_put((keys // 4, keys % 4), model.field.sparse_topology_logits.sigmoid())
+    degree = adjacency.sum(1)
+    alpha = model.spread_raw.sigmoid() * (degree > 0)
+    transition = alpha[:, None] * adjacency / degree[:, None].clamp_min(1e-12)
+    frontier = torch.zeros(8).index_add(0, group*4+dst, amplitude).reshape(2, 4)
+    expected = torch.zeros_like(frontier)
+    for _ in range(hops):
+        expected = expected + frontier * (1-alpha)
+        frontier = frontier @ transition
+    expected = expected + frontier
+    nodes, groups, values = model._spread_inputs(dst, group, amplitude)
+    actual = torch.zeros(8).index_add(0, groups*4+nodes, values).reshape(2, 4)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual.sum(1), torch.tensor([2., 4.]))
+    params = (model.spread_raw, model.field.sparse_topology_logits)
+    a = torch.autograd.grad(actual.square().sum(), params, retain_graph=True)
+    b = torch.autograd.grad(expected.square().sum(), params)
+    for x, y in zip(a, b):
+        torch.testing.assert_close(x, y)
 
 
 def embed(model, time, positive=False):
@@ -117,7 +146,7 @@ def test_native_fnn_causality_gradients_and_memory_restore(state_dim, rank, spar
         torch.testing.assert_close(a, b)
 
 
-@pytest.mark.parametrize("name,state_dim,rank,sparse", [("FNN", 1, 0, False), ("FNN", 8, 0, False), ("FNN", 4, 4, False), ("FNN", 4, 0, True), ("GraphMixer", 1, 0, False)])
+@pytest.mark.parametrize("name,state_dim,rank,sparse", [("FNN", 1, 0, False), ("FNN", 8, 0, False), ("FNN", 4, 4, False), ("FNN", 4, 0, 2), ("GraphMixer", 1, 0, False)])
 def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, rank, sparse, tmp_path):
     """Offline integration check once the pinned checkout has been installed."""
     from experiments.dyglib.setup import install
@@ -145,7 +174,7 @@ def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, rank
     run = subprocess.run([sys.executable, "train_link_prediction.py", "--dataset_name", "college_msg",
                           "--model_name", name, "--num_epochs", "1", "--num_runs", "1",
                           "--batch_size", "50", "--num_neighbors", "5", "--gpu", "-1",
-                          "--fnn_state_dim", str(state_dim), "--fnn_spectral_rank", str(rank)] + (["--fnn_sparse_propagation"] if sparse else []),
+                          "--fnn_state_dim", str(state_dim), "--fnn_spectral_rank", str(rank), "--fnn_propagate", str(int(sparse))],
                          cwd=target, env=env, capture_output=True, text=True, timeout=90)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-6000:]
     assert list((target / "saved_results").rglob("*.json"))
@@ -157,12 +186,12 @@ def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, rank
                 "--dataset_name", "college_msg", "--model_name", name, "--num_runs", "1",
                 "--batch_size", "50", "--gpu", "-1", "--fnn_state_dim", str(state_dim),
                 "--fnn_spectral_rank", str(rank),
-                "--negative_sample_strategy", strategy] + (["--fnn_sparse_propagation"] if sparse else []),
+                "--negative_sample_strategy", strategy, "--fnn_propagate", str(int(sparse))],
                 env=dict(env, DYGLIB_DIR=str(target), PYTHON=sys.executable),
                 capture_output=True, text=True, timeout=90)
             assert evaluation.returncode == 0, evaluation.stdout[-2000:] + evaluation.stderr[-6000:]
-            suffix = "_sparseprop" if sparse else (f"_spectral{rank}" if rank else "")
-            assert list((target / "saved_results").rglob(f"{strategy}_negative_sampling_FNN_seed0{suffix}_dim{state_dim}.json"))
+            suffix = f"_propagate{sparse}" if sparse else (f"_spectral{rank}" if rank else "")
+            assert list((target / "saved_results").rglob(f"{strategy}_negative_sampling_FNN_seed0_lr0.0001_wd0.0_bs50{suffix}_dim{state_dim}.json"))
 
 
 def test_channel_initialization_and_validation():
@@ -201,6 +230,8 @@ def test_bridge_update_preserves_existing_data_and_preflights(tmp_path):
     update(tmp_path)
     assert data.read_text() == "preserve me"
     assert "fnn_state_dim" in train.read_text()
+    assert "_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}" in train.read_text()
+    assert "_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}" in evaluation.read_text()
 
 
 def test_event_spectral_matches_dense_wave_and_gradients():

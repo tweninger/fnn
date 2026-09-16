@@ -42,14 +42,17 @@ class FieldMemory(nn.Module):
 
 class FNN(nn.Module):
     def __init__(self, node_raw_features, edge_raw_features, neighbor_sampler, fnn_state_dim=1,
-                 fnn_spectral_rank=0, fnn_sparse_propagation=False, **kwargs):
+                 fnn_spectral_rank=0, fnn_propagate=0, **kwargs):
         super().__init__()
         if not isinstance(fnn_state_dim, int) or fnn_state_dim < 1:
             raise ValueError("fnn_state_dim must be a positive integer")
         self.state_dim = fnn_state_dim
         if not isinstance(fnn_spectral_rank, int) or fnn_spectral_rank < 0:
             raise ValueError("fnn_spectral_rank must be a nonnegative integer")
-        if fnn_sparse_propagation and fnn_spectral_rank:
+        if not isinstance(fnn_propagate, int) or isinstance(fnn_propagate, bool) or fnn_propagate < 0:
+            raise ValueError("fnn_propagate must be a nonnegative integer")
+        self.propagation_hops = fnn_propagate
+        if fnn_propagate and fnn_spectral_rank:
             raise ValueError("Choose sparse input propagation or spectral propagation, not both")
         n, width = node_raw_features.shape
         self.field = FieldNeuralNetwork(
@@ -73,7 +76,7 @@ class FNN(nn.Module):
         self.field.set_sparse_topology_candidates(torch.tensor(src, dtype=torch.long),
                                                   torch.tensor(dst, dtype=torch.long))
         self.memory_bank = FieldMemory(n, fnn_state_dim)
-        if fnn_sparse_propagation:
+        if fnn_propagate:
             keys = self.field.sparse_candidate_keys
             indices = torch.where(keys // n != keys % n)[0]
             self.register_buffer("spread_indices", indices, persistent=False)
@@ -131,11 +134,27 @@ class FNN(nn.Module):
         return torch.cat((h_src, v_src), -1), torch.cat((h_dst, v_dst), -1)
 
     def _spread_inputs(self, dst, group, amplitude):
-        """One-hop conservative input diffusion over train-only outgoing gates.
+        """Conservative K-hop input diffusion; aggregate by timestamp and node."""
+        n = self.memory_bank.h.shape[0]
 
-        This spreads new impulses, not existing fields, and never recurses.
-        Isolated recipients retain their entire impulse.
-        """
+        def coalesce(nodes, groups, values):
+            keys, inverse = torch.unique(groups*n + nodes, return_inverse=True)
+            return keys % n, keys // n, values.new_zeros(len(keys)).index_add(0, inverse, values)
+
+        dst, group, amplitude = coalesce(dst, group, amplitude)
+        kept_nodes, kept_groups, kept_values = [], [], []
+        for _ in range(self.propagation_hops):
+            nodes, groups, retained, targets, remote = self._spread_one_hop(dst, group, amplitude)
+            kept_nodes.append(nodes)
+            kept_groups.append(group)
+            kept_values.append(retained)
+            dst, group, amplitude = coalesce(targets, groups, remote)
+        kept_nodes.append(dst)
+        kept_groups.append(group)
+        kept_values.append(amplitude)
+        return coalesce(torch.cat(kept_nodes), torch.cat(kept_groups), torch.cat(kept_values))
+
+    def _spread_one_hop(self, dst, group, amplitude):
         starts = torch.searchsorted(self.spread_sources, dst)
         ends = torch.searchsorted(self.spread_sources, dst, right=True)
         counts = ends - starts
@@ -146,9 +165,7 @@ class FNN(nn.Module):
         totals = amplitude.new_zeros(len(dst)).index_add(0, event, weights)
         fraction = self.spread_raw.sigmoid() * (totals > 0)
         remote = amplitude[event] * fraction[event] * weights / totals[event].clamp_min(torch.finfo(weights.dtype).tiny)
-        return (torch.cat((dst, self.spread_targets[edge])),
-                torch.cat((group, group[event])),
-                torch.cat((amplitude * (1 - fraction), remote)))
+        return dst, group[event], amplitude * (1 - fraction), self.spread_targets[edge], remote
 
     def advance(self, src, dst, times):
         """Exact batched composition of the field's linear timestamp updates.
@@ -223,6 +240,6 @@ def MemoryModel(*args, model_name, **kwargs):
         return FNN(*args, **kwargs)
     kwargs.pop("fnn_state_dim", None)
     kwargs.pop("fnn_spectral_rank", None)
-    kwargs.pop("fnn_sparse_propagation", None)
+    kwargs.pop("fnn_propagate", None)
     from models.MemoryModel import MemoryModel as NativeMemoryModel
     return NativeMemoryModel(*args, model_name=model_name, **kwargs)
