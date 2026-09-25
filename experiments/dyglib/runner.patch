@@ -1,0 +1,220 @@
+--- a/utils/load_configs.py
++++ b/utils/load_configs.py
+@@ -14,16 +14,21 @@
+     parser.add_argument('--dataset_name', type=str, help='dataset to be used', default='wikipedia',
+                         choices=['college_msg', 'email_eu_core', 'sociopatterns', 'wikipedia', 'reddit', 'mooc', 'lastfm', 'myket', 'enron', 'SocialEvo', 'uci', 'Flights', 'CanParl', 'USLegis', 'UNtrade', 'UNvote', 'Contacts'])
+     parser.add_argument('--fnn_state_dim', type=int, default=1, help='FNN field channels (positive integer)')
++    parser.add_argument('--fnn_order', type=int, choices=[1, 2], default=2, help='FNN dynamics order')
+     parser.add_argument('--fnn_spectral_rank', type=int, default=0)
+     parser.add_argument('--fnn_propagate', '-fnn_propagate', type=int, default=0, help='FNN input propagation hops; 0 disables')
+-    parser.add_argument('--fnn_clock', choices=['event', 'event_exact', 'event_exact_unit', 'normalized', 'normalized_exact'], default='event', help='FNN event clock, batch-min normalized clock, or exact timestamp-grouped normalized clock')
++    parser.add_argument('--fnn_clock', choices=['event', 'event_exact', 'event_exact_unit', 'normalized', 'normalized_exact', 'normalized_substep', 'normalized_substep_unit'], default='event', help='FNN event clock, exact-transition event clock, unit-duration exact-event clock, normalized clock, exact normalized clock, duration-matched semi-implicit substeps, or semi-implicit normalized unit-clock substeps')
+     parser.add_argument('--fnn_time_cap', type=float, default=10.0, help='maximum normalized elapsed gap per FNN update')
+-    parser.add_argument('--fnn_ablation', choices=['none', 'fixed_topology', 'fixed_gates', 'fixed_physical', 'fixed_gates_physical'], default='none', help='freeze the training-observed topology or physical coefficients')
++    parser.add_argument('--fnn_ablation', choices=['none', 'fixed_topology', 'fixed_gates', 'fixed_physical', 'fixed_gates_physical', 'fixed_dynamics', 'fixed_input_scale', 'fixed_gamma', 'fixed_omega'], default='none', help='freeze the training-observed topology or physical coefficients')
+     parser.add_argument('--fnn_fixed_gate_value', type=float, default=0.5, help='constant sigmoid gate for fixed_gates ablation (strictly between 0 and 1)')
+     parser.add_argument('--fnn_gamma_init', type=float, default=0.15, help='positive initial FNN damping')
+     parser.add_argument('--fnn_omega_init', type=float, default=0.8, help='positive initial FNN frequency')
+     parser.add_argument('--fnn_input_scale_init', type=float, default=1.0, help='positive initial FNN input scale')
+-    parser.add_argument('--fnn_physical_weight_decay', type=float, default=None, help='FNN physical-parameter decay; defaults to --weight_decay')
++    parser.add_argument('--fnn_legacy_weight_decay', action='store_true', help='apply optimizer weight decay directly to raw FNN parameters (legacy ASHA protocol)')
++    parser.add_argument('--fnn_physical_weight_decay', type=float, default=None,
++                        help='FNN physical-parameter decay; defaults to --weight_decay')
++    parser.add_argument('--fnn_zero_velocity_readout', action='store_true',
++                        help='evaluation diagnostic: zero the trained second-order velocity readout after loading')
+     parser.add_argument('--batch_size', type=int, default=200, help='batch size')
+     parser.add_argument('--model_name', type=str, default='DyGFormer', help='name of the model, note that EdgeBank is only applicable for evaluation',
+                         choices=['FNN', 'JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'EdgeBank', 'TCL', 'GraphMixer', 'DyGFormer'])
+@@ -258,16 +263,19 @@
+     parser = argparse.ArgumentParser('Interface for the node classification task')
+     parser.add_argument('--dataset_name', type=str, help='dataset to be used', default='wikipedia', choices=['college_msg', 'email_eu_core', 'sociopatterns', 'wikipedia', 'reddit'])
+     parser.add_argument('--fnn_state_dim', type=int, default=1, help='FNN field channels (positive integer)')
++    parser.add_argument('--fnn_order', type=int, choices=[1, 2], default=2, help='FNN dynamics order')
+     parser.add_argument('--fnn_spectral_rank', type=int, default=0)
+     parser.add_argument('--fnn_propagate', '-fnn_propagate', type=int, default=0, help='FNN input propagation hops; 0 disables')
+-    parser.add_argument('--fnn_clock', choices=['event', 'event_exact', 'event_exact_unit', 'normalized', 'normalized_exact'], default='event', help='FNN event clock, batch-min normalized clock, or exact timestamp-grouped normalized clock')
++    parser.add_argument('--fnn_clock', choices=['event', 'event_exact', 'event_exact_unit', 'normalized', 'normalized_exact', 'normalized_substep', 'normalized_substep_unit'], default='event', help='FNN event clock, exact-transition event clock, unit-duration exact-event clock, normalized clock, exact normalized clock, duration-matched semi-implicit substeps, or semi-implicit normalized unit-clock substeps')
+     parser.add_argument('--fnn_time_cap', type=float, default=10.0, help='maximum normalized elapsed gap per FNN update')
+-    parser.add_argument('--fnn_ablation', choices=['none', 'fixed_topology', 'fixed_gates', 'fixed_physical', 'fixed_gates_physical'], default='none', help='freeze the training-observed topology or physical coefficients')
++    parser.add_argument('--fnn_ablation', choices=['none', 'fixed_topology', 'fixed_gates', 'fixed_physical', 'fixed_gates_physical', 'fixed_dynamics', 'fixed_input_scale', 'fixed_gamma', 'fixed_omega'], default='none', help='freeze the training-observed topology or physical coefficients')
+     parser.add_argument('--fnn_fixed_gate_value', type=float, default=0.5, help='constant sigmoid gate for fixed_gates ablation (strictly between 0 and 1)')
+     parser.add_argument('--fnn_gamma_init', type=float, default=0.15, help='positive initial FNN damping')
+     parser.add_argument('--fnn_omega_init', type=float, default=0.8, help='positive initial FNN frequency')
+     parser.add_argument('--fnn_input_scale_init', type=float, default=1.0, help='positive initial FNN input scale')
+-    parser.add_argument('--fnn_physical_weight_decay', type=float, default=None, help='FNN physical-parameter decay; defaults to --weight_decay')
++    parser.add_argument('--fnn_legacy_weight_decay', action='store_true', help='apply optimizer weight decay directly to raw FNN parameters (legacy ASHA protocol)')
++    parser.add_argument('--fnn_physical_weight_decay', type=float, default=None,
++                        help='FNN physical-parameter decay; defaults to --weight_decay')
+     parser.add_argument('--batch_size', type=int, default=200, help='batch size')
+     parser.add_argument('--model_name', type=str, default='DyGFormer', help='name of the model',
+                         choices=['FNN', 'JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'TCL', 'GraphMixer', 'DyGFormer'])
+--- a/train_link_prediction.py
++++ b/train_link_prediction.py
+@@ -68,7 +68,7 @@
+         set_random_seed(seed=run)
+ 
+         args.seed = run
+-        args.save_model_name = f'{args.model_name}_seed{args.seed}' + f'_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}' + (f'_propagate{args.fnn_propagate}' if args.model_name == 'FNN' and args.fnn_propagate > 0 else '') + (f'_spectral{args.fnn_spectral_rank}' if args.model_name == 'FNN' and args.fnn_spectral_rank > 0 else '') + (f'_dim{args.fnn_state_dim}' if args.model_name == 'FNN' and args.fnn_state_dim != 1 else '') + (f'_ntime_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized' else '') + ('_etime_exact' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact' else '') + ('_etime_exact_unit' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact_unit' else '') + (f'_ntime_exact_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized_exact' else '') + ('_physwd' if args.model_name == 'FNN' and args.weight_decay > 0 else '') + ('_fixtop' if args.model_name == 'FNN' and args.fnn_ablation == 'fixed_topology' else '') + ('_fixphys' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_physical', 'fixed_gates_physical'] else '') + (f'_fixgate{args.fnn_fixed_gate_value:g}' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_gates', 'fixed_gates_physical'] else '') + (f'_{args.run_tag}' if args.run_tag else '')
++        args.save_model_name = f'{args.model_name}_seed{args.seed}' + f'_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}' + (f'_propagate{args.fnn_propagate}' if args.model_name == 'FNN' and args.fnn_propagate > 0 else '') + (f'_spectral{args.fnn_spectral_rank}' if args.model_name == 'FNN' and args.fnn_spectral_rank > 0 else '') + (f'_dim{args.fnn_state_dim}' if args.model_name == 'FNN' and args.fnn_state_dim != 1 else '') + (f'_order{args.fnn_order}' if args.model_name == 'FNN' and args.fnn_order != 2 else '') + ('_etime_exact' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact' else '') + ('_etime_exact_unit' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact_unit' else '') + (f'_ntime_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized' else '') + (f'_ntime_exact_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized_exact' else '') + (('_physwd' if args.weight_decay > 0 else '') if args.model_name == 'FNN' and not args.fnn_legacy_weight_decay else '') + ('_fixtop' if args.model_name == 'FNN' and args.fnn_ablation == 'fixed_topology' else '') + ('_fixphys' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_physical', 'fixed_gates_physical'] else '') + (f'_fixgate{args.fnn_fixed_gate_value:g}' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_gates', 'fixed_gates_physical'] else '') + ('_legacywd' if args.model_name == 'FNN' and args.fnn_legacy_weight_decay else '') + (f'_{args.run_tag}' if args.run_tag else '')
+ 
+         # set up logger
+         logging.basicConfig(level=logging.INFO)
+@@ -105,7 +105,7 @@
+             dynamic_backbone = MemoryModel(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=train_neighbor_sampler,
+                                            time_feat_dim=args.time_feat_dim, model_name=args.model_name, num_layers=args.num_layers, num_heads=args.num_heads,
+                                            dropout=args.dropout, src_node_mean_time_shift=src_node_mean_time_shift, src_node_std_time_shift=src_node_std_time_shift,
+-                                           dst_node_mean_time_shift_dst=dst_node_mean_time_shift_dst, dst_node_std_time_shift=dst_node_std_time_shift, device=args.device, fnn_state_dim=args.fnn_state_dim, fnn_spectral_rank=args.fnn_spectral_rank, fnn_propagate=args.fnn_propagate, fnn_clock=args.fnn_clock, fnn_time_cap=args.fnn_time_cap, fnn_ablation=args.fnn_ablation, fnn_fixed_gate_value=args.fnn_fixed_gate_value, fnn_gamma_init=args.fnn_gamma_init, fnn_omega_init=args.fnn_omega_init, fnn_input_scale_init=args.fnn_input_scale_init)
++                                           dst_node_mean_time_shift_dst=dst_node_mean_time_shift_dst, dst_node_std_time_shift=dst_node_std_time_shift, device=args.device, fnn_state_dim=args.fnn_state_dim, fnn_order=args.fnn_order, fnn_spectral_rank=args.fnn_spectral_rank, fnn_propagate=args.fnn_propagate, fnn_clock=args.fnn_clock, fnn_time_cap=args.fnn_time_cap, fnn_ablation=args.fnn_ablation, fnn_fixed_gate_value=args.fnn_fixed_gate_value, fnn_gamma_init=args.fnn_gamma_init, fnn_omega_init=args.fnn_omega_init, fnn_input_scale_init=args.fnn_input_scale_init)
+         elif args.model_name == 'CAWN':
+             dynamic_backbone = CAWN(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=train_neighbor_sampler,
+                                     time_feat_dim=args.time_feat_dim, position_feat_dim=args.position_feat_dim, walk_length=args.walk_length,
+@@ -136,7 +136,7 @@
+         if physical_weight_decay < 0:
+             raise ValueError('fnn_physical_weight_decay must be nonnegative')
+         optimizer = create_optimizer(model=model, optimizer_name=args.optimizer, learning_rate=args.learning_rate, weight_decay=args.weight_decay)
+-        if args.model_name == 'FNN':
++        if args.model_name == 'FNN' and not args.fnn_legacy_weight_decay:
+             transformed_decay_parameters = model[0].transformed_decay_parameters()
+             transformed_decay_ids = {id(parameter) for parameter in transformed_decay_parameters}
+             optimizer.param_groups[0]['params'] = [
+@@ -145,6 +145,9 @@
+             ]
+             if transformed_decay_parameters:
+                 optimizer.add_param_group({'params': transformed_decay_parameters, 'weight_decay': 0.0})
++            logger.info(f'FNN decay: nonphysical={args.weight_decay:g}, physical={physical_weight_decay:g}')
++        elif args.model_name == 'FNN':
++            logger.info(f'FNN decay: legacy raw-parameter optimizer decay={args.weight_decay:g}')
+ 
+         model = convert_to_gpu(model, device=args.device)
+ 
+@@ -156,6 +159,9 @@
+                                        save_model_name=args.save_model_name, logger=logger, model_name=args.model_name)
+ 
+         loss_func = nn.BCELoss()
++        best_validation_epoch = None
++        best_val_metric_dict = {}
++        best_new_node_val_metric_dict = {}
+ 
+         for epoch in range(args.num_epochs):
+ 
+@@ -197,6 +203,15 @@
+                                                                           dst_node_ids=batch_neg_dst_node_ids,
+                                                                           node_interact_times=batch_node_interact_times,
+                                                                           num_neighbors=args.num_neighbors)
++                elif args.model_name == 'FNN' and model[0].clock in ['event_exact', 'event_exact_unit', 'normalized_exact', 'normalized_substep', 'normalized_substep_unit']:
++                    batch_src_node_embeddings, batch_dst_node_embeddings, \
++                        batch_neg_src_node_embeddings, batch_neg_dst_node_embeddings = \
++                        model[0].compute_link_prediction_batch(
++                            src_node_ids=batch_src_node_ids,
++                            dst_node_ids=batch_dst_node_ids,
++                            neg_src_node_ids=batch_neg_src_node_ids,
++                            neg_dst_node_ids=batch_neg_dst_node_ids,
++                            node_interact_times=batch_node_interact_times)
+                 elif args.model_name in ['JODIE', 'DyRep', 'TGN', 'FNN']:
+                     # note that negative nodes do not change the memories while the positive nodes change the memories,
+                     # we need to first compute the embeddings of negative nodes for memory-based models
+@@ -262,7 +277,7 @@
+ 
+                 loss = loss_func(input=predicts, target=labels)
+                 optimization_loss = (loss + model[0].transformed_weight_decay(physical_weight_decay)
+-                                     if args.model_name == 'FNN' else loss)
++                                     if args.model_name == 'FNN' and not args.fnn_legacy_weight_decay else loss)
+ 
+                 train_losses.append(loss.item())
+ 
+@@ -374,9 +389,21 @@
+ 
+             # select the best model based on all the validate metrics
+             val_metric_indicator = []
++            current_val_metric_dict = {}
++            current_new_node_val_metric_dict = {}
+             for metric_name in val_metrics[0].keys():
+-                val_metric_indicator.append((metric_name, np.mean([val_metric[metric_name] for val_metric in val_metrics]), True))
++                value = np.mean([val_metric[metric_name] for val_metric in val_metrics])
++                val_metric_indicator.append((metric_name, value, True))
++                current_val_metric_dict[metric_name] = value
++            for metric_name in new_node_val_metrics[0].keys():
++                current_new_node_val_metric_dict[metric_name] = np.mean(
++                    [metric[metric_name] for metric in new_node_val_metrics])
++            previous_best_metrics = dict(early_stopping.best_metrics)
+             early_stop = early_stopping.step(val_metric_indicator, model)
++            if early_stopping.best_metrics != previous_best_metrics:
++                best_validation_epoch = epoch + 1
++                best_val_metric_dict = current_val_metric_dict
++                best_new_node_val_metric_dict = current_new_node_val_metric_dict
+ 
+             if early_stop:
+                 break
+@@ -488,6 +515,9 @@
+             }
+         else:
+             result_json = {
++                "best validation epoch": best_validation_epoch,
++                "validate metrics": {metric_name: f'{value:.4f}' for metric_name, value in best_val_metric_dict.items()},
++                "new node validate metrics": {metric_name: f'{value:.4f}' for metric_name, value in best_new_node_val_metric_dict.items()},
+                 "test metrics": {metric_name: f'{test_metric_dict[metric_name]:.4f}' for metric_name in test_metric_dict},
+                 "new node test metrics": {metric_name: f'{new_node_test_metric_dict[metric_name]:.4f}' for metric_name in new_node_test_metric_dict}
+             }
+--- a/evaluate_models_utils.py
++++ b/evaluate_models_utils.py
+@@ -80,6 +80,15 @@
+                                                                       dst_node_ids=batch_neg_dst_node_ids,
+                                                                       node_interact_times=batch_node_interact_times,
+                                                                       num_neighbors=num_neighbors)
++            elif model_name == 'FNN' and model[0].clock in ['event_exact', 'event_exact_unit', 'normalized_exact', 'normalized_substep', 'normalized_substep_unit']:
++                batch_src_node_embeddings, batch_dst_node_embeddings, \
++                    batch_neg_src_node_embeddings, batch_neg_dst_node_embeddings = \
++                    model[0].compute_link_prediction_batch(
++                        src_node_ids=batch_src_node_ids,
++                        dst_node_ids=batch_dst_node_ids,
++                        neg_src_node_ids=batch_neg_src_node_ids,
++                        neg_dst_node_ids=batch_neg_dst_node_ids,
++                        node_interact_times=batch_node_interact_times)
+             elif model_name in ['JODIE', 'DyRep', 'TGN', 'FNN']:
+                 # note that negative nodes do not change the memories while the positive nodes change the memories,
+                 # we need to first compute the embeddings of negative nodes for memory-based models
+--- a/evaluate_link_prediction.py
++++ b/evaluate_link_prediction.py
+@@ -5,6 +5,7 @@
+ import numpy as np
+ import warnings
+ import json
++import torch
+ import torch.nn as nn
+ 
+ from models.TGAT import TGAT
+@@ -77,8 +78,10 @@
+             set_random_seed(seed=run)
+ 
+             args.seed = run
+-            args.load_model_name = f'{args.model_name}_seed{args.seed}' + f'_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}' + (f'_propagate{args.fnn_propagate}' if args.model_name == 'FNN' and args.fnn_propagate > 0 else '') + (f'_spectral{args.fnn_spectral_rank}' if args.model_name == 'FNN' and args.fnn_spectral_rank > 0 else '') + (f'_dim{args.fnn_state_dim}' if args.model_name == 'FNN' and args.fnn_state_dim != 1 else '') + (f'_ntime_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized' else '') + ('_etime_exact' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact' else '') + ('_etime_exact_unit' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact_unit' else '') + (f'_ntime_exact_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized_exact' else '') + ('_physwd' if args.model_name == 'FNN' and args.weight_decay > 0 else '') + ('_fixtop' if args.model_name == 'FNN' and args.fnn_ablation == 'fixed_topology' else '') + ('_fixphys' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_physical', 'fixed_gates_physical'] else '') + (f'_fixgate{args.fnn_fixed_gate_value:g}' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_gates', 'fixed_gates_physical'] else '') + (f'_{args.run_tag}' if args.run_tag else '')
++            args.load_model_name = f'{args.model_name}_seed{args.seed}' + f'_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}' + (f'_propagate{args.fnn_propagate}' if args.model_name == 'FNN' and args.fnn_propagate > 0 else '') + (f'_spectral{args.fnn_spectral_rank}' if args.model_name == 'FNN' and args.fnn_spectral_rank > 0 else '') + (f'_dim{args.fnn_state_dim}' if args.model_name == 'FNN' and args.fnn_state_dim != 1 else '') + (f'_order{args.fnn_order}' if args.model_name == 'FNN' and args.fnn_order != 2 else '') + ('_etime_exact' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact' else '') + ('_etime_exact_unit' if args.model_name == 'FNN' and args.fnn_clock == 'event_exact_unit' else '') + (f'_ntime_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized' else '') + (f'_ntime_exact_cap{args.fnn_time_cap:g}' if args.model_name == 'FNN' and args.fnn_clock == 'normalized_exact' else '') + (('_physwd' if args.weight_decay > 0 else '') if args.model_name == 'FNN' and not args.fnn_legacy_weight_decay else '') + ('_fixtop' if args.model_name == 'FNN' and args.fnn_ablation == 'fixed_topology' else '') + ('_fixphys' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_physical', 'fixed_gates_physical'] else '') + (f'_fixgate{args.fnn_fixed_gate_value:g}' if args.model_name == 'FNN' and args.fnn_ablation in ['fixed_gates', 'fixed_gates_physical'] else '') + ('_legacywd' if args.model_name == 'FNN' and args.fnn_legacy_weight_decay else '') + (f'_{args.run_tag}' if args.run_tag else '')
+             args.save_result_name = f'{args.negative_sample_strategy}_negative_sampling_{args.load_model_name}'
++            if args.fnn_zero_velocity_readout:
++                args.save_result_name += '_zero_velocity_readout'
+ 
+             # set up logger
+             logging.basicConfig(level=logging.INFO)
+@@ -115,7 +118,7 @@
+                 dynamic_backbone = MemoryModel(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=(get_neighbor_sampler(data=train_data, sample_neighbor_strategy=args.sample_neighbor_strategy, time_scaling_factor=args.time_scaling_factor, seed=0) if args.model_name == 'FNN' else full_neighbor_sampler),
+                                                time_feat_dim=args.time_feat_dim, model_name=args.model_name, num_layers=args.num_layers, num_heads=args.num_heads,
+                                                dropout=args.dropout, src_node_mean_time_shift=src_node_mean_time_shift, src_node_std_time_shift=src_node_std_time_shift,
+-                                               dst_node_mean_time_shift_dst=dst_node_mean_time_shift_dst, dst_node_std_time_shift=dst_node_std_time_shift, device=args.device, fnn_state_dim=args.fnn_state_dim, fnn_spectral_rank=args.fnn_spectral_rank, fnn_propagate=args.fnn_propagate, fnn_clock=args.fnn_clock, fnn_time_cap=args.fnn_time_cap, fnn_ablation=args.fnn_ablation, fnn_fixed_gate_value=args.fnn_fixed_gate_value, fnn_gamma_init=args.fnn_gamma_init, fnn_omega_init=args.fnn_omega_init, fnn_input_scale_init=args.fnn_input_scale_init)
++                                           dst_node_mean_time_shift_dst=dst_node_mean_time_shift_dst, dst_node_std_time_shift=dst_node_std_time_shift, device=args.device, fnn_state_dim=args.fnn_state_dim, fnn_order=args.fnn_order, fnn_spectral_rank=args.fnn_spectral_rank, fnn_propagate=args.fnn_propagate, fnn_clock=args.fnn_clock, fnn_time_cap=args.fnn_time_cap, fnn_ablation=args.fnn_ablation, fnn_fixed_gate_value=args.fnn_fixed_gate_value, fnn_gamma_init=args.fnn_gamma_init, fnn_omega_init=args.fnn_omega_init, fnn_input_scale_init=args.fnn_input_scale_init)
+             elif args.model_name == 'CAWN':
+                 dynamic_backbone = CAWN(node_raw_features=node_raw_features, edge_raw_features=edge_raw_features, neighbor_sampler=full_neighbor_sampler,
+                                         time_feat_dim=args.time_feat_dim, position_feat_dim=args.position_feat_dim, walk_length=args.walk_length,
+@@ -147,6 +150,13 @@
+                                            save_model_name=args.load_model_name, logger=logger, model_name=args.model_name)
+             early_stopping.load_checkpoint(model, map_location='cpu')
+ 
++            if args.model_name == 'FNN' and args.fnn_zero_velocity_readout:
++                if args.fnn_order != 2:
++                    raise ValueError('--fnn_zero_velocity_readout requires --fnn_order 2')
++                with torch.no_grad():
++                    model[0].projection.weight[:, args.fnn_state_dim:].zero_()
++                logger.info('FNN diagnostic: zeroed second-order velocity readout columns')
++
+             model = convert_to_gpu(model, device=args.device)
+             # put the node raw messages of memory-based models on device
+             if args.model_name == 'FNN':

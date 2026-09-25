@@ -13,10 +13,30 @@ from interactiondynamics.core.events import EventBatch
 from interactiondynamics.core.interfaces import ModelState
 
 
-def backbone(state_dim=1, rank=0, sparse=False):
+def backbone(state_dim=1, rank=0, sparse=False, clock="event", time_cap=10.0,
+             ablation="none", fixed_gate_value=0.5, gamma_init=0.15,
+             omega_init=0.8, input_scale_init=1.0, order=2):
     sampler = SimpleNamespace(nodes_neighbor_ids=[np.array([], dtype=int), np.array([2, 3]),
-                                                  np.array([1]), np.array([1])])
-    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim, fnn_spectral_rank=rank, fnn_propagate=int(sparse))
+                                                  np.array([1]), np.array([1])],
+                              nodes_neighbor_times=[np.array([], dtype=float), np.array([0., 10.]),
+                                                    np.array([0.]), np.array([10.])])
+    return FNN(np.zeros((4, 8)), np.ones((4, 1)), sampler, fnn_state_dim=state_dim,
+               fnn_spectral_rank=rank, fnn_propagate=int(sparse), fnn_clock=clock,
+               fnn_time_cap=time_cap, fnn_ablation=ablation,
+               fnn_fixed_gate_value=fixed_gate_value, fnn_gamma_init=gamma_init,
+               fnn_omega_init=omega_init, fnn_input_scale_init=input_scale_init,
+               fnn_order=order)
+
+
+def test_configurable_physical_initialization_uses_channel_scales():
+    model = backbone(4, gamma_init=0.075, omega_init=0.4, input_scale_init=0.5)
+    physical = model.field.physical_parameters()
+    scales = torch.logspace(-0.3, 0.3, 4)
+    torch.testing.assert_close(physical["gamma"], 0.075 * scales)
+    torch.testing.assert_close(physical["omega"], 0.4 * scales)
+    torch.testing.assert_close(physical["input_force_scale"], torch.tensor(0.5))
+    with pytest.raises(ValueError, match="must be positive"):
+        backbone(gamma_init=0.0)
 
 
 def test_sparse_inputs_dense_reference_and_gradients():
@@ -89,10 +109,10 @@ def embed(model, time, positive=False):
                                                          np.array([time]), edges_are_positive=positive)
 
 
-@pytest.mark.parametrize("state_dim", [1, 4, 16])
-def test_vectorized_field_composition_matches_steps_and_gradients(state_dim):
+@pytest.mark.parametrize("state_dim,order", [(1, 1), (4, 1), (1, 2), (4, 2), (16, 2)])
+def test_vectorized_field_composition_matches_steps_and_gradients(state_dim, order):
     torch.manual_seed(4)
-    model = backbone(state_dim)
+    model = backbone(state_dim, order=order)
     src = torch.ones(40, dtype=torch.long)
     dst = torch.randint(1, 4, (40,))
     times = torch.arange(40) // 3
@@ -161,6 +181,14 @@ def test_upstream_native_training_and_checkpoint_roundtrip(name, state_dim, rank
     before = (target / "train_link_prediction.py").read_text()
     update(target)
     assert (target / "train_link_prediction.py").read_text() == before
+    runner = (target / "train_link_prediction.py").read_text()
+    evaluator = (target / "evaluate_models_utils.py").read_text()
+    config = (target / "utils/load_configs.py").read_text()
+    assert "compute_link_prediction_batch(" in runner and "compute_link_prediction_batch(" in evaluator
+    assert "not args.fnn_legacy_weight_decay" in runner
+    assert "fnn_zero_velocity_readout" in (target / "evaluate_link_prediction.py").read_text()
+    assert "event_exact_unit" in config and "normalized_substep_unit" in config
+    assert "fixed_dynamics" in config
     directory = target / "processed_data/college_msg"
     directory.mkdir(parents=True)
     rng = np.random.RandomState(7)
@@ -209,29 +237,88 @@ def test_channel_initialization_and_validation():
             backbone(value)
 
 
-def test_bridge_update_preserves_existing_data_and_preflights(tmp_path):
+def test_dyglib_weight_decay_penalizes_positive_physical_values():
+    model = backbone(4)
+    transformed = model.transformed_decay_parameters()
+    transformed_ids = {id(parameter) for parameter in transformed}
+    assert id(model.field.gamma_raw) in transformed_ids
+    assert id(model.field.omega_raw) in transformed_ids
+    assert id(model.field.input_force_scale_raw) in transformed_ids
+    with torch.no_grad():
+        model.field.gamma_raw.zero_()
+        model.field.omega_raw.zero_()
+        model.field.input_force_scale_raw.zero_()
+
+    penalty = model.transformed_weight_decay(0.01)
+    penalty.backward()
+
+    # A positive gradient at raw=0 makes an optimizer step decrease the raw,
+    # so softplus(raw) moves below ln(2) toward the true minimum at zero.
+    assert model.field.gamma_raw.grad.min() > 0
+    assert model.field.omega_raw.grad.min() > 0
+    assert model.field.input_force_scale_raw.grad > 0
+
+
+def test_dyglib_fixed_topology_ablation_is_binary_and_frozen():
+    model = backbone(ablation="fixed_topology")
+    logits = model.field._topology_logits_for(
+        torch.tensor([1, 0]), torch.tensor([2, 3])
+    )
+    torch.testing.assert_close(logits.sigmoid(), torch.tensor([1.0, 0.0]), atol=1e-12, rtol=0)
+    assert not model.field.sparse_topology_logits.requires_grad
+    assert model.field.gamma_raw.requires_grad
+
+
+def test_dyglib_fixed_gates_are_constant_for_seen_and_unseen_pairs():
+    for value in (0.5, 0.25):
+        model = backbone(ablation="fixed_gates", fixed_gate_value=value)
+        logits = model.field._topology_logits_for(
+            torch.tensor([1, 0]), torch.tensor([2, 3])
+        )
+        torch.testing.assert_close(logits.sigmoid(), torch.full((2,), value))
+        assert not model.field.sparse_topology_logits.requires_grad
+        assert model.field.gamma_raw.requires_grad
+    with pytest.raises(ValueError, match="strictly between"):
+        backbone(ablation="fixed_gates", fixed_gate_value=1.0)
+
+
+def test_dyglib_fixed_physical_ablation_freezes_coefficients_only():
+    model = backbone(ablation="fixed_physical")
+    params = model.field.physical_parameters()
+    torch.testing.assert_close(params["gamma"], torch.tensor(0.15))
+    torch.testing.assert_close(params["omega"], torch.tensor(0.8))
+    torch.testing.assert_close(params["input_force_scale"], torch.tensor(1.0))
+    assert not model.field.gamma_raw.requires_grad
+    assert not model.field.omega_raw.requires_grad
+    assert not model.field.input_force_scale_raw.requires_grad
+    assert model.field.sparse_topology_logits.requires_grad
+
+
+def test_dyglib_fixed_gates_physical_ablation_freezes_both():
+    model = backbone(ablation="fixed_gates_physical", fixed_gate_value=0.5)
+    logits = model.field._topology_logits_for(
+        torch.tensor([1, 0]), torch.tensor([2, 3])
+    )
+    torch.testing.assert_close(logits.sigmoid(), torch.full((2,), 0.5))
+    assert not model.field.sparse_topology_logits.requires_grad
+    assert not model.field.gamma_raw.requires_grad
+    assert not model.field.omega_raw.requires_grad
+    assert not model.field.input_force_scale_raw.requires_grad
+
+
+def test_bridge_update_preflights_missing_runner_anchor(tmp_path):
     from experiments.dyglib.setup import COMMIT, update
     (tmp_path / "FNN_PATCH.txt").write_text(COMMIT)
     (tmp_path / "utils").mkdir()
     config = tmp_path / "utils/load_configs.py"
     config.write_text("    parser.add_argument('--batch_size', type=int)\n")
     train = tmp_path / "train_link_prediction.py"
-    original = "dst_node_std_time_shift=dst_node_std_time_shift, device=args.device)\nf'{args.model_name}_seed{args.seed}'"
-    train.write_text(original)
-    evaluation = tmp_path / "evaluate_link_prediction.py"
-    evaluation.write_text("unrecognized checkout")
+    train.write_text("dst_node_std_time_shift=dst_node_std_time_shift, device=args.device)\n")
+    (tmp_path / "evaluate_link_prediction.py").write_text("unrecognized checkout")
     with pytest.raises(SystemExit, match="anchors"):
         update(tmp_path)
     assert "fnn_state_dim" not in config.read_text()
-    assert train.read_text() == original
-    evaluation.write_text(original)
-    data = tmp_path / "keep-result.json"
-    data.write_text("preserve me")
-    update(tmp_path)
-    assert data.read_text() == "preserve me"
-    assert "fnn_state_dim" in train.read_text()
-    assert "_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}" in train.read_text()
-    assert "_lr{args.learning_rate}_wd{args.weight_decay}_bs{args.batch_size}" in evaluation.read_text()
+    assert "fnn_state_dim" not in train.read_text()
 
 
 def test_event_spectral_matches_dense_wave_and_gradients():
@@ -280,6 +367,90 @@ def test_spectral_zero_strength_and_event_gap_invariance():
     torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
     assert actual[0].abs().sum() > 0  # Isolated nodes retain their local drive.
     assert not model.basis.requires_grad
+
+
+def test_normalized_clock_uses_elapsed_time_caps_gaps_and_restores_time():
+    near = backbone(4, clock="normalized", time_cap=2.0)
+    far = backbone(4, clock="normalized", time_cap=2.0)
+    far.load_state_dict(near.state_dict())
+    torch.testing.assert_close(near.time_scale, torch.tensor(10., dtype=torch.float64))
+    src, dst = torch.tensor([1, 1]), torch.tensor([2, 2])
+    near.advance(src, dst, torch.tensor([0., 10.], dtype=torch.float64))
+    far.advance(src, dst, torch.tensor([0., 1000.], dtype=torch.float64))
+    assert not torch.equal(near.memory_bank.h, far.memory_bank.h)
+
+    capped = backbone(4, clock="normalized", time_cap=2.0)
+    capped.load_state_dict(near.state_dict())
+    capped.memory_bank.__init_memory_bank__()
+    capped.advance(src, dst, torch.tensor([0., 20.], dtype=torch.float64))
+    torch.testing.assert_close(far.memory_bank.h, capped.memory_bank.h)
+    torch.testing.assert_close(far.memory_bank.v, capped.memory_bank.v)
+    assert torch.isfinite(far.memory_bank.h).all()
+
+    loss = near.memory_bank.h.square().sum() + near.memory_bank.v.square().sum()
+    loss.backward()
+    assert near.field.gamma_raw.grad is not None
+    saved = near.memory_bank.backup_memory_bank()
+    before = near.memory_bank.last_update_time.clone()
+    near.memory_bank.__init_memory_bank__()
+    near.memory_bank.reload_memory_bank(saved)
+    torch.testing.assert_close(near.memory_bank.last_update_time, before)
+
+
+def test_normalized_clock_evolves_during_quiet_query_gaps():
+    model = backbone(clock="normalized")
+    embed(model, 0, positive=True)
+    embed(model, 10)
+    after_event = model.memory_bank.h.clone()
+    embed(model, 20)
+    assert not torch.equal(model.memory_bank.h, after_event)
+    assert model.memory_bank.last_update_time == 20
+
+
+@pytest.mark.parametrize("clock", [
+    "normalized_exact", "event_exact", "event_exact_unit",
+    "normalized_substep", "normalized_substep_unit",
+])
+def test_exact_clock_scores_timestamp_groups_causally(clock):
+    exact = backbone(clock=clock)
+    batch_min = backbone(clock="normalized")
+    batch_min.load_state_dict(exact.state_dict(), strict=False)
+    src = np.array([1, 1])
+    dst = np.array([2, 2])
+    neg_dst = np.array([3, 3])
+    times = np.array([0., 10.])
+
+    exact_embeddings = exact.compute_link_prediction_batch(src, dst, src, neg_dst, times)
+    batch_min.compute_src_dst_node_temporal_embeddings(src, neg_dst, times,
+                                                       edges_are_positive=False)
+    batch_min_embeddings = batch_min.compute_src_dst_node_temporal_embeddings(
+        src, dst, times, edges_are_positive=True)
+    # Batch-min scoring uses the same pre-event state at both timestamps.
+    torch.testing.assert_close(batch_min_embeddings[1][0], batch_min_embeddings[1][1])
+    # Exact scoring exposes the time-0 event to the time-10 query, but not to time 0.
+    assert not torch.equal(exact_embeddings[1][0], exact_embeddings[1][1])
+    assert exact.memory_bank.node_raw_messages[2].tolist() == [10.]
+    loss = sum(value.square().sum() for value in exact_embeddings)
+    loss.backward()
+    assert exact.field.gamma_raw.grad is not None
+
+
+@pytest.mark.parametrize("clock", [
+    "normalized_exact", "event_exact", "event_exact_unit",
+    "normalized_substep", "normalized_substep_unit",
+])
+def test_exact_clock_never_consumes_same_time_events(clock):
+    model = backbone(clock=clock)
+    first = model.compute_link_prediction_batch(np.array([1]), np.array([2]),
+                                                np.array([1]), np.array([3]), np.array([0.]))
+    second = model.compute_link_prediction_batch(np.array([1]), np.array([2]),
+                                                 np.array([1]), np.array([3]), np.array([0.]))
+    for before, after in zip(first, second):
+        torch.testing.assert_close(before, after)
+    assert model.memory_bank.h.count_nonzero() == 0
+    model.compute_link_prediction_batch(np.array([1]), np.array([2]),
+                                        np.array([1]), np.array([3]), np.array([10.]))
+    assert model.memory_bank.h.count_nonzero() > 0
 
 
 def test_spectral_propagation_without_incoming_event():
